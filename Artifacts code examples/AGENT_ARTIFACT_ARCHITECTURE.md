@@ -1,11 +1,39 @@
-# Agent Artifact Architecture
+Purpose
 
-Content path:
+This utility exists because binary artifacts should not travel through MCP.
 
-`ChatGPT Agent -> MCP -> Netlify Blobs`
+Content:
+ChatGPT Agent
+→ MCP
+→ Blob JSON
 
-Binary artifact path:
+Artifacts:
+Agent SDK
+→ OpenAI APIs
+→ saveArtifactBytes()
+→ ArtifactReference
 
-`Netlify Agent SDK workflow -> OpenAI API/tool -> saveArtifactBytes() -> Netlify Blobs`
+Responsibilities
 
-Do not pass generated binary bytes through MCP. Internal generation does not require upload tokens.
+ChatGPT Agent:
+- articles
+- briefs
+- metadata
+- workflow records
+
+Artifact Utility:
+- images
+- PDFs
+- binary assets
+- artifact indexing
+
+Future Direction
+
+The utility is expected to become a shared service for multiple projects.
+
+projectId
+→ OpenAI configuration
+→ blob namespace
+→ workflow permissions
+
+The worker should execute an Agent SDK workflow, even if v1 contains only a single image generation tool.
