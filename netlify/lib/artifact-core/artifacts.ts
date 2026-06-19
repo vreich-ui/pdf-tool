@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
-import { ARTIFACT_INDEX_STORE_NAME, readArtifactIndexKeys, writeArtifactReferenceIndexes } from "./artifact-index.js";
+import { artifactIndexStore, readArtifactIndexKeys, writeArtifactReferenceIndexes } from "./artifact-index.js";
 
 export const ARTIFACT_STORE_NAME = "project-artifacts";
 
@@ -12,6 +12,7 @@ export interface ArtifactReference {
   artifactId: string;
   artifactKind: ArtifactKind;
   filename: string;
+  slot?: string;
   contentType: string;
   size: number;
   sha256: string;
@@ -26,6 +27,7 @@ export interface SaveArtifactBytesInput {
   requestId: string;
   artifactKind: ArtifactKind;
   filename: string;
+  slot?: string;
   contentType: string;
   bytes: Buffer | Uint8Array;
   sha256?: string;
@@ -85,7 +87,7 @@ export async function retainedArtifactIndexKeys(): Promise<{ requestArtifacts: s
 export async function readArtifactIndex(projectId: string): Promise<ArtifactReference[]> {
   void projectId;
   const keys = await readArtifactIndexKeys("request-artifacts/");
-  const store = await projectBlobStore(ARTIFACT_INDEX_STORE_NAME);
+  const store = await artifactIndexStore();
   const references = await Promise.all(keys.map((key) => store.get(key, { type: "json" }).catch(() => null)));
   return references.filter((value): value is ArtifactReference => Boolean(value && typeof value === "object"));
 }
@@ -97,6 +99,7 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
   const projectId = sanitizePathPart(input.projectId);
   const requestId = sanitizePathPart(input.requestId);
   const filename = sanitizePathPart(input.filename);
+  const slot = input.slot ? sanitizePathPart(input.slot) : undefined;
   const sha256 = input.sha256 ?? sha256Hex(bytes);
   const createdAt = new Date().toISOString();
   const artifactId = `${input.artifactKind}-${sha256.slice(0, 16)}`;
@@ -110,6 +113,7 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
     artifactId,
     artifactKind: input.artifactKind,
     filename: storedFilename,
+    slot,
     contentType: input.contentType,
     size: bytes.byteLength,
     sha256,
@@ -126,6 +130,7 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
       requestId: input.requestId,
       artifactKind: input.artifactKind,
       filename: storedFilename,
+      slot: slot ?? "",
       contentType: input.contentType,
       sha256,
       label: input.label ?? ""

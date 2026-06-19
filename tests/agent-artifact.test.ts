@@ -1,13 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
+import { projectBlobStore, projectBlobStoreCallLog, resetMemoryBlobStores, setMemoryBlobStoreList } from "../netlify/lib/blob-store.js";
 import { createArtifactJob, readArtifactJob, updateArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { handler as statusHandler } from "../netlify/functions/agent-artifact-job-status.js";
-import { handler as jobHandler, triggerWorker } from "../netlify/functions/agent-artifact-job.js";
+import { handler as jobHandler } from "../netlify/functions/agent-artifact-job.js";
+import { triggerWorker } from "../netlify/lib/agent-artifact-worker-trigger.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
 import { executeAgentArtifactWorkflow } from "../netlify/lib/agent-artifact-workflow.js";
 import { generateImageArtifactBytes, imageGenerationRequest } from "../netlify/lib/agent-image-generation.js";
 import { readArtifactIndex, retainedArtifactIndexKeys } from "../netlify/lib/artifact-core/index.js";
+import { artifactFilenamePointerKey, artifactSlotPointerKey, latestArtifactSlotPointerKey, readArtifactIndexKeys, readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "../netlify/lib/artifact-core/artifact-index.js";
+import { handler as mcpCreateHandler } from "../netlify/functions/create-agent-artifact-job.js";
+import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
+import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-artifact-by-slot.js";
+import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
+import { workflowRecordKey, AGENT_ARTIFACT_WORKFLOW_STORE } from "../netlify/lib/agent-artifact-workflow-records.js";
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
@@ -256,4 +263,160 @@ test("failed generation updates job as failed", async () => {
 test("output over max bytes is rejected", async () => {
   const tooLarge = Buffer.alloc(20).toString("base64");
   await assert.rejects(() => generateImageArtifactBytes({ prompt: "x", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
+});
+
+
+test("MCP create_agent_artifact_job returns metadata only and no bytes", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.URL = "https://example.netlify.app";
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await mcpCreateHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-mcp", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], workflowId: "wf-1", agentName: "content-agent" })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    assert.ok(body.jobId);
+    assert.equal(body.projectId, "dr-lurie");
+    assert.equal(body.requestId, "req-mcp");
+    assert.equal(body.artifactKind, "image");
+    assert.equal(body.destination.slot, "hero");
+    assert.equal(body.destination.filename, "hero.png");
+    assert.equal(body.polling.input.projectId, "dr-lurie");
+    assert.equal(body.polling.tool, "get_agent_artifact_job_status");
+    assert.equal("bytes" in body, false);
+    assert.equal("b64_json" in body, false);
+    assert.equal("artifact" in body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("MCP get_agent_artifact_job_status handles states and returns ArtifactReference only on complete", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-status", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  let response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId } });
+  assert.equal(JSON.parse(response.body).status, "pending");
+  await updateArtifactJob(job, { status: "running" });
+  response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(JSON.parse(response.body).status, "running");
+  const artifact = { projectId: "dr-lurie", requestId: "req-status", artifactId: "image-1", artifactKind: "image" as const, filename: "x.png", contentType: "image/png", size: 12, sha256: "abc", blobKey: "k", tags: [], createdAt: new Date().toISOString() };
+  const running = await readArtifactJob("dr-lurie", job.jobId);
+  await updateArtifactJob(running!, { status: "complete", artifact });
+  response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId } });
+  const complete = JSON.parse(response.body);
+  assert.equal(complete.status, "complete");
+  assert.deepEqual(complete.artifact, artifact);
+  assert.equal("bytes" in complete, false);
+  assert.equal("b64_json" in complete, false);
+  const failed = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-failed", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  await updateArtifactJob(failed, { status: "failed", error: "safe failure" });
+  response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: failed.jobId } });
+  assert.equal(JSON.parse(response.body).error, "safe failure");
+});
+
+test("MCP artifact endpoints require auth", async () => {
+  let response = await mcpCreateHandler({ httpMethod: "POST", headers: {}, body: "{}" });
+  assert.equal(response.statusCode, 401);
+  response = await mcpStatusHandler({ httpMethod: "GET", headers: {}, queryStringParameters: { projectId: "dr-lurie", jobId: "x" } });
+  assert.equal(response.statusCode, 401);
+});
+
+test("workflow integration stores jobId and ArtifactReference when workflow metadata exists", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, workflowId: "wf-1", agentName: "content-agent" });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const store = await projectBlobStore(AGENT_ARTIFACT_WORKFLOW_STORE, { consistency: "strong" });
+  const record = await store.get(workflowRecordKey("dr-lurie", "req-workflow", "wf-1"), { type: "json" }) as { jobs: Array<{ jobId: string; destination: { slot?: string } }>; artifacts: Array<{ artifactKind: string; slot?: string }> };
+  assert.equal(record.jobs[0].jobId, job.jobId);
+  assert.equal(record.jobs[0].destination.slot, "hero");
+  assert.equal(record.artifacts[0].artifactKind, "image");
+  assert.equal(record.artifacts[0].slot, "hero");
+});
+
+test("readArtifactIndexKeys handles AsyncIterable Netlify paginated list output", async () => {
+  setMemoryBlobStoreList("project-artifact-index", async () => ({
+    async *[Symbol.asyncIterator]() {
+      yield { blobs: [{ key: "request-artifacts/a/1.json" }, { key: "request-artifacts/a/ignore.txt" }] };
+      yield { blobs: [{ key: "request-artifacts/a/2.json" }] };
+    }
+  }));
+  const keys = await readArtifactIndexKeys("request-artifacts/");
+  assert.deepEqual(keys, ["request-artifacts/a/1.json", "request-artifacts/a/2.json"]);
+});
+
+test("job store uses strong consistency for mutable job state", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-strong", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  await readArtifactJob("dr-lurie", job.jobId);
+  await updateArtifactJob(job, { status: "running" });
+  const calls = projectBlobStoreCallLog().filter((call) => call.name === "agent-artifact-jobs");
+  assert.ok(calls.length >= 3);
+  assert.ok(calls.every((call) => call.consistency === "strong"));
+});
+
+test("Agent SDK tool output returns metadata only and not Buffer/base64 bytes", async () => {
+  let toolOutput: unknown;
+  let capturedTools: Array<{ execute: () => Promise<unknown> }> = [];
+  class CapturingAgent { constructor(input: { tools?: Array<{ execute: () => Promise<unknown> }> }) { capturedTools = input.tools ?? []; } }
+  class FakeRunner { async run() { toolOutput = await capturedTools[0].execute(); } }
+  const fakeSdk = { Agent: CapturingAgent, Runner: FakeRunner, tool(definition: { execute: () => Promise<unknown> }) { return { execute: definition.execute }; } };
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-tool-output", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  const result = await executeAgentArtifactWorkflow(job, { agentSdk: fakeSdk as never });
+  assert.deepEqual(result.bytes, pngBytes);
+  assert.equal(Buffer.isBuffer(toolOutput), false);
+  assert.equal((toolOutput as { bytes?: unknown }).bytes, undefined);
+  assert.equal((toolOutput as { b64_json?: unknown }).b64_json, undefined);
+  assert.equal((toolOutput as { ok?: boolean }).ok, true);
+  assert.equal((toolOutput as { contentType?: string }).contentType, "image/png");
+});
+
+
+test("slot is accepted and invalid slot is rejected", async () => {
+  const valid = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-slot-valid", artifactKind: "image", prompt: "x", filename: "slot.png", slot: "hero_slot-1", tags: [], label: undefined });
+  assert.equal(valid.slot, "hero_slot-1");
+
+  const response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-slot-invalid", artifactKind: "image", prompt: "x", filename: "slot.png", slot: "../bad", tags: [] })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body).issues[0].path, ["slot"]);
+});
+
+test("slot and filename indexes are written and lookup endpoints return ArtifactReference only", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-lookup", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const stored = await readArtifactJob("dr-lurie", job.jobId);
+  const artifact = stored?.artifact;
+  assert.ok(artifact);
+  if (!artifact) throw new Error("expected artifact");
+  assert.equal(artifact.slot, "hero");
+
+  const bySlot = await readArtifactReferenceBySlot("req-lookup", "hero");
+  const byFilename = await readArtifactReferenceByFilename("req-lookup", artifact.filename);
+  assert.deepEqual(bySlot, artifact);
+  assert.deepEqual(byFilename, artifact);
+
+  const bySlotKeys = await readArtifactIndexKeys("by-slot/");
+  const byFilenameKeys = await readArtifactIndexKeys("by-filename/");
+  const latestBySlotKeys = await readArtifactIndexKeys("latest-by-slot/");
+  assert.deepEqual(bySlotKeys, [artifactSlotPointerKey("req-lookup", "hero")]);
+  assert.deepEqual(byFilenameKeys, [artifactFilenamePointerKey("req-lookup", artifact.filename)]);
+  assert.deepEqual(latestBySlotKeys, [latestArtifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
+
+  const serializedArtifact = JSON.parse(JSON.stringify(artifact));
+  let lookup = await mcpBySlotHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { requestId: "req-lookup", slot: "hero" } });
+  let body = JSON.parse(lookup.body);
+  assert.deepEqual(body.artifact, serializedArtifact);
+  assert.equal("bytes" in body, false);
+  assert.equal("b64_json" in body, false);
+
+  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ requestId: "req-lookup", filename: artifact.filename }) });
+  body = JSON.parse(lookup.body);
+  assert.deepEqual(body.artifact, serializedArtifact);
+  assert.equal("bytes" in body, false);
+  assert.equal("b64_json" in body, false);
 });

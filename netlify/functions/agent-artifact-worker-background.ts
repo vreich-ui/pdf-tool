@@ -1,4 +1,5 @@
 import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js";
+import { appendArtifactReferenceToWorkflow } from "../lib/agent-artifact-workflow-records.js";
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { saveArtifactBytes, sha256Hex } from "../lib/artifact-core/index.js";
 
@@ -49,6 +50,7 @@ export async function handler(event: FunctionEvent) {
       requestId: runningJob.requestId,
       artifactKind: runningJob.artifactKind,
       filename: runningJob.filename,
+      slot: runningJob.slot,
       contentType: generated.contentType,
       bytes: generated.bytes,
       sha256,
@@ -56,6 +58,7 @@ export async function handler(event: FunctionEvent) {
       label: runningJob.label
     });
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifact, error: undefined });
+    await appendArtifactReferenceToWorkflow(complete, artifact);
     return jsonResponse(200, { jobId: complete.jobId, status: complete.status, artifact: complete.artifact });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });
