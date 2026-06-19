@@ -1,10 +1,14 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
-import type { ArtifactKind, ArtifactReference } from "./artifacts.js";
+import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
-export const SUPPORTED_PROJECT_IDS = new Set(["dr-lurie"]);
+export const DEFAULT_PROJECT_ID = "dr-lurie";
+
+export function supportedProjectIds(): Set<string> {
+  return new Set([DEFAULT_PROJECT_ID, process.env.ARTIFACT_AGENT_PROJECT_ID].filter((value): value is string => Boolean(value)));
+}
 
 export interface ArtifactJobRequest {
   projectId: string;
@@ -19,6 +23,42 @@ export interface ArtifactJobRequest {
 export interface ValidationIssue {
   path: string[];
   message: string;
+}
+
+
+async function zodSafeParse(input: unknown): Promise<{ success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } } | undefined> {
+  try {
+    const { z } = await import("zod");
+    const schema = z.object({
+      projectId: z.string().min(1),
+      requestId: z.string().min(1),
+      artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
+      prompt: z.string().min(1),
+      filename: z.string().min(1),
+      tags: z.array(z.string()).default([]),
+      label: z.string().optional()
+    }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
+      if (!supportedProjectIds().has(value.projectId)) {
+        ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
+      }
+      if (value.artifactKind !== "image") {
+        ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "Only image artifact generation is currently supported" });
+      }
+    });
+    const result = schema.safeParse(input);
+    if (result.success) return { success: true, data: result.data as ArtifactJobRequest };
+    return {
+      success: false,
+      error: {
+        issues: result.error.issues.map((issue: { path: Array<string | number>; message: string }) => ({
+          path: issue.path.map(String),
+          message: issue.message
+        }))
+      }
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export const artifactJobRequestSchema = {
@@ -38,7 +78,7 @@ export const artifactJobRequestSchema = {
     const label = typeof value.label === "string" ? value.label : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
-    if (projectId && !SUPPORTED_PROJECT_IDS.has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
+    if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
@@ -49,6 +89,11 @@ export const artifactJobRequestSchema = {
     return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, tags, label } };
   }
 };
+
+
+export async function validateArtifactJobRequest(input: unknown): Promise<{ success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } }> {
+  return await zodSafeParse(input) ?? artifactJobRequestSchema.safeParse(input);
+}
 
 export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed";
 

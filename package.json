@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@netlify/blobs": "^9.1.2",
+    "@openai/agents": "^0.1.0",
     "openai": "^6.10.0",
     "zod": "^4.1.13"
   },

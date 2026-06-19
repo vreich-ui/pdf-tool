@@ -1,6 +1,6 @@
-import { generateImageArtifactBytes } from "../lib/agent-image-generation.js";
+import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js";
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
-import { saveArtifactBytes, sha256Hex } from "../lib/artifacts.js";
+import { saveArtifactBytes, sha256Hex } from "../lib/artifact-core/index.js";
 
 type FunctionEvent = {
   httpMethod: string;
@@ -37,10 +37,10 @@ export async function handler(event: FunctionEvent) {
   try {
     runningJob = await updateArtifactJob(job, { status: "running", error: undefined });
     if (runningJob.artifactKind !== "image") {
-      throw new Error("Only image artifact generation is currently supported");
+      throw new Error("Only image artifact generation is currently supported; PDF artifacts are not enabled yet");
     }
 
-    const generated = await generateImageArtifactBytes({ prompt: runningJob.prompt });
+    const generated = await executeAgentArtifactWorkflow(runningJob);
     const sha256 = sha256Hex(generated.bytes);
     const artifact = await saveArtifactBytes({
       projectId: runningJob.projectId,

@@ -5,8 +5,9 @@ import { createArtifactJob, readArtifactJob, updateArtifactJob } from "../netlif
 import { handler as statusHandler } from "../netlify/functions/agent-artifact-job-status.js";
 import { handler as jobHandler, triggerWorker } from "../netlify/functions/agent-artifact-job.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
+import { executeAgentArtifactWorkflow } from "../netlify/lib/agent-artifact-workflow.js";
 import { generateImageArtifactBytes, imageGenerationRequest } from "../netlify/lib/agent-image-generation.js";
-import { readArtifactIndex } from "../netlify/lib/artifacts.js";
+import { readArtifactIndex, retainedArtifactIndexKeys } from "../netlify/lib/artifact-core/index.js";
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
@@ -15,6 +16,7 @@ function env() {
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
+  process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.URL;
 }
@@ -51,7 +53,7 @@ test("job endpoint creates pending job", async () => {
   assert.ok(body.jobId);
 });
 
-test("job endpoint triggers worker with auth", async () => {
+test("job endpoint triggers worker with auth and awaits trigger", async () => {
   const calls: Array<{ url: string; init: { headers: Record<string, string> } }> = [];
   const originalFetch = globalThis.fetch;
   process.env.URL = "https://example.netlify.app";
@@ -69,6 +71,29 @@ test("job endpoint triggers worker with auth", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].init.headers.authorization, "Bearer test-token");
   assert.equal(calls[0].init.headers["content-type"], "application/json");
+});
+
+test("job endpoint awaits worker trigger", async () => {
+  const originalFetch = globalThis.fetch;
+  let workerCalled = false;
+  process.env.URL = "https://example.netlify.app";
+  globalThis.fetch = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    workerCalled = true;
+    return {} as Response;
+  }) as typeof fetch;
+
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-awaited", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
+    });
+    assert.equal(response.statusCode, 202);
+    assert.equal(workerCalled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("status endpoint returns pending, complete, and failed jobs", async () => {
@@ -93,6 +118,14 @@ test("mock OpenAI image response returns base64 bytes", async () => {
   });
   assert.deepEqual(generated.bytes, pngBytes);
   assert.equal(generated.contentType, "image/png");
+});
+
+test("Agent SDK workflow executes image generation tool path", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-agent", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  const result = await executeAgentArtifactWorkflow(job, { skipAgentSdkImport: true });
+  assert.equal(result.workflowExecuted, true);
+  assert.equal(result.toolInvoked, "generate_image_artifact");
+  assert.deepEqual(result.bytes, pngBytes);
 });
 
 test("OPENAI_API_KEY is required", async () => {
@@ -123,6 +156,16 @@ test("worker saves image artifact and retained index is updated", async () => {
   const index = await readArtifactIndex("dr-lurie");
   assert.equal(index.length, 1);
   assert.equal(index[0].artifactId, stored?.artifact?.artifactId);
+
+  const retainedKeys = await retainedArtifactIndexKeys();
+  assert.equal(retainedKeys.requestArtifacts.length, 1);
+  assert.equal(retainedKeys.byRequest.length, 1);
+  assert.equal(retainedKeys.byKind.length, 1);
+  assert.equal(retainedKeys.byTag.length, 1);
+  assert.match(retainedKeys.requestArtifacts[0], /^request-artifacts\//);
+  assert.match(retainedKeys.byRequest[0], /^by-request\//);
+  assert.match(retainedKeys.byKind[0], /^by-kind\/image\//);
+  assert.match(retainedKeys.byTag[0], /^by-tag\/hero\//);
 });
 
 test("failed generation updates job as failed", async () => {
