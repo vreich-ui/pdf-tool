@@ -19,6 +19,7 @@ function env() {
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.URL;
+  delete process.env.DEPLOY_PRIME_URL;
 }
 
 test.beforeEach(() => {
@@ -42,15 +43,21 @@ test("worker rejects GET trigger", async () => {
 });
 
 test("job endpoint creates pending job", async () => {
-  const response = await jobHandler({
-    httpMethod: "POST",
-    headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: ["hero"], label: "Hero" })
-  });
-  assert.equal(response.statusCode, 202);
-  const body = JSON.parse(response.body);
-  assert.equal(body.status, "pending");
-  assert.ok(body.jobId);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: ["hero"], label: "Hero" })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    assert.equal(body.status, "pending");
+    assert.ok(body.jobId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("job endpoint triggers worker with auth and awaits trigger", async () => {
@@ -59,7 +66,7 @@ test("job endpoint triggers worker with auth and awaits trigger", async () => {
   process.env.URL = "https://example.netlify.app";
   globalThis.fetch = (async (url: URL | string, init?: unknown) => {
     calls.push({ url: String(url), init: init as { headers: Record<string, string> } });
-    return {} as Response;
+    return { ok: true, status: 200 } as Response;
   }) as typeof fetch;
 
   try {
@@ -80,7 +87,7 @@ test("job endpoint awaits worker trigger", async () => {
   globalThis.fetch = (async () => {
     await new Promise((resolve) => setTimeout(resolve, 1));
     workerCalled = true;
-    return {} as Response;
+    return { ok: true, status: 200 } as Response;
   }) as typeof fetch;
 
   try {
@@ -91,6 +98,26 @@ test("job endpoint awaits worker trigger", async () => {
     });
     assert.equal(response.statusCode, 202);
     assert.equal(workerCalled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("triggerWorker fetch failure marks job failed from job endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.URL = "https://example.netlify.app";
+  globalThis.fetch = (async () => ({ ok: false, status: 503 }) as Response) as typeof fetch;
+
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-fail-trigger", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
+    });
+    assert.equal(response.statusCode, 502);
+    const body = JSON.parse(response.body);
+    assert.equal(body.status, "failed");
+    assert.match(body.error, /Worker trigger failed/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -120,9 +147,40 @@ test("mock OpenAI image response returns base64 bytes", async () => {
   assert.equal(generated.contentType, "image/png");
 });
 
-test("Agent SDK workflow executes image generation tool path", async () => {
+test("Agent SDK workflow executes runner and image generation tool path", async () => {
+  const calls = { agent: 0, runner: 0, toolFactory: 0, toolExecute: 0 };
+  let capturedTools: Array<{ execute: () => Promise<unknown> }> = [];
+  class FakeAgent {
+    constructor(input: { tools?: Array<{ execute: () => Promise<unknown> }> }) {
+      calls.agent += 1;
+      capturedTools = input.tools ?? [];
+    }
+  }
+  class FakeRunner {
+    async run() {
+      calls.runner += 1;
+      await capturedTools[0].execute();
+    }
+  }
+  const fakeSdk = {
+    Agent: FakeAgent,
+    Runner: FakeRunner,
+    tool(definition: { execute: () => Promise<unknown> }) {
+      calls.toolFactory += 1;
+      return {
+        execute: async () => {
+          calls.toolExecute += 1;
+          return definition.execute();
+        }
+      };
+    }
+  };
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-agent", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
-  const result = await executeAgentArtifactWorkflow(job, { skipAgentSdkImport: true });
+  const result = await executeAgentArtifactWorkflow(job, { agentSdk: fakeSdk as never });
+  assert.equal(calls.agent, 1);
+  assert.equal(calls.runner, 1);
+  assert.equal(calls.toolFactory, 1);
+  assert.equal(calls.toolExecute, 1);
   assert.equal(result.workflowExecuted, true);
   assert.equal(result.toolInvoked, "generate_image_artifact");
   assert.deepEqual(result.bytes, pngBytes);
@@ -166,6 +224,23 @@ test("worker saves image artifact and retained index is updated", async () => {
   assert.match(retainedKeys.byRequest[0], /^by-request\//);
   assert.match(retainedKeys.byKind[0], /^by-kind\/image\//);
   assert.match(retainedKeys.byTag[0], /^by-tag\/hero\//);
+});
+
+test("worker background function exports handler and config", async () => {
+  const worker = await import("../netlify/functions/agent-artifact-worker-background.js");
+  assert.equal(typeof worker.handler, "function");
+  assert.equal(worker.config.name, "agent-artifact-worker-background");
+});
+
+test("compatibility files re-export artifact-core behavior", async () => {
+  const compatArtifacts = await import("../netlify/lib/artifacts.js");
+  const coreArtifacts = await import("../netlify/lib/artifact-core/index.js");
+  const compatBlobStore = await import("../netlify/lib/blob-store.js");
+  const coreBlobStore = await import("../netlify/lib/artifact-core/blob-store.js");
+
+  assert.equal(compatArtifacts.saveArtifactBytes, coreArtifacts.saveArtifactBytes);
+  assert.equal(compatArtifacts.sha256Hex, coreArtifacts.sha256Hex);
+  assert.equal(compatBlobStore.projectBlobStore, coreBlobStore.projectBlobStore);
 });
 
 test("failed generation updates job as failed", async () => {

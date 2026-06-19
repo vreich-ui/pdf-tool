@@ -2,6 +2,8 @@ import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js"
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { saveArtifactBytes, sha256Hex } from "../lib/artifact-core/index.js";
 
+export const config = { name: "agent-artifact-worker-background" };
+
 type FunctionEvent = {
   httpMethod: string;
   headers?: Record<string, string | undefined>;

@@ -3,7 +3,7 @@ import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerat
 
 export interface AgentArtifactWorkflowOptions {
   imageClient?: ImageGenerationClient;
-  skipAgentSdkImport?: boolean;
+  agentSdk?: AgentSdkModule;
 }
 
 export interface AgentArtifactWorkflowResult extends GeneratedImageBytes {
@@ -11,26 +11,49 @@ export interface AgentArtifactWorkflowResult extends GeneratedImageBytes {
   toolInvoked: "generate_image_artifact";
 }
 
-async function runAgentSdkPlanningStep(job: ArtifactJobRecord, skipAgentSdkImport: boolean | undefined): Promise<void> {
-  if (skipAgentSdkImport || process.env.AGENT_ARTIFACT_TEST_AGENT_SDK === "1") {
+type AgentSdkModule = {
+  Agent?: new (input: Record<string, unknown>) => unknown;
+  Runner?: new () => { run?: (agent: unknown, input: string) => Promise<unknown> };
+  tool?: (input: Record<string, unknown>) => unknown;
+};
+
+async function loadAgentSdk(provided?: AgentSdkModule): Promise<AgentSdkModule> {
+  if (provided) return provided;
+  if (process.env.AGENT_ARTIFACT_TEST_AGENT_SDK === "1") {
+    return {};
+  }
+  return await import("@openai/agents") as AgentSdkModule;
+}
+
+function createImageGenerationTool(agents: AgentSdkModule, toolHandler: () => Promise<GeneratedImageBytes>): unknown {
+  const definition = {
+    name: "generate_image_artifact",
+    description: "Generate one image artifact and return server-side byte metadata only. Never pass bytes through MCP.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false
+    },
+    execute: toolHandler
+  };
+
+  return typeof agents.tool === "function" ? agents.tool(definition) : definition;
+}
+
+async function runAgentSdkWorkflow(job: ArtifactJobRecord, agents: AgentSdkModule, imageTool: unknown): Promise<void> {
+  if (!agents.Agent || !agents.Runner) {
     return;
   }
 
-  const agents = await import("@openai/agents");
-  const AgentCtor = (agents as { Agent?: new (input: Record<string, unknown>) => unknown }).Agent;
-  const RunnerCtor = (agents as { Runner?: new () => { run?: (agent: unknown, input: string) => Promise<unknown> } }).Runner;
-  if (!AgentCtor || !RunnerCtor) {
-    throw new Error("OpenAI Agent SDK is unavailable");
-  }
-
-  const agent = new AgentCtor({
+  const agent = new agents.Agent({
     name: "Artifact Generation Agent",
-    instructions: "Plan a single safe binary artifact generation call. Do not handle article content or pass bytes through MCP.",
-    model: "gpt-5.4"
+    instructions: "Use the generate_image_artifact tool exactly once for image artifacts. Do not handle article content or pass bytes through MCP.",
+    model: "gpt-5.4",
+    tools: [imageTool]
   });
-  const runner = new RunnerCtor();
+  const runner = new agents.Runner();
   if (typeof runner.run === "function") {
-    await runner.run(agent, `Generate ${job.artifactKind} artifact ${job.filename} for request ${job.requestId}.`);
+    await runner.run(agent, `Generate image artifact ${job.filename} for request ${job.requestId}.`);
   }
 }
 
@@ -39,11 +62,21 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
     throw new Error("Only image artifact generation is currently supported; PDF artifacts are not enabled yet");
   }
 
-  await runAgentSdkPlanningStep(job, options.skipAgentSdkImport);
-  const generated = await generateImageArtifactBytes({
-    prompt: job.prompt,
-    client: options.imageClient
-  });
+  const agents = await loadAgentSdk(options.agentSdk);
+  let generated: GeneratedImageBytes | undefined;
+  const toolHandler = async () => {
+    generated = await generateImageArtifactBytes({
+      prompt: job.prompt,
+      client: options.imageClient
+    });
+    return generated;
+  };
+  const imageTool = createImageGenerationTool(agents, toolHandler);
+  await runAgentSdkWorkflow(job, agents, imageTool);
+
+  if (!generated) {
+    generated = await toolHandler();
+  }
 
   return {
     ...generated,
