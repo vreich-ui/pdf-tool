@@ -7,19 +7,27 @@ export const ARTIFACT_STORE_NAME = "project-artifacts";
 export type ArtifactKind = "image" | "pdf" | "binary";
 
 export interface ArtifactReference {
-  projectId: string;
-  requestId: string;
-  artifactId: string;
-  artifactKind: ArtifactKind;
+  blobKey: string;
+  sizeBytes?: number;
+  sha256: string;
+  contentType: string;
+  createdAtISO?: string;
+  artifactKind?: ArtifactKind;
+  originalFilename?: string;
+  label?: string;
+  tags: string[];
+  metadata?: Record<string, unknown>;
+  deletedAtISO?: string;
+  deletedBy?: string;
+
+  /** Backward-compatible aliases for existing pdf-tool fallback/MCP helpers. */
+  projectId?: string;
+  requestId?: string;
+  artifactId?: string;
   filename: string;
   slot?: string;
-  contentType: string;
-  size: number;
-  sha256: string;
-  blobKey: string;
-  tags: string[];
-  label?: string;
-  createdAt: string;
+  size?: number;
+  createdAt?: string;
 }
 
 export interface SaveArtifactBytesInput {
@@ -31,7 +39,7 @@ export interface SaveArtifactBytesInput {
   contentType: string;
   bytes: Buffer | Uint8Array;
   sha256?: string;
-  tags?: string[];
+  tags: string[];
   label?: string;
 }
 

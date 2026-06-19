@@ -1,14 +1,12 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
+import { supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
+import type { ArtifactJobWorkflowTarget } from "./project-adapters/types.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
 export const DEFAULT_PROJECT_ID = "dr-lurie";
-
-export function supportedProjectIds(): Set<string> {
-  return new Set([DEFAULT_PROJECT_ID, process.env.ARTIFACT_AGENT_PROJECT_ID].filter((value): value is string => Boolean(value)));
-}
 
 export interface ArtifactJobRequest {
   projectId: string;
@@ -21,6 +19,9 @@ export interface ArtifactJobRequest {
   label?: string;
   workflowId?: string;
   agentName?: string;
+  promptId?: string;
+  attachToWorkflow?: boolean;
+  workflowTarget?: ArtifactJobWorkflowTarget;
 }
 
 export function isSafeOptionalPathSegment(value: string): boolean {
@@ -47,7 +48,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       tags: z.array(z.string()).default([]),
       label: z.string().optional(),
       workflowId: z.string().optional(),
-      agentName: z.string().optional()
+      agentName: z.string().optional(),
+      promptId: z.string().optional(),
+      attachToWorkflow: z.boolean().optional(),
+      workflowTarget: z.object({ publicationPayload: z.boolean().optional(), featuredImage: z.boolean().optional() }).optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
       if (!supportedProjectIds().has(value.projectId)) {
         ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
@@ -55,9 +59,8 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
       }
-      if (value.artifactKind !== "image") {
-        ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "Only image artifact generation is currently supported" });
-      }
+      const kindIssue = validateProjectArtifactKind(value.projectId, value.artifactKind);
+      if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
     });
     const result = schema.safeParse(input);
     if (result.success) return { success: true, data: result.data as ArtifactJobRequest };
@@ -93,6 +96,9 @@ export const artifactJobRequestSchema = {
     const label = typeof value.label === "string" ? value.label : undefined;
     const workflowId = typeof value.workflowId === "string" ? value.workflowId : undefined;
     const agentName = typeof value.agentName === "string" ? value.agentName : undefined;
+    const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
+    const attachToWorkflow = typeof value.attachToWorkflow === "boolean" ? value.attachToWorkflow : undefined;
+    const workflowTarget = value.workflowTarget && typeof value.workflowTarget === "object" ? value.workflowTarget as ArtifactJobWorkflowTarget : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
@@ -101,10 +107,11 @@ export const artifactJobRequestSchema = {
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
     if (slot && !isSafeOptionalPathSegment(slot)) issues.push({ path: ["slot"], message: "slot must be a safe path segment" });
     if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
-    if (artifactKind !== "image") issues.push({ path: ["artifactKind"], message: "Only image artifact generation is currently supported" });
+    const kindIssue = validateProjectArtifactKind(projectId, artifactKind as ArtifactKind);
+    if (projectId && kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, workflowId, agentName } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, workflowId, agentName, promptId, attachToWorkflow, workflowTarget } };
   }
 };
 
@@ -118,8 +125,10 @@ export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed";
 export interface ArtifactJobRecord extends ArtifactJobRequest {
   jobId: string;
   status: ArtifactJobStatus;
+  artifactReference?: ArtifactReference;
   artifact?: ArtifactReference;
   error?: string;
+  adapterVersion: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -131,7 +140,7 @@ function safePart(value: string): string {
 }
 
 export function jobBlobKey(projectId: string, jobId: string): string {
-  return `projects/${safePart(projectId)}/artifact-jobs/${safePart(jobId)}.json`;
+  return `projects/${safePart(projectId)}/jobs/${safePart(jobId)}.json`;
 }
 
 export function isAuthorized(authHeader: string | undefined, token = process.env.AGENT_RUN_TOKEN): boolean {
@@ -154,7 +163,8 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
     jobId: randomUUID(),
     status: "pending",
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    adapterVersion: "dr-lurie-v1"
   };
   await writeArtifactJob(job);
   return job;
@@ -170,7 +180,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "error">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,
