@@ -1,3 +1,4 @@
+import { sha256Hex } from "./artifact-core/index.js";
 import type { ArtifactJobRecord } from "./agent-artifact-jobs.js";
 import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerationClient } from "./agent-image-generation.js";
 
@@ -25,7 +26,7 @@ async function loadAgentSdk(provided?: AgentSdkModule): Promise<AgentSdkModule> 
   return await import("@openai/agents") as AgentSdkModule;
 }
 
-function createImageGenerationTool(agents: AgentSdkModule, toolHandler: () => Promise<GeneratedImageBytes>): unknown {
+function createImageGenerationTool(agents: AgentSdkModule, toolHandler: () => Promise<{ ok: true; contentType: GeneratedImageBytes["contentType"]; size: number; sha256Preview: string }>): unknown {
   const definition = {
     name: "generate_image_artifact",
     description: "Generate one image artifact and return server-side byte metadata only. Never pass bytes through MCP.",
@@ -69,13 +70,22 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       prompt: job.prompt,
       client: options.imageClient
     });
-    return generated;
+    return {
+      ok: true as const,
+      contentType: generated.contentType,
+      size: generated.bytes.byteLength,
+      sha256Preview: sha256Hex(generated.bytes).slice(0, 12)
+    };
   };
   const imageTool = createImageGenerationTool(agents, toolHandler);
   await runAgentSdkWorkflow(job, agents, imageTool);
 
   if (!generated) {
-    generated = await toolHandler();
+    await toolHandler();
+  }
+
+  if (!generated) {
+    throw new Error("Image artifact generation did not produce bytes");
   }
 
   return {
