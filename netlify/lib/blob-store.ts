@@ -1,8 +1,12 @@
-import { getStore } from "@netlify/blobs";
-
 const memoryStores = new Map<string, Map<string, unknown>>();
 
-function memoryStore(name: string) {
+export interface ProjectBlobStore {
+  get(key: string, options?: { type?: "json" }): Promise<unknown>;
+  set(key: string, value: unknown, options?: unknown): Promise<void>;
+  setJSON(key: string, value: unknown): Promise<void>;
+}
+
+function memoryStore(name: string): ProjectBlobStore {
   let store = memoryStores.get(name);
   if (!store) {
     store = new Map<string, unknown>();
@@ -28,9 +32,10 @@ export function resetMemoryBlobStores(): void {
   memoryStores.clear();
 }
 
-export function projectBlobStore(name: string) {
+export async function projectBlobStore(name: string): Promise<ProjectBlobStore> {
   if (process.env.AGENT_ARTIFACT_MEMORY_BLOBS === "1") {
     return memoryStore(name);
   }
-  return getStore(name);
+  const { getStore } = await import("@netlify/blobs");
+  return getStore(name) as ProjectBlobStore;
 }

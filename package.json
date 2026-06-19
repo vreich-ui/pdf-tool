@@ -5,12 +5,11 @@
   "type": "module",
   "scripts": {
     "check:eslint": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
-    "test:netlify": "node --import tsx --test tests/agent-artifact*.test.ts"
+    "test": "npm run test:netlify",
+    "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js"
   },
   "dependencies": {
     "@netlify/blobs": "^9.1.2",
-    "@openai/agents": "^0.1.0",
     "openai": "^6.10.0",
     "zod": "^4.1.13"
   },

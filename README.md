@@ -9,7 +9,7 @@ ChatGPT agents remain responsible for text and structured content work through M
 ### Responsibilities
 
 - ChatGPT agents: article/content planning, drafts, briefs, and project JSON updates through MCP.
-- Netlify Agent SDK utilities: generated binary artifacts such as images, with PDF support structured for later addition.
+- Netlify artifact utilities: generated binary artifacts such as images, with PDF support structured for later addition.
 - Normal clients: direct upload paths remain available for standard client-provided files.
 - Fallback tools: `save_artifact` and `create_artifact_from_url` remain fallback paths only.
 
@@ -27,9 +27,9 @@ ChatGPT agents remain responsible for text and structured content work through M
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for internal agent job APIs.
-- `OPEN_AI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation.
+- `OPENAI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation.
 
-Never expose `OPEN_AI_API_KEY` to browsers or ChatGPT-hosted clients.
+Never expose `OPENAI_API_KEY` to browsers or ChatGPT-hosted clients.
 
 ### Supported project IDs
 

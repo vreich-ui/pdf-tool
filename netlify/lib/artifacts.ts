@@ -73,12 +73,19 @@ function validateArtifactBytes(input: SaveArtifactBytesInput, bytes: Buffer): vo
 }
 
 async function appendArtifactIndex(projectId: string, artifact: ArtifactReference): Promise<void> {
-  const store = projectBlobStore(ARTIFACT_INDEX_STORE_NAME);
+  const store = await projectBlobStore(ARTIFACT_INDEX_STORE_NAME);
   const indexKey = `projects/${sanitizePathPart(projectId)}/artifacts/index.json`;
   const existing = await store.get(indexKey, { type: "json" }).catch(() => null) as { artifacts?: ArtifactReference[] } | null;
   const artifacts = Array.isArray(existing?.artifacts) ? existing.artifacts : [];
   const next = [artifact, ...artifacts.filter((entry) => entry.artifactId !== artifact.artifactId)];
   await store.setJSON(indexKey, { projectId, artifacts: next, updatedAt: new Date().toISOString() });
+}
+
+export async function readArtifactIndex(projectId: string): Promise<ArtifactReference[]> {
+  const store = await projectBlobStore(ARTIFACT_INDEX_STORE_NAME);
+  const indexKey = `projects/${sanitizePathPart(projectId)}/artifacts/index.json`;
+  const existing = await store.get(indexKey, { type: "json" }).catch(() => null) as { artifacts?: ArtifactReference[] } | null;
+  return Array.isArray(existing?.artifacts) ? existing.artifacts : [];
 }
 
 export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<ArtifactReference> {
@@ -110,7 +117,7 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
     createdAt
   };
 
-  const store = projectBlobStore(ARTIFACT_STORE_NAME);
+  const store = await projectBlobStore(ARTIFACT_STORE_NAME);
   await store.set(blobKey, bytes, {
     metadata: {
       projectId: input.projectId,

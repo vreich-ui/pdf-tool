@@ -1,28 +1,10 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
-import { z } from "zod";
 import type { ArtifactKind, ArtifactReference } from "./artifacts.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
 export const SUPPORTED_PROJECT_IDS = new Set(["dr-lurie"]);
-
-export const artifactJobRequestSchema = z.object({
-  projectId: z.string().min(1),
-  requestId: z.string().min(1),
-  artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
-  prompt: z.string().min(1),
-  filename: z.string().min(1),
-  tags: z.array(z.string()).default([]),
-  label: z.string().optional()
-}).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
-  if (!SUPPORTED_PROJECT_IDS.has(value.projectId)) {
-    ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
-  }
-  if (value.artifactKind !== "image") {
-    ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "Only image artifact generation is currently supported" });
-  }
-});
 
 export interface ArtifactJobRequest {
   projectId: string;
@@ -33,6 +15,41 @@ export interface ArtifactJobRequest {
   tags: string[];
   label?: string;
 }
+
+export interface ValidationIssue {
+  path: string[];
+  message: string;
+}
+
+export const artifactJobRequestSchema = {
+  safeParse(input: unknown): { success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } } {
+    const issues: ValidationIssue[] = [];
+    const value = input && typeof input === "object" ? input as Record<string, unknown> : undefined;
+    if (!value) {
+      return { success: false, error: { issues: [{ path: [], message: "Expected JSON object" }] } };
+    }
+
+    const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
+    const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
+    const prompt = typeof value.prompt === "string" ? value.prompt : "";
+    const filename = typeof value.filename === "string" ? value.filename.trim() : "";
+    const artifactKind = typeof value.artifactKind === "string" ? value.artifactKind : "image";
+    const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : [];
+    const label = typeof value.label === "string" ? value.label : undefined;
+
+    if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
+    if (projectId && !SUPPORTED_PROJECT_IDS.has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
+    if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
+    if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
+    if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
+    if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
+    if (artifactKind !== "image") issues.push({ path: ["artifactKind"], message: "Only image artifact generation is currently supported" });
+
+    if (issues.length > 0) return { success: false, error: { issues } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, tags, label } };
+  }
+};
+
 export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed";
 
 export interface ArtifactJobRecord extends ArtifactJobRequest {
@@ -63,7 +80,6 @@ export function isAuthorized(authHeader: string | undefined, token = process.env
 }
 
 export function safeError(error: unknown): string {
-  if (error instanceof z.ZodError) return "Invalid artifact job input";
   if (error instanceof Error && error.message) return error.message.replace(/[\r\n]+/g, " ").slice(0, 300);
   return "Artifact generation failed";
 }
@@ -71,7 +87,7 @@ export function safeError(error: unknown): string {
 export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
-    ...(input as ArtifactJobRequest),
+    ...input,
     jobId: randomUUID(),
     status: "pending",
     createdAt: now,
@@ -82,12 +98,12 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
 }
 
 export async function readArtifactJob(projectId: string, jobId: string): Promise<ArtifactJobRecord | null> {
-  const store = projectBlobStore(AGENT_ARTIFACT_JOB_STORE);
+  const store = await projectBlobStore(AGENT_ARTIFACT_JOB_STORE);
   return await store.get(jobBlobKey(projectId, jobId), { type: "json" }).catch(() => null) as ArtifactJobRecord | null;
 }
 
 export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
-  const store = projectBlobStore(AGENT_ARTIFACT_JOB_STORE);
+  const store = await projectBlobStore(AGENT_ARTIFACT_JOB_STORE);
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 

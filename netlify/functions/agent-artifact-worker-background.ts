@@ -1,29 +1,26 @@
 import { generateImageArtifactBytes } from "../lib/agent-image-generation.js";
-import { readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
+import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { saveArtifactBytes, sha256Hex } from "../lib/artifacts.js";
 
 type FunctionEvent = {
   httpMethod: string;
-  queryStringParameters?: Record<string, string | undefined> | null;
+  headers?: Record<string, string | undefined>;
   body?: string | null;
 };
 
-async function parseWorkerInput(event: FunctionEvent): Promise<{ projectId?: string; jobId?: string }> {
-  if (event.httpMethod === "GET") {
-    return {
-      projectId: event.queryStringParameters?.projectId,
-      jobId: event.queryStringParameters?.jobId
-    };
-  }
+function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string } {
   return parseJsonBody<{ projectId?: string; jobId?: string }>(event.body) ?? {};
 }
 
 export async function handler(event: FunctionEvent) {
-  if (!["POST", "GET"].includes(event.httpMethod)) {
+  if (event.httpMethod !== "POST") {
     return jsonResponse(405, { error: "Method not allowed" });
   }
+  if (!isAuthorized(getHeader(event.headers, "authorization"))) {
+    return jsonResponse(401, { error: "Unauthorized" });
+  }
 
-  const { projectId, jobId } = await parseWorkerInput(event);
+  const { projectId, jobId } = parseWorkerInput(event);
   if (!projectId || !jobId) {
     return jsonResponse(400, { error: "projectId and jobId are required" });
   }

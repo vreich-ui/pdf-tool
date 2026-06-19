@@ -6,12 +6,15 @@ type FunctionEvent = {
   body?: string | null;
 };
 
-async function triggerWorker(baseUrl: string | undefined, projectId: string, jobId: string): Promise<void> {
-  if (!baseUrl || typeof fetch !== "function") return;
+export async function triggerWorker(baseUrl: string | undefined, token: string | undefined, projectId: string, jobId: string): Promise<void> {
+  if (!baseUrl || !token || typeof fetch !== "function") return;
   const url = new URL("/.netlify/functions/agent-artifact-worker-background", baseUrl);
   await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "authorization": `Bearer ${token}`,
+      "content-type": "application/json"
+    },
     body: JSON.stringify({ projectId, jobId })
   }).catch(() => undefined);
 }
@@ -34,6 +37,6 @@ export async function handler(event: FunctionEvent) {
   }
 
   const job = await createArtifactJob(parsed.data as import("../lib/agent-artifact-jobs.js").ArtifactJobRequest);
-  void triggerWorker(process.env.URL, job.projectId, job.jobId);
+  void triggerWorker(process.env.URL, process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);
   return jsonResponse(202, { jobId: job.jobId, status: job.status });
 }
