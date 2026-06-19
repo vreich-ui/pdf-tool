@@ -1,0 +1,21 @@
+{
+  "name": "pdf-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:eslint": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:netlify": "node --import tsx --test tests/agent-artifact*.test.ts"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^9.1.2",
+    "@openai/agents": "^0.1.0",
+    "openai": "^6.10.0",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
