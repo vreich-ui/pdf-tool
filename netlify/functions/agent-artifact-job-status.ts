@@ -38,7 +38,8 @@ export async function handler(event: FunctionEvent) {
     requestId: job.requestId,
     artifactKind: job.artifactKind,
     status: job.status,
-    artifact: job.artifact,
+    artifactReference: job.artifactReference ?? job.artifact,
+    artifact: job.artifactReference ?? job.artifact,
     error: job.error,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt

@@ -21,16 +21,16 @@ export function artifactPointerValue(requestId: string, reference: ArtifactRefer
   return {
     requestId,
     sha256: reference.sha256,
-    artifactKind: reference.artifactKind
+    artifactKind: reference.artifactKind ?? "binary"
   };
 }
 
 export function artifactKindPointerKey(reference: ArtifactReference): string {
-  return `by-kind/${reference.artifactKind}/${reference.sha256}.json`;
+  return `by-kind/${reference.artifactKind ?? "binary"}/${reference.sha256}.json`;
 }
 
 export function artifactRequestPointerKey(requestId: string, reference: ArtifactReference): string {
-  return `by-request/${encodeURIComponent(requestId)}/${reference.artifactKind}/${reference.sha256}.json`;
+  return `by-request/${encodeURIComponent(requestId)}/${reference.artifactKind ?? "binary"}/${reference.sha256}.json`;
 }
 
 export function artifactTagPointerKeys(reference: ArtifactReference): string[] {
@@ -72,10 +72,10 @@ export async function writeArtifactReferenceIndexes(requestId: string, reference
     indexStore.setJSON(requestArtifactReferenceKey(requestId, reference.sha256), reference, { metadata: fullReferenceMetadata }),
     indexStore.setJSON(artifactKindPointerKey(reference), pointer, { metadata: pointerMetadata }),
     indexStore.setJSON(artifactRequestPointerKey(requestId, reference), pointer, { metadata: pointerMetadata }),
-    indexStore.setJSON(artifactFilenamePointerKey(requestId, reference.filename), reference, { metadata: fullReferenceMetadata }),
+    ...(reference.filename ?? reference.originalFilename ? [indexStore.setJSON(artifactFilenamePointerKey(requestId, (reference.filename ?? reference.originalFilename)!), reference, { metadata: fullReferenceMetadata })] : []),
     ...artifactTagPointerKeys(reference).map((key) => indexStore.setJSON(key, pointer, { metadata: pointerMetadata }))
   ];
-  if (reference.slot) {
+  if (reference.slot && reference.projectId) {
     writes.push(
       indexStore.setJSON(artifactSlotPointerKey(requestId, reference.slot), reference, { metadata: fullReferenceMetadata }),
       indexStore.setJSON(latestArtifactSlotPointerKey(reference.projectId, requestId, reference.slot), reference, { metadata: fullReferenceMetadata })

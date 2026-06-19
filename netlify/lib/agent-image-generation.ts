@@ -49,11 +49,12 @@ export function imageGenerationRequest(options: {
 }
 
 async function defaultOpenAIClient(): Promise<ImageGenerationClient> {
-  if (!process.env.OPENAI_API_KEY) {
+  const apiKey = process.env.DR_LURIE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+  if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
   const { default: OpenAI } = await import("openai");
-  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) as ImageGenerationClient;
+  return new OpenAI({ apiKey }) as ImageGenerationClient;
 }
 
 export async function generateImageArtifactBytes(options: {
