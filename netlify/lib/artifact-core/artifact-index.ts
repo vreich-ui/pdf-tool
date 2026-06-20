@@ -38,11 +38,19 @@ export function artifactTagPointerKeys(reference: ArtifactReference): string[] {
     .map((tag) => `by-tag/${tag}/${reference.sha256}.json`);
 }
 
-export function artifactSlotPointerKey(requestId: string, slot: string): string {
+export function artifactSlotPointerKey(projectId: string, requestId: string, slot: string): string {
+  return `by-slot/${safePathSegment(projectId)}/${encodeURIComponent(requestId)}/${safePathSegment(slot)}.json`;
+}
+
+export function legacyArtifactSlotPointerKey(requestId: string, slot: string): string {
   return `by-slot/${encodeURIComponent(requestId)}/${safePathSegment(slot)}.json`;
 }
 
-export function artifactFilenamePointerKey(requestId: string, filename: string): string {
+export function artifactFilenamePointerKey(projectId: string, requestId: string, filename: string): string {
+  return `by-filename/${safePathSegment(projectId)}/${encodeURIComponent(requestId)}/${safePathSegment(filename)}.json`;
+}
+
+export function legacyArtifactFilenamePointerKey(requestId: string, filename: string): string {
   return `by-filename/${encodeURIComponent(requestId)}/${safePathSegment(filename)}.json`;
 }
 
@@ -72,12 +80,12 @@ export async function writeArtifactReferenceIndexes(requestId: string, reference
     indexStore.setJSON(requestArtifactReferenceKey(requestId, reference.sha256), reference, { metadata: fullReferenceMetadata }),
     indexStore.setJSON(artifactKindPointerKey(reference), pointer, { metadata: pointerMetadata }),
     indexStore.setJSON(artifactRequestPointerKey(requestId, reference), pointer, { metadata: pointerMetadata }),
-    ...(reference.filename ?? reference.originalFilename ? [indexStore.setJSON(artifactFilenamePointerKey(requestId, (reference.filename ?? reference.originalFilename)!), reference, { metadata: fullReferenceMetadata })] : []),
+    ...(reference.filename ?? reference.originalFilename ? [indexStore.setJSON(artifactFilenamePointerKey(reference.projectId!, requestId, (reference.filename ?? reference.originalFilename)!), reference, { metadata: fullReferenceMetadata })] : []),
     ...artifactTagPointerKeys(reference).map((key) => indexStore.setJSON(key, pointer, { metadata: pointerMetadata }))
   ];
   if (reference.slot && reference.projectId) {
     writes.push(
-      indexStore.setJSON(artifactSlotPointerKey(requestId, reference.slot), reference, { metadata: fullReferenceMetadata }),
+      indexStore.setJSON(artifactSlotPointerKey(reference.projectId, requestId, reference.slot), reference, { metadata: fullReferenceMetadata }),
       indexStore.setJSON(latestArtifactSlotPointerKey(reference.projectId, requestId, reference.slot), reference, { metadata: fullReferenceMetadata })
     );
   }
@@ -102,12 +110,16 @@ export async function readArtifactReference(requestId: string, sha256: string): 
   return readArtifactReferenceAtKey(requestArtifactReferenceKey(requestId, sha256));
 }
 
-export async function readArtifactReferenceBySlot(requestId: string, slot: string): Promise<ArtifactReference | undefined> {
-  return readArtifactReferenceAtKey(artifactSlotPointerKey(requestId, slot));
+export async function readArtifactReferenceBySlot(projectId: string, requestId: string, slot: string): Promise<ArtifactReference | undefined> {
+  const scoped = await readArtifactReferenceAtKey(artifactSlotPointerKey(projectId, requestId, slot));
+  if (scoped) return scoped;
+  return readArtifactReferenceAtKey(legacyArtifactSlotPointerKey(requestId, slot));
 }
 
-export async function readArtifactReferenceByFilename(requestId: string, filename: string): Promise<ArtifactReference | undefined> {
-  return readArtifactReferenceAtKey(artifactFilenamePointerKey(requestId, filename));
+export async function readArtifactReferenceByFilename(projectId: string, requestId: string, filename: string): Promise<ArtifactReference | undefined> {
+  const scoped = await readArtifactReferenceAtKey(artifactFilenamePointerKey(projectId, requestId, filename));
+  if (scoped) return scoped;
+  return readArtifactReferenceAtKey(legacyArtifactFilenamePointerKey(requestId, filename));
 }
 
 type BlobListItem = { key: string };

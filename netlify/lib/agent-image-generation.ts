@@ -48,8 +48,8 @@ export function imageGenerationRequest(options: {
   return request;
 }
 
-async function defaultOpenAIClient(): Promise<ImageGenerationClient> {
-  const apiKey = process.env.DR_LURIE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+async function defaultOpenAIClient(providedKey?: string): Promise<ImageGenerationClient> {
+  const apiKey = providedKey ?? process.env.DR_LURIE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
@@ -60,6 +60,7 @@ async function defaultOpenAIClient(): Promise<ImageGenerationClient> {
 export async function generateImageArtifactBytes(options: {
   prompt: string;
   client?: ImageGenerationClient;
+  apiKey?: string;
   model?: string;
   size?: string;
   outputFormat?: "png" | "jpeg" | "webp";
@@ -75,7 +76,7 @@ export async function generateImageArtifactBytes(options: {
     return { bytes, contentType: contentTypeFromFormat(outputFormat) };
   }
 
-  const client = options.client ?? await defaultOpenAIClient();
+  const client = options.client ?? await defaultOpenAIClient(options.apiKey);
   const response = await client.images.generate(imageGenerationRequest({
     model: options.model,
     prompt: options.prompt,

@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
-import { supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
+import { getProjectAdapter, supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
 import type { ArtifactJobWorkflowTarget } from "./project-adapters/types.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
@@ -20,7 +20,9 @@ export interface ArtifactJobRequest {
   workflowId?: string;
   agentName?: string;
   promptId?: string;
+  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
   attachToWorkflow?: boolean;
+  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
   workflowTarget?: ArtifactJobWorkflowTarget;
 }
 
@@ -157,6 +159,8 @@ export function safeError(error: unknown): string {
 }
 
 export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
+  const adapter = getProjectAdapter(input.projectId);
+  const adapterVersion = adapter?.config.adapterVersion ?? "v1";
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,
@@ -164,7 +168,7 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
     status: "pending",
     createdAt: now,
     updatedAt: now,
-    adapterVersion: "dr-lurie-v1"
+    adapterVersion
   };
   await writeArtifactJob(job);
   return job;

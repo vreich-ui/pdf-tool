@@ -9,10 +9,9 @@ export interface ProjectConfig {
   netlifyBlobTokenEnvAliases: string[];
   artifactStoreName: string;
   artifactIndexStoreName: string;
-  workflowEndpointEnvAliases?: string[];
   allowedArtifactKinds: ArtifactKind[];
   workflowAdapterName: string;
-  enableWorkflowAttachment?: boolean;
+  adapterVersion: string;
 }
 
 export interface ArtifactJobWorkflowTarget {
@@ -23,5 +22,4 @@ export interface ArtifactJobWorkflowTarget {
 export interface ProjectArtifactAdapter {
   config: ProjectConfig;
   saveArtifactBytes(input: SaveArtifactBytesInput): Promise<ArtifactReference>;
-  attachArtifactToWorkflow?(input: { requestId: string; artifactReference: ArtifactReference; workflowTarget?: ArtifactJobWorkflowTarget }): Promise<WorkflowPatchStatus>;
 }

@@ -32,5 +32,5 @@ export async function handler(event: FunctionEvent) {
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return jsonResponse(502, { jobId: failed.jobId, status: failed.status, error: failed.error });
   }
-  return jsonResponse(202, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, workflowPatchStatus: "skipped" });
+  return jsonResponse(202, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, adapterVersion: job.adapterVersion, workflowPatchStatus: "skipped" });
 }

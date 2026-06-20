@@ -38,10 +38,9 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     netlifyBlobTokenEnvAliases: ["DR_LURIE_NETLIFY_BLOBS_TOKEN", "NETLIFY_BLOBS_TOKEN"],
     artifactStoreName: "project-artifacts",
     artifactIndexStoreName: "project-artifact-index",
-    workflowEndpointEnvAliases: ["DR_LURIE_WORKFLOW_ENDPOINT"],
     allowedArtifactKinds: ["image", "pdf"],
     workflowAdapterName: "dr-lurie",
-    enableWorkflowAttachment: process.env.DR_LURIE_ENABLE_WORKFLOW_ATTACHMENT === "1"
+    adapterVersion: "dr-lurie-v1"
   },
   async saveArtifactBytes(input) {
     const bytes = Buffer.from(input.bytes);
@@ -75,8 +74,5 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     await store.setJSON(`${blobKey}.json`, artifact);
     await writeArtifactReferenceIndexes(input.requestId, artifact);
     return artifact;
-  },
-  async attachArtifactToWorkflow() : Promise<WorkflowPatchStatus> {
-    return this.config.enableWorkflowAttachment ? "failed" : "skipped";
   }
 };
