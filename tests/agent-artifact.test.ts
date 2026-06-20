@@ -28,8 +28,6 @@ function env() {
   process.env.OPENAI_API_KEY = "test-openai-key";
   process.env.CLIENT_SITE_ID = "dr-site";
   process.env.CLIENT_BLOBS_TOKEN = "dr-token";
-  process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
-  process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
