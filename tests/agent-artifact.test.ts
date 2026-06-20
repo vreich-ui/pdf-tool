@@ -228,7 +228,7 @@ test("model resolution uses explicit input, adapter default, and rejects unsuppo
   assert.equal(explicit.selectedModel, "alternate-test-image-model");
 
   const fallback = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-default", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
-  assert.equal(fallback.selectedModel, "dall-e-3");
+  assert.equal(fallback.selectedModel, "gpt-image-1");
 
   let capturedModel: unknown;
   await executeAgentArtifactWorkflow(explicit, { imageClient: { images: { generate: async (input) => { capturedModel = input.model; return { data: [{ b64_json: pngBytes.toString("base64") }] }; } } } });
@@ -242,13 +242,19 @@ test("model resolution uses explicit input, adapter default, and rejects unsuppo
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["model"]);
 
-  const gptImageResponse = await jobHandler({
-    httpMethod: "POST",
-    headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-gpt-image", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "gpt-image-1" })
-  });
-  assert.equal(gptImageResponse.statusCode, 400);
-  assert.deepEqual(JSON.parse(gptImageResponse.body).issues[0].path, ["model"]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const gptImageResponse = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-gpt-image", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "gpt-image-1" })
+    });
+    assert.equal(gptImageResponse.statusCode, 202);
+    assert.equal(JSON.parse(gptImageResponse.body).selectedModel, "gpt-image-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("generic code does not reference Dr. Lurie-specific environment names", async () => {
