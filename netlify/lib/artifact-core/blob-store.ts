@@ -69,3 +69,11 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
   }
   return getProjectStore(name);
 }
+
+export async function jobBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
+  return projectBlobStore(name, {
+    ...options,
+    siteID: process.env.PDF_TOOL_SITE_ID,
+    token: process.env.PDF_TOOL_BLOBS_TOKEN
+  });
+}

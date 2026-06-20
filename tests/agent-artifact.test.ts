@@ -431,6 +431,7 @@ test("job store uses strong consistency for mutable job state", async () => {
   const calls = projectBlobStoreCallLog().filter((call) => call.name === "agent-artifact-jobs");
   assert.ok(calls.length >= 3);
   assert.ok(calls.every((call) => call.consistency === "strong"));
+  assert.ok(calls.every((call) => call.siteID === "pdf-tool-site" && call.token === "pdf-tool-token"));
 });
 
 test("Agent SDK tool output returns metadata only and not Buffer/base64 bytes", async () => {
