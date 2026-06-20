@@ -1,8 +1,7 @@
 import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js";
-import { appendArtifactReferenceToWorkflow } from "../lib/agent-artifact-workflow-records.js";
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
-import { getProjectAdapter } from "../lib/agent-project-registry.js";
+import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -47,7 +46,8 @@ export async function handler(event: FunctionEvent) {
     const adapter = getProjectAdapter(runningJob.projectId);
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
-    const generated = await executeAgentArtifactWorkflow(runningJob);
+    const apiKey = resolveProjectOpenAIKey(runningJob.projectId);
+    const generated = await executeAgentArtifactWorkflow(runningJob, { apiKey });
     const sha256 = sha256Hex(generated.bytes);
     const artifact = await adapter.saveArtifactBytes({
       projectId: runningJob.projectId,
@@ -61,11 +61,8 @@ export async function handler(event: FunctionEvent) {
       tags: runningJob.tags,
       label: runningJob.label
     });
-    const workflowPatchStatus = runningJob.attachToWorkflow && adapter.attachArtifactToWorkflow
-      ? await adapter.attachArtifactToWorkflow({ requestId: runningJob.requestId, artifactReference: artifact, workflowTarget: runningJob.workflowTarget })
-      : "skipped";
+    const workflowPatchStatus = "skipped_by_design";
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined });
-    await appendArtifactReferenceToWorkflow(complete, artifact);
     return jsonResponse(200, { jobId: complete.jobId, projectId: complete.projectId, requestId: complete.requestId, artifactKind: complete.artifactKind, status: complete.status, artifactReference: complete.artifactReference, artifact: complete.artifact, workflowPatchStatus });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });

@@ -4,6 +4,7 @@ import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerat
 
 export interface AgentArtifactWorkflowOptions {
   imageClient?: ImageGenerationClient;
+  apiKey?: string;
   agentSdk?: AgentSdkModule;
 }
 
@@ -68,7 +69,8 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
   const toolHandler = async () => {
     generated = await generateImageArtifactBytes({
       prompt: job.prompt,
-      client: options.imageClient
+      client: options.imageClient,
+      apiKey: options.apiKey
     });
     return {
       ok: true as const,

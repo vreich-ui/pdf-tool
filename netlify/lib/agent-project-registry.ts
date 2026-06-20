@@ -6,6 +6,16 @@ const adapters = new Map<string, ProjectArtifactAdapter>([[drLurieAdapter.config
 
 export function getProjectAdapter(projectId: string): ProjectArtifactAdapter | undefined { return adapters.get(projectId); }
 export function supportedProjectIds(): Set<string> { return new Set(adapters.keys()); }
+
+export function resolveProjectOpenAIKey(projectId: string): string | undefined {
+  const adapter = getProjectAdapter(projectId);
+  if (!adapter) return undefined;
+  for (const alias of adapter.config.openAIKeyEnvAliases) {
+    const value = process.env[alias];
+    if (value) return value;
+  }
+  return undefined;
+}
 export function validateProjectArtifactKind(projectId: string, artifactKind: ArtifactKind): string | undefined {
   const adapter = getProjectAdapter(projectId);
   if (!adapter) return `Unsupported projectId: ${projectId}`;

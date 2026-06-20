@@ -20,7 +20,9 @@ export interface ArtifactJobRequest {
   workflowId?: string;
   agentName?: string;
   promptId?: string;
+  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
   attachToWorkflow?: boolean;
+  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
   workflowTarget?: ArtifactJobWorkflowTarget;
 }
 
@@ -156,7 +158,7 @@ export function safeError(error: unknown): string {
   return "Artifact generation failed";
 }
 
-export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
+export async function createArtifactJob(input: ArtifactJobRequest, adapterVersion = "v1"): Promise<ArtifactJobRecord> {
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,
@@ -164,7 +166,7 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
     status: "pending",
     createdAt: now,
     updatedAt: now,
-    adapterVersion: "dr-lurie-v1"
+    adapterVersion
   };
   await writeArtifactJob(job);
   return job;

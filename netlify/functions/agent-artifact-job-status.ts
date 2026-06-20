@@ -32,14 +32,15 @@ export async function handler(event: FunctionEvent) {
   if (!job) {
     return jsonResponse(404, { error: "Artifact job not found" });
   }
+  const artifactReference = job.artifactReference ?? job.artifact;
   return jsonResponse(200, {
     jobId: job.jobId,
     projectId: job.projectId,
     requestId: job.requestId,
     artifactKind: job.artifactKind,
     status: job.status,
-    artifactReference: job.artifactReference ?? job.artifact,
-    artifact: job.artifactReference ?? job.artifact,
+    artifactReference,
+    artifact: artifactReference,
     error: job.error,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt

@@ -323,16 +323,15 @@ test("MCP artifact endpoints require auth", async () => {
   assert.equal(response.statusCode, 401);
 });
 
-test("workflow integration stores jobId and ArtifactReference when workflow metadata exists", async () => {
+test("workflow integration is disabled and does not store jobId and ArtifactReference", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, workflowId: "wf-1", agentName: "content-agent" });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.workflowPatchStatus, "skipped_by_design");
   const store = await projectBlobStore(AGENT_ARTIFACT_WORKFLOW_STORE, { consistency: "strong" });
-  const record = await store.get(workflowRecordKey("dr-lurie", "req-workflow", "wf-1"), { type: "json" }) as { jobs: Array<{ jobId: string; destination: { slot?: string } }>; artifacts: Array<{ artifactKind: string; slot?: string }> };
-  assert.equal(record.jobs[0].jobId, job.jobId);
-  assert.equal(record.jobs[0].destination.slot, "hero");
-  assert.equal(record.artifacts[0].artifactKind, "image");
-  assert.equal(record.artifacts[0].slot, "hero");
+  const record = await store.get(workflowRecordKey("dr-lurie", "req-workflow", "wf-1"), { type: "json" });
+  assert.equal(record, null);
 });
 
 test("readArtifactIndexKeys handles AsyncIterable Netlify paginated list output", async () => {
@@ -395,26 +394,26 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
   if (!artifact) throw new Error("expected artifact");
   assert.equal(artifact.slot, "hero");
 
-  const bySlot = await readArtifactReferenceBySlot("req-lookup", "hero");
-  const byFilename = await readArtifactReferenceByFilename("req-lookup", artifact.filename);
+  const bySlot = await readArtifactReferenceBySlot("dr-lurie", "req-lookup", "hero");
+  const byFilename = await readArtifactReferenceByFilename("dr-lurie", "req-lookup", artifact.filename);
   assert.deepEqual(bySlot, artifact);
   assert.deepEqual(byFilename, artifact);
 
   const bySlotKeys = await readArtifactIndexKeys("by-slot/");
   const byFilenameKeys = await readArtifactIndexKeys("by-filename/");
   const latestBySlotKeys = await readArtifactIndexKeys("latest-by-slot/");
-  assert.deepEqual(bySlotKeys, [artifactSlotPointerKey("req-lookup", "hero")]);
-  assert.deepEqual(byFilenameKeys, [artifactFilenamePointerKey("req-lookup", artifact.filename)]);
+  assert.deepEqual(bySlotKeys, [artifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
+  assert.deepEqual(byFilenameKeys, [artifactFilenamePointerKey("dr-lurie", "req-lookup", artifact.filename)]);
   assert.deepEqual(latestBySlotKeys, [latestArtifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
 
   const serializedArtifact = JSON.parse(JSON.stringify(artifact));
-  let lookup = await mcpBySlotHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { requestId: "req-lookup", slot: "hero" } });
+  let lookup = await mcpBySlotHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", requestId: "req-lookup", slot: "hero" } });
   let body = JSON.parse(lookup.body);
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
   assert.equal("b64_json" in body, false);
 
-  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ requestId: "req-lookup", filename: artifact.filename }) });
+  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-lookup", filename: artifact.filename }) });
   body = JSON.parse(lookup.body);
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
