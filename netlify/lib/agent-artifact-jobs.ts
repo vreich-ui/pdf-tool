@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { projectBlobStore } from "./blob-store.js";
+import { jobBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
 import { getProjectAdapter, resolveProjectModel, supportedProjectIds, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
 
@@ -176,12 +176,12 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
 }
 
 export async function readArtifactJob(projectId: string, jobId: string): Promise<ArtifactJobRecord | null> {
-  const store = await projectBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
   return await store.get(jobBlobKey(projectId, jobId), { type: "json" }).catch(() => null) as ArtifactJobRecord | null;
 }
 
 export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
-  const store = await projectBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 

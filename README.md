@@ -72,7 +72,8 @@ Existing internal endpoints remain available:
 - `AGENT_RUN_TOKEN`: bearer token for internal agent job APIs.
 - pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
-- `SITE_ID` and `BLOBS_TOKEN`: adapter-provided target-project Blob credentials when running outside same-site Blob context.
+- `PDF_TOOL_SITE_ID` and `PDF_TOOL_BLOBS_TOKEN`: pdf-tool Blob credentials for internal job/status metadata stores such as `agent-artifact-jobs`.
+- `CLIENT_SITE_ID` and `CLIENT_BLOBS_TOKEN`: adapter-provided target-client Blob credentials for artifact stores such as Dr. Lurie `artifacts` and `artifact-index`.
 - Agents may include `model` in artifact job input; adapters define a `defaultModel`, and unsupported models are rejected.
 - Artifact generation/storage stays separate from workflow ownership: agents call project MCP/workflow APIs separately after receiving an `ArtifactReference`.
 

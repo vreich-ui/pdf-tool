@@ -26,8 +26,10 @@ function env() {
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
-  process.env.SITE_ID = "dr-site";
-  process.env.BLOBS_TOKEN = "dr-token";
+  process.env.CLIENT_SITE_ID = "dr-site";
+  process.env.CLIENT_BLOBS_TOKEN = "dr-token";
+  process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
+  process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
@@ -431,6 +433,7 @@ test("job store uses strong consistency for mutable job state", async () => {
   const calls = projectBlobStoreCallLog().filter((call) => call.name === "agent-artifact-jobs");
   assert.ok(calls.length >= 3);
   assert.ok(calls.every((call) => call.consistency === "strong"));
+  assert.ok(calls.every((call) => call.siteID === "pdf-tool-site" && call.token === "pdf-tool-token"));
 });
 
 test("Agent SDK tool output returns metadata only and not Buffer/base64 bytes", async () => {
