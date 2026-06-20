@@ -1,7 +1,7 @@
 import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobStatus } from "./agent-artifact-jobs.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./artifact-core/index.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { resolveProjectArtifactIndexOptions } from "./agent-project-registry.js";
 
 export interface CreateAgentArtifactJobInput {
   projectId: string;
@@ -12,8 +12,8 @@ export interface CreateAgentArtifactJobInput {
   slot?: string;
   tags?: string[];
   label?: string;
-  workflowId?: string;
   agentName?: string;
+  model?: string;
 }
 
 export interface GetAgentArtifactJobStatusInput { projectId: string; jobId: string }
@@ -34,7 +34,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatusInput) {
@@ -42,21 +42,21 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const job = await readArtifactJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Artifact job not found" };
   const artifactReference = job.artifactReference ?? job.artifact;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
 }
 
 
 export async function getAgentArtifactBySlot(input: GetAgentArtifactBySlotInput) {
   if (!input.projectId || !input.requestId || !input.slot) return { ok: false as const, statusCode: 400, error: "projectId, requestId and slot are required" };
   if (!isSafeOptionalPathSegment(input.slot)) return { ok: false as const, statusCode: 400, error: "slot must be a safe path segment" };
-  const artifact = await readArtifactReferenceBySlot(input.projectId, input.requestId, input.slot);
+  const artifact = await readArtifactReferenceBySlot(input.projectId, input.requestId, input.slot, resolveProjectArtifactIndexOptions(input.projectId));
   if (!artifact) return { ok: false as const, statusCode: 404, error: "Artifact not found" };
   return { ok: true as const, statusCode: 200, artifact };
 }
 
 export async function getAgentArtifactByFilename(input: GetAgentArtifactByFilenameInput) {
   if (!input.projectId || !input.requestId || !input.filename) return { ok: false as const, statusCode: 400, error: "projectId, requestId and filename are required" };
-  const artifact = await readArtifactReferenceByFilename(input.projectId, input.requestId, input.filename);
+  const artifact = await readArtifactReferenceByFilename(input.projectId, input.requestId, input.filename, resolveProjectArtifactIndexOptions(input.projectId));
   if (!artifact) return { ok: false as const, statusCode: 404, error: "Artifact not found" };
   return { ok: true as const, statusCode: 200, artifact };
 }

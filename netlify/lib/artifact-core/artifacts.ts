@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
+import { resolveProjectArtifactIndexOptions } from "../agent-project-registry.js";
 import { artifactIndexStore, readArtifactIndexKeys, writeArtifactReferenceIndexes } from "./artifact-index.js";
 
 export const ARTIFACT_STORE_NAME = "project-artifacts";
@@ -24,7 +25,7 @@ export interface ArtifactReference {
   projectId?: string;
   requestId?: string;
   artifactId?: string;
-  filename: string;
+  filename?: string;
   slot?: string;
   size?: number;
   createdAt?: string;
@@ -93,9 +94,9 @@ export async function retainedArtifactIndexKeys(): Promise<{ requestArtifacts: s
 }
 
 export async function readArtifactIndex(projectId: string): Promise<ArtifactReference[]> {
-  void projectId;
-  const keys = await readArtifactIndexKeys("request-artifacts/");
-  const store = await artifactIndexStore();
+  const options = resolveProjectArtifactIndexOptions(projectId);
+  const keys = await readArtifactIndexKeys("request-artifacts/", options);
+  const store = await artifactIndexStore(options);
   const references = await Promise.all(keys.map((key) => store.get(key, { type: "json" }).catch(() => null)));
   return references.filter((value): value is ArtifactReference => Boolean(value && typeof value === "object"));
 }

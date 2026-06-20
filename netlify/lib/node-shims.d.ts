@@ -10,6 +10,9 @@ declare class Buffer extends Uint8Array {
   subarray(start?: number, end?: number): Buffer;
   readonly byteLength: number;
 }
+declare module "node:fs/promises" {
+  export function readFile(path: string, encoding: "utf8"): Promise<string>;
+}
 declare module "node:crypto" {
   export function createHash(algorithm: string): { update(input: string | Uint8Array): { digest(encoding: "hex"): string } };
   export function randomUUID(): string;

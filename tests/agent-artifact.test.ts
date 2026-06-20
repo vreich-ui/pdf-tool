@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { projectBlobStore, projectBlobStoreCallLog, resetMemoryBlobStores, setMemoryBlobStoreList } from "../netlify/lib/blob-store.js";
 import { createArtifactJob, readArtifactJob, updateArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { handler as statusHandler } from "../netlify/functions/agent-artifact-job-status.js";
@@ -16,6 +17,7 @@ import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-arti
 import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+const webpBytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x04, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -24,6 +26,8 @@ function env() {
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
+  process.env.SITE_ID = "dr-site";
+  process.env.BLOBS_TOKEN = "dr-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
@@ -147,6 +151,7 @@ test("status endpoint returns pending, complete, and failed jobs", async () => {
 test("mock OpenAI image response returns base64 bytes", async () => {
   const generated = await generateImageArtifactBytes({
     prompt: "x",
+    model: "test-image-model",
     client: { images: { generate: async () => ({ data: [{ b64_json: pngBytes.toString("base64") }] }) } }
   });
   assert.deepEqual(generated.bytes, pngBytes);
@@ -199,13 +204,49 @@ test("OPENAI_API_KEY is required", async () => {
 });
 
 test("GPT image request does not include response_format", () => {
-  const request = imageGenerationRequest({ prompt: "x", model: "gpt-image-1" });
+  const request = imageGenerationRequest({ prompt: "x", model: "test-image-model" });
   assert.equal("response_format" in request, false);
 });
 
 test("DALL-E image request may include response_format", () => {
   const request = imageGenerationRequest({ prompt: "x", model: "dall-e-3" });
   assert.equal(request.response_format, "b64_json");
+});
+
+
+test("model resolution uses explicit input, adapter default, and rejects unsupported models", async () => {
+  const explicit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-explicit", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined, model: "alternate-test-image-model" });
+  assert.equal(explicit.selectedModel, "alternate-test-image-model");
+
+  const fallback = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-default", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  assert.equal(fallback.selectedModel, "dall-e-3");
+
+  let capturedModel: unknown;
+  await executeAgentArtifactWorkflow(explicit, { imageClient: { images: { generate: async (input) => { capturedModel = input.model; return { data: [{ b64_json: pngBytes.toString("base64") }] }; } } } });
+  assert.equal(capturedModel, "alternate-test-image-model");
+
+  const response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-bad", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "unsupported-model" })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body).issues[0].path, ["model"]);
+});
+
+test("generic code does not reference Dr. Lurie-specific environment names", async () => {
+  const files = [
+    "netlify/lib/agent-artifact-jobs.ts",
+    "netlify/lib/agent-artifact-mcp.ts",
+    "netlify/lib/artifact-core/artifacts.ts",
+    "netlify/lib/artifact-core/blob-store.ts",
+    "netlify/lib/artifact-core/artifact-index.ts",
+    "netlify/functions/agent-artifact-worker-background.ts"
+  ];
+  for (const file of files) {
+    const contents = await readFile(file, "utf8");
+    assert.equal(contents.includes(["DR", "LURIE_"].join("_")), false, file);
+  }
 });
 
 test("worker saves image artifact and retained index is updated", async () => {
@@ -221,7 +262,12 @@ test("worker saves image artifact and retained index is updated", async () => {
   assert.equal(index.length, 1);
   assert.equal(index[0].artifactId, stored?.artifact?.artifactId);
 
-  const retainedKeys = await retainedArtifactIndexKeys();
+  const retainedKeys = {
+    requestArtifacts: await readArtifactIndexKeys("request-artifacts/", { storeName: "artifact-index" }),
+    byRequest: await readArtifactIndexKeys("by-request/", { storeName: "artifact-index" }),
+    byKind: await readArtifactIndexKeys("by-kind/", { storeName: "artifact-index" }),
+    byTag: await readArtifactIndexKeys("by-tag/", { storeName: "artifact-index" })
+  };
   assert.equal(retainedKeys.requestArtifacts.length, 1);
   assert.equal(retainedKeys.byRequest.length, 1);
   assert.equal(retainedKeys.byKind.length, 1);
@@ -230,6 +276,42 @@ test("worker saves image artifact and retained index is updated", async () => {
   assert.match(retainedKeys.byRequest[0], /^by-request\//);
   assert.match(retainedKeys.byKind[0], /^by-kind\/image\//);
   assert.match(retainedKeys.byTag[0], /^by-tag\/hero\//);
+});
+
+
+test("Dr. Lurie adapter uses target stores, cross-site config, and canonical ArtifactReference", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-store", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: "Hero" });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.projectId, "dr-lurie");
+  assert.equal(body.requestId, "req-store");
+  assert.equal(body.jobId, job.jobId);
+  assert.equal(body.slot, "hero");
+  assert.equal(body.filename, "hero.png");
+  assert.equal(body.workflowPatchStatus, "skipped_by_design");
+  const artifactKeys = Object.keys(body.artifactReference).sort();
+  assert.deepEqual(artifactKeys, ["artifactKind", "blobKey", "contentType", "createdAtISO", "label", "metadata", "originalFilename", "sha256", "sizeBytes", "tags"].sort());
+  assert.equal(body.artifactReference.metadata.projectId, undefined);
+  assert.equal(body.artifactReference.metadata.requestId, undefined);
+  assert.match(body.artifactReference.blobKey, /^image\/req-store\/[a-f0-9]{64}\.png$/);
+  const calls = projectBlobStoreCallLog();
+  assert.ok(calls.some((call) => call.name === "artifacts" && call.siteID === "dr-site" && call.token === "dr-token"));
+  assert.ok(calls.some((call) => call.name === "artifact-index" && call.siteID === "dr-site" && call.token === "dr-token" && call.consistency === "strong"));
+  assert.equal(calls.some((call) => call.name === "project-artifacts"), false);
+  assert.equal(calls.some((call) => call.name === "project-artifact-index"), false);
+});
+
+test(".webp filename requests WebP and saves WebP content type/blob key", async () => {
+  process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = webpBytes.toString("base64");
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-webp", artifactKind: "image", prompt: "x", filename: "cellular-biology-hero.webp", tags: [], label: undefined });
+  const result = await executeAgentArtifactWorkflow(job);
+  assert.equal(result.contentType, "image/webp");
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.artifactReference.contentType, "image/webp");
+  assert.match(body.artifactReference.blobKey, /^image\/req-webp\/[a-f0-9]{64}\.webp$/);
 });
 
 test("worker background function exports handler and config", async () => {
@@ -261,7 +343,7 @@ test("failed generation updates job as failed", async () => {
 
 test("output over max bytes is rejected", async () => {
   const tooLarge = Buffer.alloc(20).toString("base64");
-  await assert.rejects(() => generateImageArtifactBytes({ prompt: "x", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
+  await assert.rejects(() => generateImageArtifactBytes({ prompt: "x", model: "test-image-model", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
 });
 
 
@@ -273,7 +355,7 @@ test("MCP create_agent_artifact_job returns metadata only and no bytes", async (
     const response = await mcpCreateHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-mcp", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], workflowId: "wf-1", agentName: "content-agent" })
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-mcp", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], agentName: "content-agent" })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -323,7 +405,7 @@ test("MCP artifact endpoints require auth", async () => {
 });
 
 test("workflow integration is disabled and always returns skipped_by_design", async () => {
-  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, workflowId: "wf-1", agentName: "content-agent", attachToWorkflow: true });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, agentName: "content-agent" });
   assert.equal(job.adapterVersion, "dr-lurie-v1");
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
@@ -389,18 +471,18 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
   const artifact = stored?.artifact;
   assert.ok(artifact);
   if (!artifact) throw new Error("expected artifact");
-  assert.equal(artifact.slot, "hero");
+  assert.equal(stored?.slot, "hero");
 
-  const bySlot = await readArtifactReferenceBySlot("dr-lurie", "req-lookup", "hero");
-  const byFilename = await readArtifactReferenceByFilename("dr-lurie", "req-lookup", artifact.filename);
+  const bySlot = await readArtifactReferenceBySlot("dr-lurie", "req-lookup", "hero", { storeName: "artifact-index" });
+  const byFilename = await readArtifactReferenceByFilename("dr-lurie", "req-lookup", artifact.originalFilename!, { storeName: "artifact-index" });
   assert.deepEqual(bySlot, artifact);
   assert.deepEqual(byFilename, artifact);
 
-  const bySlotKeys = await readArtifactIndexKeys("by-slot/");
-  const byFilenameKeys = await readArtifactIndexKeys("by-filename/");
-  const latestBySlotKeys = await readArtifactIndexKeys("latest-by-slot/");
+  const bySlotKeys = await readArtifactIndexKeys("by-slot/", { storeName: "artifact-index" });
+  const byFilenameKeys = await readArtifactIndexKeys("by-filename/", { storeName: "artifact-index" });
+  const latestBySlotKeys = await readArtifactIndexKeys("latest-by-slot/", { storeName: "artifact-index" });
   assert.deepEqual(bySlotKeys, [artifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
-  assert.deepEqual(byFilenameKeys, [artifactFilenamePointerKey("dr-lurie", "req-lookup", artifact.filename)]);
+  assert.deepEqual(byFilenameKeys, [artifactFilenamePointerKey("dr-lurie", "req-lookup", artifact.originalFilename!)]);
   assert.deepEqual(latestBySlotKeys, [latestArtifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
 
   const serializedArtifact = JSON.parse(JSON.stringify(artifact));
@@ -410,7 +492,7 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
   assert.equal("bytes" in body, false);
   assert.equal("b64_json" in body, false);
 
-  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-lookup", filename: artifact.filename }) });
+  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-lookup", filename: artifact.originalFilename }) });
   body = JSON.parse(lookup.body);
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
