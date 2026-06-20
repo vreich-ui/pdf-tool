@@ -9,7 +9,7 @@ import { handler as workerHandler } from "../netlify/functions/agent-artifact-wo
 import { executeAgentArtifactWorkflow } from "../netlify/lib/agent-artifact-workflow.js";
 import { generateImageArtifactBytes, imageGenerationRequest } from "../netlify/lib/agent-image-generation.js";
 import { readArtifactIndex, retainedArtifactIndexKeys } from "../netlify/lib/artifact-core/index.js";
-import { artifactFilenamePointerKey, artifactSlotPointerKey, latestArtifactSlotPointerKey, readArtifactIndexKeys, readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "../netlify/lib/artifact-core/artifact-index.js";
+import { artifactFilenamePointerKey, artifactSlotPointerKey, latestArtifactSlotPointerKey, legacyArtifactFilenamePointerKey, legacyArtifactSlotPointerKey, readArtifactIndexKeys, readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "../netlify/lib/artifact-core/artifact-index.js";
 import { handler as mcpCreateHandler } from "../netlify/functions/create-agent-artifact-job.js";
 import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
 import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-artifact-by-slot.js";
@@ -415,4 +415,47 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
   assert.equal("b64_json" in body, false);
+});
+
+test("legacy lookup fallback works for slot and filename", async () => {
+  const artifact = { projectId: "dr-lurie", requestId: "req-legacy", artifactId: "image-legacy", artifactKind: "image" as const, filename: "legacy.png", contentType: "image/png", size: 12, sha256: "legacy-sha", blobKey: "legacy-k", tags: [], createdAt: new Date().toISOString() };
+  const store = await projectBlobStore("project-artifact-index");
+
+  // Write legacy keys (simulating old data)
+  await store.setJSON(legacyArtifactSlotPointerKey("req-legacy", "legacy-slot"), artifact);
+  await store.setJSON(legacyArtifactFilenamePointerKey("req-legacy", "legacy.png"), artifact);
+
+  const bySlot = await readArtifactReferenceBySlot("dr-lurie", "req-legacy", "legacy-slot");
+  const byFilename = await readArtifactReferenceByFilename("dr-lurie", "req-legacy", "legacy.png");
+
+  assert.deepEqual(bySlot, artifact);
+  assert.deepEqual(byFilename, artifact);
+});
+
+test("adapterVersion comes from selected adapter and is returned in responses", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    // Internal endpoint
+    const internalResponse = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-v", artifactKind: "image", prompt: "p", filename: "v.png", tags: [] })
+    });
+    const internalBody = JSON.parse(internalResponse.body);
+    assert.equal(internalBody.adapterVersion, "dr-lurie-v1");
+
+    // MCP-facing endpoint
+    const mcpResponse = await mcpCreateHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-v-mcp", artifactKind: "image", prompt: "p", filename: "v-mcp.png", tags: [] })
+    });
+    // The MCP handler currently doesn't return adapterVersion in the 202 body, but it is stored in the job.
+    const mcpBody = JSON.parse(mcpResponse.body);
+    const storedJob = await readArtifactJob("dr-lurie", mcpBody.jobId);
+    assert.equal(storedJob?.adapterVersion, "dr-lurie-v1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

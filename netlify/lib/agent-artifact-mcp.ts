@@ -34,7 +34,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatusInput) {
@@ -42,7 +42,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const job = await readArtifactJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Artifact job not found" };
   const artifactReference = job.artifactReference ?? job.artifact;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, artifactReference, artifact: artifactReference, error: job.error };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
 }
 
 

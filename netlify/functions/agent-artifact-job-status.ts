@@ -39,6 +39,7 @@ export async function handler(event: FunctionEvent) {
     requestId: job.requestId,
     artifactKind: job.artifactKind,
     status: job.status,
+    adapterVersion: job.adapterVersion,
     artifactReference,
     artifact: artifactReference,
     error: job.error,

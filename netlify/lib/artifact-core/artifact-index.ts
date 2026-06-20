@@ -42,8 +42,16 @@ export function artifactSlotPointerKey(projectId: string, requestId: string, slo
   return `by-slot/${safePathSegment(projectId)}/${encodeURIComponent(requestId)}/${safePathSegment(slot)}.json`;
 }
 
+export function legacyArtifactSlotPointerKey(requestId: string, slot: string): string {
+  return `by-slot/${encodeURIComponent(requestId)}/${safePathSegment(slot)}.json`;
+}
+
 export function artifactFilenamePointerKey(projectId: string, requestId: string, filename: string): string {
   return `by-filename/${safePathSegment(projectId)}/${encodeURIComponent(requestId)}/${safePathSegment(filename)}.json`;
+}
+
+export function legacyArtifactFilenamePointerKey(requestId: string, filename: string): string {
+  return `by-filename/${encodeURIComponent(requestId)}/${safePathSegment(filename)}.json`;
 }
 
 export function latestArtifactSlotPointerKey(projectId: string, requestId: string, slot: string): string {
@@ -103,11 +111,15 @@ export async function readArtifactReference(requestId: string, sha256: string): 
 }
 
 export async function readArtifactReferenceBySlot(projectId: string, requestId: string, slot: string): Promise<ArtifactReference | undefined> {
-  return readArtifactReferenceAtKey(artifactSlotPointerKey(projectId, requestId, slot));
+  const scoped = await readArtifactReferenceAtKey(artifactSlotPointerKey(projectId, requestId, slot));
+  if (scoped) return scoped;
+  return readArtifactReferenceAtKey(legacyArtifactSlotPointerKey(requestId, slot));
 }
 
 export async function readArtifactReferenceByFilename(projectId: string, requestId: string, filename: string): Promise<ArtifactReference | undefined> {
-  return readArtifactReferenceAtKey(artifactFilenamePointerKey(projectId, requestId, filename));
+  const scoped = await readArtifactReferenceAtKey(artifactFilenamePointerKey(projectId, requestId, filename));
+  if (scoped) return scoped;
+  return readArtifactReferenceAtKey(legacyArtifactFilenamePointerKey(requestId, filename));
 }
 
 type BlobListItem = { key: string };
