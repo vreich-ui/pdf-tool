@@ -27,8 +27,7 @@ export function artifactJobPollingInstructions(projectId: string, jobId: string)
 export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
   const parsed = await validateArtifactJobRequest({ ...input, tags: input.tags ?? [] });
   if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid artifact job input", issues: parsed.error.issues };
-  const adapter = getProjectAdapter(parsed.data.projectId);
-  const job = await createArtifactJob(parsed.data, adapter?.config.adapterVersion);
+  const job = await createArtifactJob(parsed.data);
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);
   } catch (error) {

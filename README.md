@@ -72,8 +72,6 @@ Existing internal endpoints remain available:
 - `AGENT_RUN_TOKEN`: bearer token for internal agent job APIs.
 - `DR_LURIE_OPENAI_API_KEY` or `OPENAI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation.
 - `DR_LURIE_NETLIFY_SITE_ID` / `NETLIFY_SITE_ID` and `DR_LURIE_NETLIFY_BLOBS_TOKEN` / `NETLIFY_BLOBS_TOKEN`: target-project Blob credentials when running outside same-site Blob context.
-- `DR_LURIE_WORKFLOW_ENDPOINT`: (Unsupported future placeholder) optional future workflow endpoint for checked-out/locked workflow patching.
-- `DR_LURIE_ENABLE_WORKFLOW_ATTACHMENT=1`: (Unsupported future placeholder) reserved switch for enabling adapter-mediated workflow attachment; default behavior is safe `workflowPatchStatus: "skipped_by_design"`.
 
 Never expose `OPENAI_API_KEY` to browsers, ChatGPT-hosted clients, MCP tool schemas, logs, or workflow JSON.
 

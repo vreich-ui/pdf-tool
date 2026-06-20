@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
-import { supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
+import { getProjectAdapter, supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
 import type { ArtifactJobWorkflowTarget } from "./project-adapters/types.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
@@ -158,7 +158,9 @@ export function safeError(error: unknown): string {
   return "Artifact generation failed";
 }
 
-export async function createArtifactJob(input: ArtifactJobRequest, adapterVersion = "v1"): Promise<ArtifactJobRecord> {
+export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
+  const adapter = getProjectAdapter(input.projectId);
+  const adapterVersion = adapter?.config.adapterVersion ?? "v1";
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,

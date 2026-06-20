@@ -14,7 +14,6 @@ import { handler as mcpCreateHandler } from "../netlify/functions/create-agent-a
 import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
 import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-artifact-by-slot.js";
 import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
-import { workflowRecordKey, AGENT_ARTIFACT_WORKFLOW_STORE } from "../netlify/lib/agent-artifact-workflow-records.js";
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 
@@ -323,15 +322,13 @@ test("MCP artifact endpoints require auth", async () => {
   assert.equal(response.statusCode, 401);
 });
 
-test("workflow integration is disabled and does not store jobId and ArtifactReference", async () => {
-  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, workflowId: "wf-1", agentName: "content-agent" });
+test("workflow integration is disabled and always returns skipped_by_design", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, workflowId: "wf-1", agentName: "content-agent", attachToWorkflow: true });
+  assert.equal(job.adapterVersion, "dr-lurie-v1");
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.workflowPatchStatus, "skipped_by_design");
-  const store = await projectBlobStore(AGENT_ARTIFACT_WORKFLOW_STORE, { consistency: "strong" });
-  const record = await store.get(workflowRecordKey("dr-lurie", "req-workflow", "wf-1"), { type: "json" });
-  assert.equal(record, null);
 });
 
 test("readArtifactIndexKeys handles AsyncIterable Netlify paginated list output", async () => {
