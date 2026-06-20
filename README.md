@@ -30,7 +30,11 @@ ChatGPT agents remain responsible for text and structured content work through M
 
 ### Endpoints
 
-External MCP servers can call this MCP-facing HTTP facade instead of moving binary payloads through MCP. This is not a standalone MCP protocol server:
+pdf-tool now exposes both direct HTTP endpoints and a lightweight MCP JSON-RPC endpoint. HTTP endpoints are for widgets, curl smoke tests, ChatKit, and direct integrations. The MCP endpoint is for ChatGPT Agents and exposes the same artifact workflow as metadata-only tools. Neither path moves binary payloads through MCP, changes artifact generation/storage, or mutates project workflow JSON. Dr. Lurie workflow JSON remains owned by the Dr. Lurie MCP/agents.
+
+#### HTTP endpoints
+
+Direct integrations can call these HTTP endpoints instead of moving binary payloads through MCP:
 
 - `POST /.netlify/functions/create-agent-artifact-job`
   - MCP-facing `create_agent_artifact_job` endpoint.
@@ -55,6 +59,19 @@ External MCP servers can call this MCP-facing HTTP facade instead of moving bina
 
 Artifact destinations are explicit metadata contracts containing `projectId`, `requestId`, `artifactKind`, optional `slot`, and `filename`. Generic pdf-tool responses wrap the project-native artifact reference as `artifactReference` with `projectId`, `requestId`, `jobId`, `artifactKind`, and `workflowPatchStatus`; they do not replace project-specific `ArtifactReference` shapes.
 
+#### MCP endpoint for ChatGPT Agents
+
+- `POST https://pdf-x.netlify.app/mcp`
+  - Friendly alias for `/.netlify/functions/mcp`; both routes continue to work.
+  - Lightweight JSON-RPC MCP facade for ChatGPT Agents.
+  - Requires `Authorization: Bearer AGENT_RUN_TOKEN` for `initialize`, `tools/list`, and `tools/call`.
+  - Supports `initialize`, `tools/list`, and `tools/call`, plus tolerant lifecycle handling for `notifications/initialized` and `ping`.
+  - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, and `get_agent_artifact_by_filename`.
+  - Tool calls dispatch to the existing shared artifact facade logic in `netlify/lib/agent-artifact-mcp.ts`; artifact generation, OpenAI usage, Blob storage, and project-native `ArtifactReference` shapes are unchanged.
+  - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
+  - Completed job status returns the project-native `artifactReference` exactly as the existing status facade returns it.
+  - pdf-tool MCP never mutates Dr. Lurie workflow JSON; Dr. Lurie MCP/agents remain responsible for workflow JSON updates after receiving an `ArtifactReference`.
+
 Existing internal endpoints remain available:
 
 - `POST /.netlify/functions/agent-artifact-job`
@@ -69,10 +86,13 @@ Existing internal endpoints remain available:
 
 ### Required environment variables
 
-- `AGENT_RUN_TOKEN`: bearer token for internal agent job APIs.
-- pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.
+- `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
-- `CLIENT_SITE_ID` and `CLIENT_BLOBS_TOKEN`: adapter-provided target-project Blob credentials when running outside same-site Blob context.
+- `PDF_TOOL_SITE_ID`: Netlify site ID for pdf-tool job-state Blob storage when running outside same-site Blob context.
+- `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
+- `CLIENT_SITE_ID`: adapter-provided target-project site ID for artifact Blob storage when running outside same-site Blob context.
+- `CLIENT_BLOBS_TOKEN`: adapter-provided target-project Blob token for artifact Blob storage when running outside same-site Blob context.
+- pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.
 - Agents may include `model` in artifact job input; adapters define a `defaultModel`, and unsupported models are rejected.
 - Artifact generation/storage stays separate from workflow ownership: agents call project MCP/workflow APIs separately after receiving an `ArtifactReference`.
 

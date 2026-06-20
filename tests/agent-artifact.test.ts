@@ -15,6 +15,7 @@ import { handler as mcpCreateHandler } from "../netlify/functions/create-agent-a
 import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
 import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-artifact-by-slot.js";
 import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
+import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
 const webpBytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x04, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
@@ -32,6 +33,20 @@ function env() {
   process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
+}
+
+
+function noBinaryPayload(value: unknown): boolean {
+  const serialized = JSON.stringify(value);
+  return !serialized.includes("bytes") && !serialized.includes("b64_json") && !serialized.includes(pngBytes.toString("base64"));
+}
+
+async function mcpRpc(method: string, params?: Record<string, unknown>, headers: Record<string, string> = { authorization: "Bearer test-token" }) {
+  return await mcpServerHandler({
+    httpMethod: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, ...(params ? { params } : {}) })
+  });
 }
 
 test.beforeEach(() => {
@@ -564,4 +579,119 @@ test("adapterVersion comes from selected adapter and is returned in responses", 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+
+test("MCP JSON-RPC initialize returns server capabilities", async () => {
+  const response = await mcpRpc("initialize");
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.jsonrpc, "2.0");
+  assert.equal(body.result.serverInfo.name, "pdf-tool-agent-artifacts");
+  assert.deepEqual(body.result.capabilities.tools, {});
+});
+
+test("MCP JSON-RPC tools/list includes all artifact tools", async () => {
+  const response = await mcpRpc("tools/list");
+  assert.equal(response.statusCode, 200);
+  const names = JSON.parse(response.body).result.tools.map((tool: { name: string }) => tool.name).sort();
+  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status"].sort());
+});
+
+
+test("MCP JSON-RPC lifecycle calls are handled tolerantly", async () => {
+  let response = await mcpRpc("ping");
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body).result, {});
+
+  response = await mcpRpc("notifications/initialized");
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body).result, {});
+
+  response = await mcpServerHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })
+  });
+  assert.equal(response.statusCode, 204);
+  assert.equal(response.body, "");
+});
+
+test("Netlify /mcp rewrite reaches the MCP function", async () => {
+  const config = await readFile("netlify.toml", "utf8");
+  assert.match(config, /from = "\/mcp"/);
+  assert.match(config, /to = "\/\.netlify\/functions\/mcp"/);
+  assert.match(config, /status = 200/);
+});
+
+test("MCP JSON-RPC create_agent_artifact_job creates a pending metadata-only job", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.URL = "https://example.netlify.app";
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await mcpRpc("tools/call", { name: "create_agent_artifact_job", arguments: { projectId: "dr-lurie", requestId: "req-rpc", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], promptId: "prompt-1" } });
+    assert.equal(response.statusCode, 200);
+    const result = JSON.parse(response.body).result.structuredContent;
+    assert.equal(result.status, "pending");
+    assert.equal(result.projectId, "dr-lurie");
+    assert.equal(result.requestId, "req-rpc");
+    assert.equal(result.artifactKind, "image");
+    assert.equal(result.destination.slot, "hero");
+    assert.equal(result.destination.filename, "hero.png");
+    assert.equal(result.polling.tool, "get_agent_artifact_job_status");
+    assert.equal(noBinaryPayload(result), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("MCP JSON-RPC get_agent_artifact_job_status returns pending complete and failed", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-status", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: job.jobId } });
+  assert.equal(JSON.parse(response.body).result.structuredContent.status, "pending");
+
+  const artifact = { projectId: "dr-lurie", requestId: "req-rpc-status", artifactId: "image-1", artifactKind: "image" as const, filename: "x.png", contentType: "image/png", size: 12, sha256: "abc", blobKey: "k", tags: [], createdAt: new Date().toISOString() };
+  await updateArtifactJob(job, { status: "complete", artifact });
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: job.jobId } });
+  const complete = JSON.parse(response.body).result.structuredContent;
+  assert.equal(complete.status, "complete");
+  assert.deepEqual(complete.artifactReference, artifact);
+  assert.equal(noBinaryPayload(complete), true);
+
+  const failed = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-failed", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
+  await updateArtifactJob(failed, { status: "failed", error: "safe failure" });
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: failed.jobId } });
+  const failedResult = JSON.parse(response.body).result.structuredContent;
+  assert.equal(failedResult.status, "failed");
+  assert.equal(failedResult.error, "safe failure");
+});
+
+test("MCP JSON-RPC lookup tools return artifactReference only", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-lookup", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: [], label: undefined });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const stored = await readArtifactJob("dr-lurie", job.jobId);
+  const artifact = JSON.parse(JSON.stringify(stored?.artifact));
+
+  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_slot", arguments: { projectId: "dr-lurie", requestId: "req-rpc-lookup", slot: "hero" } });
+  let result = JSON.parse(response.body).result.structuredContent;
+  assert.deepEqual(result.artifactReference, artifact);
+  assert.equal("artifact" in result, false);
+  assert.equal(noBinaryPayload(result), true);
+
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_filename", arguments: { projectId: "dr-lurie", requestId: "req-rpc-lookup", filename: artifact.originalFilename } });
+  result = JSON.parse(response.body).result.structuredContent;
+  assert.deepEqual(result.artifactReference, artifact);
+  assert.equal("artifact" in result, false);
+  assert.equal(noBinaryPayload(result), true);
+});
+
+test("MCP JSON-RPC unauthorized and unknown tool return JSON-RPC errors", async () => {
+  let response = await mcpRpc("initialize", undefined, {});
+  assert.equal(response.statusCode, 401);
+  let body = JSON.parse(response.body);
+  assert.equal(body.error.code, -32001);
+
+  response = await mcpRpc("tools/call", { name: "unknown_tool", arguments: {} });
+  body = JSON.parse(response.body);
+  assert.equal(body.error.code, -32602);
 });

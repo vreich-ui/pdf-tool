@@ -13,6 +13,7 @@ export interface CreateAgentArtifactJobInput {
   tags?: string[];
   label?: string;
   agentName?: string;
+  promptId?: string;
   model?: string;
 }
 
