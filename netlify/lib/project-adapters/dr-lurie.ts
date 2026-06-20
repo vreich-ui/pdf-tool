@@ -33,8 +33,8 @@ function validateBytes(input: SaveArtifactBytesInput, bytes: Buffer): void {
 export const drLurieAdapter: ProjectArtifactAdapter = {
   config: {
     projectId: "dr-lurie",
-    siteIdEnv: "SITE_ID",
-    blobsTokenEnv: "BLOBS_TOKEN",
+    siteIdEnv: "CLIENT_SITE_ID",
+    blobsTokenEnv: "CLIENT_BLOBS_TOKEN",
     openAiKeyEnv: "OPENAI_API_KEY",
     artifactStoreName: "artifacts",
     artifactIndexStoreName: "artifact-index",

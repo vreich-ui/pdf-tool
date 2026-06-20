@@ -26,8 +26,8 @@ function env() {
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
-  process.env.SITE_ID = "dr-site";
-  process.env.BLOBS_TOKEN = "dr-token";
+  process.env.CLIENT_SITE_ID = "dr-site";
+  process.env.CLIENT_BLOBS_TOKEN = "dr-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
