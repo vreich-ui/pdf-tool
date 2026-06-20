@@ -40,8 +40,8 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     artifactIndexStoreName: "artifact-index",
     allowedArtifactKinds: ["image", "pdf"],
     artifactReferenceAdapter: "dr-lurie",
-    defaultModel: "dall-e-3",
-    allowedModels: ["dall-e-3", "test-image-model", "alternate-test-image-model"],
+    defaultModel: "gpt-image-1",
+    allowedModels: ["gpt-image-1", "test-image-model", "alternate-test-image-model"],
     adapterVersion: "dr-lurie-v1"
   },
   async saveArtifactBytes(input) {
