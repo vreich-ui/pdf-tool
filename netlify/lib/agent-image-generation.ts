@@ -27,6 +27,10 @@ function extractB64Json(response: unknown): string | undefined {
   return typeof b64 === "string" ? b64 : undefined;
 }
 
+function supportsOutputFormat(model: string): boolean {
+  return model.toLowerCase().startsWith("gpt-image");
+}
+
 export function imageGenerationRequest(options: {
   prompt: string;
   model?: string;
@@ -37,12 +41,11 @@ export function imageGenerationRequest(options: {
   const request: Record<string, unknown> = {
     model: options.model,
     prompt: options.prompt,
-    size: options.size ?? "1024x1024",
-    output_format: options.outputFormat ?? "png"
+    size: options.size ?? "1024x1024"
   };
 
-  if (options.model.toLowerCase().startsWith("dall-e")) {
-    request.response_format = "b64_json";
+  if (supportsOutputFormat(options.model)) {
+    request.output_format = options.outputFormat ?? "png";
   }
 
   return request;

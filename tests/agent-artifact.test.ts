@@ -28,6 +28,8 @@ function env() {
   process.env.OPENAI_API_KEY = "test-openai-key";
   process.env.CLIENT_SITE_ID = "dr-site";
   process.env.CLIENT_BLOBS_TOKEN = "dr-token";
+  process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
+  process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
@@ -203,16 +205,23 @@ test("OPENAI_API_KEY is required", async () => {
   await assert.rejects(() => generateImageArtifactBytes({ prompt: "x" }), /OPENAI_API_KEY is not configured/);
 });
 
+test("DALL-E 3 image request does not include response_format", () => {
+  const request = imageGenerationRequest({ prompt: "x", model: "dall-e-3" });
+  assert.equal("response_format" in request, false);
+  assert.equal("output_format" in request, false);
+});
+
 test("GPT image request does not include response_format", () => {
+  const request = imageGenerationRequest({ prompt: "x", model: "gpt-image-1", outputFormat: "webp" });
+  assert.equal("response_format" in request, false);
+  assert.equal(request.output_format, "webp");
+});
+
+test("non-GPT image request omits unsupported image output parameters", () => {
   const request = imageGenerationRequest({ prompt: "x", model: "test-image-model" });
   assert.equal("response_format" in request, false);
+  assert.equal("output_format" in request, false);
 });
-
-test("DALL-E image request may include response_format", () => {
-  const request = imageGenerationRequest({ prompt: "x", model: "dall-e-3" });
-  assert.equal(request.response_format, "b64_json");
-});
-
 
 test("model resolution uses explicit input, adapter default, and rejects unsupported models", async () => {
   const explicit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-explicit", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined, model: "alternate-test-image-model" });
@@ -232,6 +241,14 @@ test("model resolution uses explicit input, adapter default, and rejects unsuppo
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["model"]);
+
+  const gptImageResponse = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-gpt-image", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "gpt-image-1" })
+  });
+  assert.equal(gptImageResponse.statusCode, 400);
+  assert.deepEqual(JSON.parse(gptImageResponse.body).issues[0].path, ["model"]);
 });
 
 test("generic code does not reference Dr. Lurie-specific environment names", async () => {
