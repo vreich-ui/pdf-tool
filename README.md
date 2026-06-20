@@ -34,7 +34,7 @@ External MCP servers can call this MCP-facing HTTP facade instead of moving bina
 
 - `POST /.netlify/functions/create-agent-artifact-job`
   - MCP-facing `create_agent_artifact_job` endpoint.
-  - Accepts `projectId`, `requestId`, `artifactKind`, `prompt`, `filename`, optional safe `slot`, `tags`, `label`, `workflowId`, and `agentName`.
+  - Accepts `projectId`, `requestId`, `artifactKind`, `prompt`, `filename`, optional safe `slot`, `tags`, `label`, `agentName`, and `model`.
   - Creates a job, triggers the Netlify Agent SDK worker, and returns only job metadata plus polling instructions.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 - `GET|POST /.netlify/functions/get-agent-artifact-job-status`
@@ -44,12 +44,12 @@ External MCP servers can call this MCP-facing HTTP facade instead of moving bina
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 - `GET|POST /.netlify/functions/get-agent-artifact-by-slot`
   - MCP-facing facade for `get_agent_artifact_by_slot`.
-  - Looks up `ArtifactReference` by `requestId` and safe `slot`.
+  - Requires `projectId`, `requestId`, and safe `slot`.
   - Never returns image or PDF bytes.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 - `GET|POST /.netlify/functions/get-agent-artifact-by-filename`
   - MCP-facing facade for `get_agent_artifact_by_filename`.
-  - Looks up `ArtifactReference` by `requestId` and stored `filename`.
+  - Requires `projectId`, `requestId`, and `filename`.
   - Never returns image or PDF bytes.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 
@@ -70,8 +70,11 @@ Existing internal endpoints remain available:
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for internal agent job APIs.
-- `DR_LURIE_OPENAI_API_KEY` or `OPENAI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation.
-- `DR_LURIE_NETLIFY_SITE_ID` / `NETLIFY_SITE_ID` and `DR_LURIE_NETLIFY_BLOBS_TOKEN` / `NETLIFY_BLOBS_TOKEN`: target-project Blob credentials when running outside same-site Blob context.
+- pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.
+- `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
+- `SITE_ID` and `BLOBS_TOKEN`: adapter-provided target-project Blob credentials when running outside same-site Blob context.
+- Agents may include `model` in artifact job input; adapters define a `defaultModel`, and unsupported models are rejected.
+- Artifact generation/storage stays separate from workflow ownership: agents call project MCP/workflow APIs separately after receiving an `ArtifactReference`.
 
 Never expose `OPENAI_API_KEY` to browsers, ChatGPT-hosted clients, MCP tool schemas, logs, or workflow JSON.
 
@@ -88,6 +91,6 @@ Generated artifact output is limited to `5_000_000` bytes before persistence. Im
 
 ### Multi-project adapter model
 
-`netlify/lib/agent-project-registry.ts` validates `projectId` and routes jobs to a project adapter. Each adapter declares OpenAI key aliases, target Netlify Blob credential aliases, artifact and index store names, optional workflow endpoint aliases, allowed artifact kinds, and the workflow adapter name. Future projects should add their own adapter rather than changing Dr. Lurie contracts.
+`netlify/lib/agent-project-registry.ts` validates `projectId` and routes jobs to a project adapter. Each adapter declares its OpenAI key env name, target Netlify Blob credential env names, artifact and index store names, artifact reference adapter, default model, allowed models, and allowed artifact kinds. Future projects should add their own adapter rather than changing Dr. Lurie contracts.
 
-For Dr. Lurie, artifact Blob keys are `{artifactKind}/{safeRequestId}/{sha256}{extension}`. Retained index keys are `request-artifacts/{requestId}/{sha256}.json`, `by-request/{requestId}/{kind}/{sha256}.json`, `by-kind/{kind}/{sha256}.json`, and `by-tag/{tag}/{sha256}.json`. Workflow JSON mutation is intentionally skipped unless explicitly enabled so pdf-tool does not bypass Dr. Lurie's existing lock/version model; ChatGPT/MCP agents can patch workflow JSON with the returned `artifactReference`.
+For Dr. Lurie, artifact Blob keys are `{artifactKind}/{safeRequestId}/{sha256}{extension}`. Retained index keys are `request-artifacts/{requestId}/{sha256}.json`, `by-request/{requestId}/{kind}/{sha256}.json`, `by-kind/{kind}/{sha256}.json`, and `by-tag/{tag}/{sha256}.json`. Workflow mutation is not implemented in pdf-tool by design. Agents/project MCP own checkout, patch, and checkin.

@@ -1,7 +1,7 @@
 import { projectBlobStore } from "../blob-store.js";
 import { sha256Hex, type ArtifactReference, type SaveArtifactBytesInput } from "../artifact-core/index.js";
 import { writeArtifactReferenceIndexes } from "../artifact-core/artifact-index.js";
-import type { ProjectArtifactAdapter, WorkflowPatchStatus } from "./types.js";
+import type { ProjectArtifactAdapter } from "./types.js";
 
 function safePathSegment(value: string): string {
   const safe = value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -33,13 +33,15 @@ function validateBytes(input: SaveArtifactBytesInput, bytes: Buffer): void {
 export const drLurieAdapter: ProjectArtifactAdapter = {
   config: {
     projectId: "dr-lurie",
-    openAIKeyEnvAliases: ["DR_LURIE_OPENAI_API_KEY", "OPENAI_API_KEY"],
-    netlifySiteIdEnvAliases: ["DR_LURIE_NETLIFY_SITE_ID", "NETLIFY_SITE_ID"],
-    netlifyBlobTokenEnvAliases: ["DR_LURIE_NETLIFY_BLOBS_TOKEN", "NETLIFY_BLOBS_TOKEN"],
-    artifactStoreName: "project-artifacts",
-    artifactIndexStoreName: "project-artifact-index",
+    siteIdEnv: "SITE_ID",
+    blobsTokenEnv: "BLOBS_TOKEN",
+    openAiKeyEnv: "OPENAI_API_KEY",
+    artifactStoreName: "artifacts",
+    artifactIndexStoreName: "artifact-index",
     allowedArtifactKinds: ["image", "pdf"],
-    workflowAdapterName: "dr-lurie",
+    artifactReferenceAdapter: "dr-lurie",
+    defaultModel: "dall-e-3",
+    allowedModels: ["dall-e-3", "test-image-model", "alternate-test-image-model"],
     adapterVersion: "dr-lurie-v1"
   },
   async saveArtifactBytes(input) {
@@ -58,21 +60,15 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
       createdAtISO: new Date().toISOString(),
       artifactKind: input.artifactKind,
       originalFilename: input.filename,
-      filename: input.filename,
       label: input.label,
       tags: input.tags ?? [],
-      metadata: { projectId: input.projectId, requestId: input.requestId, ...(input.slot ? { slot: input.slot } : {}) },
-      projectId: input.projectId,
-      requestId: input.requestId,
-      artifactId: `${input.artifactKind}-${sha256.slice(0, 16)}`,
-      slot: input.slot,
-      size: bytes.byteLength,
-      createdAt: new Date().toISOString()
+      metadata: {}
     };
-    const store = await projectBlobStore(this.config.artifactStoreName);
+    const blobStoreOptions = { siteID: process.env[this.config.siteIdEnv], token: process.env[this.config.blobsTokenEnv] };
+    const store = await projectBlobStore(this.config.artifactStoreName, blobStoreOptions);
     await store.set(blobKey, bytes, { metadata: { requestId: input.requestId, sha256, contentType: input.contentType, artifactKind: input.artifactKind } });
     await store.setJSON(`${blobKey}.json`, artifact);
-    await writeArtifactReferenceIndexes(input.requestId, artifact);
+    await writeArtifactReferenceIndexes(input.requestId, artifact, { storeName: this.config.artifactIndexStoreName, projectId: input.projectId, slot: input.slot, filename: input.filename, ...blobStoreOptions });
     return artifact;
   }
 };

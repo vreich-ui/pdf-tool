@@ -1,5 +1,5 @@
 const memoryStores = new Map<string, Map<string, unknown>>();
-const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eventual" }> = [];
+const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }> = [];
 const memoryListOverrides = new Map<string, ProjectBlobStore["list"]>();
 
 export interface ProjectBlobStore {
@@ -47,20 +47,25 @@ export function setMemoryBlobStoreList(name: string, list: ProjectBlobStore["lis
   memoryListOverrides.set(name, list);
 }
 
-export function projectBlobStoreCallLog(): Array<{ name: string; consistency?: "strong" | "eventual" }> {
+export function projectBlobStoreCallLog(): Array<{ name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }> {
   return [...projectBlobStoreCalls];
 }
 
 export interface ProjectBlobStoreOptions {
   consistency?: "strong" | "eventual";
+  siteID?: string;
+  token?: string;
 }
 
 export async function projectBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  projectBlobStoreCalls.push({ name, consistency: options.consistency });
+  projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID: options.siteID, token: options.token });
   if (process.env.AGENT_ARTIFACT_MEMORY_BLOBS === "1") {
     return memoryStore(name);
   }
   const { getStore } = await import("@netlify/blobs");
-  const getProjectStore = getStore as unknown as (input: string | { name: string; consistency?: "strong" | "eventual" }) => ProjectBlobStore;
-  return getProjectStore(options.consistency ? { name, consistency: options.consistency } : name);
+  const getProjectStore = getStore as unknown as (input: string | { name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }) => ProjectBlobStore;
+  if (options.consistency || options.siteID || options.token) {
+    return getProjectStore({ name, consistency: options.consistency, siteID: options.siteID, token: options.token });
+  }
+  return getProjectStore(name);
 }

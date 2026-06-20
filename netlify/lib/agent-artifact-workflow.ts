@@ -8,6 +8,8 @@ export interface AgentArtifactWorkflowOptions {
   agentSdk?: AgentSdkModule;
 }
 
+export type ImageOutputFormat = "png" | "jpeg" | "webp";
+
 export interface AgentArtifactWorkflowResult extends GeneratedImageBytes {
   workflowExecuted: true;
   toolInvoked: "generate_image_artifact";
@@ -18,6 +20,14 @@ type AgentSdkModule = {
   Runner?: new () => { run?: (agent: unknown, input: string) => Promise<unknown> };
   tool?: (input: Record<string, unknown>) => unknown;
 };
+
+
+export function imageOutputFormatFromFilename(filename: string): ImageOutputFormat {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".webp")) return "webp";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "jpeg";
+  return "png";
+}
 
 async function loadAgentSdk(provided?: AgentSdkModule): Promise<AgentSdkModule> {
   if (provided) return provided;
@@ -50,7 +60,6 @@ async function runAgentSdkWorkflow(job: ArtifactJobRecord, agents: AgentSdkModul
   const agent = new agents.Agent({
     name: "Artifact Generation Agent",
     instructions: "Use the generate_image_artifact tool exactly once for image artifacts. Do not handle article content or pass bytes through MCP.",
-    model: "gpt-5.4",
     tools: [imageTool]
   });
   const runner = new agents.Runner();
@@ -70,7 +79,9 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
     generated = await generateImageArtifactBytes({
       prompt: job.prompt,
       client: options.imageClient,
-      apiKey: options.apiKey
+      apiKey: options.apiKey,
+      outputFormat: imageOutputFormatFromFilename(job.filename),
+      model: job.selectedModel
     });
     return {
       ok: true as const,

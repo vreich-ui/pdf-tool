@@ -1,22 +1,17 @@
 import type { ArtifactKind, ArtifactReference, SaveArtifactBytesInput } from "../artifact-core/index.js";
 
-export type WorkflowPatchStatus = "skipped" | "attached" | "failed";
-
 export interface ProjectConfig {
   projectId: string;
-  openAIKeyEnvAliases: string[];
-  netlifySiteIdEnvAliases: string[];
-  netlifyBlobTokenEnvAliases: string[];
+  siteIdEnv: string;
+  blobsTokenEnv: string;
+  openAiKeyEnv: string;
   artifactStoreName: string;
   artifactIndexStoreName: string;
   allowedArtifactKinds: ArtifactKind[];
-  workflowAdapterName: string;
+  artifactReferenceAdapter: string;
+  defaultModel: string;
+  allowedModels: string[];
   adapterVersion: string;
-}
-
-export interface ArtifactJobWorkflowTarget {
-  publicationPayload?: boolean;
-  featuredImage?: boolean;
 }
 
 export interface ProjectArtifactAdapter {

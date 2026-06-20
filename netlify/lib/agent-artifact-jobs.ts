@@ -1,8 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
-import { getProjectAdapter, supportedProjectIds, validateProjectArtifactKind } from "./agent-project-registry.js";
-import type { ArtifactJobWorkflowTarget } from "./project-adapters/types.js";
+import { getProjectAdapter, resolveProjectModel, supportedProjectIds, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
@@ -17,14 +16,11 @@ export interface ArtifactJobRequest {
   slot?: string;
   tags: string[];
   label?: string;
-  workflowId?: string;
   agentName?: string;
   promptId?: string;
-  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
-  attachToWorkflow?: boolean;
-  /** @deprecated pdf-tool must not mutate project workflow JSON. Ignored. */
-  workflowTarget?: ArtifactJobWorkflowTarget;
+  model?: string;
 }
+
 
 export function isSafeOptionalPathSegment(value: string): boolean {
   const trimmed = value.trim();
@@ -49,11 +45,9 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       slot: z.string().optional(),
       tags: z.array(z.string()).default([]),
       label: z.string().optional(),
-      workflowId: z.string().optional(),
       agentName: z.string().optional(),
       promptId: z.string().optional(),
-      attachToWorkflow: z.boolean().optional(),
-      workflowTarget: z.object({ publicationPayload: z.boolean().optional(), featuredImage: z.boolean().optional() }).optional()
+      model: z.string().optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
       if (!supportedProjectIds().has(value.projectId)) {
         ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
@@ -63,6 +57,9 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       }
       const kindIssue = validateProjectArtifactKind(value.projectId, value.artifactKind);
       if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
+      const resolvedModel = resolveProjectModel(value.projectId, value.model);
+      const modelIssue = validateProjectModel(value.projectId, resolvedModel);
+      if (modelIssue) ctx.addIssue({ code: "custom", path: ["model"], message: modelIssue });
     });
     const result = schema.safeParse(input);
     if (result.success) return { success: true, data: result.data as ArtifactJobRequest };
@@ -96,11 +93,9 @@ export const artifactJobRequestSchema = {
     const slot = typeof value.slot === "string" ? value.slot : undefined;
     const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : [];
     const label = typeof value.label === "string" ? value.label : undefined;
-    const workflowId = typeof value.workflowId === "string" ? value.workflowId : undefined;
     const agentName = typeof value.agentName === "string" ? value.agentName : undefined;
     const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
-    const attachToWorkflow = typeof value.attachToWorkflow === "boolean" ? value.attachToWorkflow : undefined;
-    const workflowTarget = value.workflowTarget && typeof value.workflowTarget === "object" ? value.workflowTarget as ArtifactJobWorkflowTarget : undefined;
+    const model = typeof value.model === "string" ? value.model.trim() : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
@@ -111,9 +106,12 @@ export const artifactJobRequestSchema = {
     if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
     const kindIssue = validateProjectArtifactKind(projectId, artifactKind as ArtifactKind);
     if (projectId && kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
+    const resolvedModel = projectId ? resolveProjectModel(projectId, model) : undefined;
+    const modelIssue = projectId ? validateProjectModel(projectId, resolvedModel) : undefined;
+    if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, workflowId, agentName, promptId, attachToWorkflow, workflowTarget } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, agentName, promptId, model } };
   }
 };
 
@@ -131,6 +129,7 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   artifact?: ArtifactReference;
   error?: string;
   adapterVersion: string;
+  selectedModel?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -161,6 +160,7 @@ export function safeError(error: unknown): string {
 export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
   const adapter = getProjectAdapter(input.projectId);
   const adapterVersion = adapter?.config.adapterVersion ?? "v1";
+  const selectedModel = resolveProjectModel(input.projectId, input.model);
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,
@@ -168,7 +168,8 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
     status: "pending",
     createdAt: now,
     updatedAt: now,
-    adapterVersion
+    adapterVersion,
+    selectedModel
   };
   await writeArtifactJob(job);
   return job;

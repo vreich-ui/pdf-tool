@@ -58,12 +58,12 @@ export function latestArtifactSlotPointerKey(projectId: string, requestId: strin
   return `latest-by-slot/${safePathSegment(projectId)}/${encodeURIComponent(requestId)}/${safePathSegment(slot)}.json`;
 }
 
-export async function artifactIndexStore(): Promise<ProjectBlobStore> {
-  return projectBlobStore(ARTIFACT_INDEX_STORE_NAME, { consistency: "strong" });
+export async function artifactIndexStore(options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ProjectBlobStore> {
+  return projectBlobStore(options.storeName ?? ARTIFACT_INDEX_STORE_NAME, { consistency: "strong", siteID: options.siteID, token: options.token });
 }
 
-export async function writeArtifactReferenceIndexes(requestId: string, reference: ArtifactReference): Promise<void> {
-  const indexStore = await artifactIndexStore();
+export async function writeArtifactReferenceIndexes(requestId: string, reference: ArtifactReference, options: { storeName?: string; siteID?: string; token?: string; projectId?: string; slot?: string; filename?: string } = {}): Promise<void> {
+  const indexStore = await artifactIndexStore(options);
   const pointer = artifactPointerValue(requestId, reference);
   const pointerMetadata = {
     requestId,
@@ -80,20 +80,22 @@ export async function writeArtifactReferenceIndexes(requestId: string, reference
     indexStore.setJSON(requestArtifactReferenceKey(requestId, reference.sha256), reference, { metadata: fullReferenceMetadata }),
     indexStore.setJSON(artifactKindPointerKey(reference), pointer, { metadata: pointerMetadata }),
     indexStore.setJSON(artifactRequestPointerKey(requestId, reference), pointer, { metadata: pointerMetadata }),
-    ...(reference.filename ?? reference.originalFilename ? [indexStore.setJSON(artifactFilenamePointerKey(reference.projectId!, requestId, (reference.filename ?? reference.originalFilename)!), reference, { metadata: fullReferenceMetadata })] : []),
+    ...((options.filename ?? reference.filename ?? reference.originalFilename) && (options.projectId ?? reference.projectId) ? [indexStore.setJSON(artifactFilenamePointerKey((options.projectId ?? reference.projectId)!, requestId, (options.filename ?? reference.filename ?? reference.originalFilename)!), reference, { metadata: fullReferenceMetadata })] : []),
     ...artifactTagPointerKeys(reference).map((key) => indexStore.setJSON(key, pointer, { metadata: pointerMetadata }))
   ];
-  if (reference.slot && reference.projectId) {
+  const slot = options.slot ?? reference.slot;
+  const projectId = options.projectId ?? reference.projectId;
+  if (slot && projectId) {
     writes.push(
-      indexStore.setJSON(artifactSlotPointerKey(reference.projectId, requestId, reference.slot), reference, { metadata: fullReferenceMetadata }),
-      indexStore.setJSON(latestArtifactSlotPointerKey(reference.projectId, requestId, reference.slot), reference, { metadata: fullReferenceMetadata })
+      indexStore.setJSON(artifactSlotPointerKey(projectId, requestId, slot), reference, { metadata: fullReferenceMetadata }),
+      indexStore.setJSON(latestArtifactSlotPointerKey(projectId, requestId, slot), reference, { metadata: fullReferenceMetadata })
     );
   }
   await Promise.all(writes);
 }
 
-async function readArtifactReferenceAtKey(key: string): Promise<ArtifactReference | undefined> {
-  const indexStore = await artifactIndexStore();
+async function readArtifactReferenceAtKey(key: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ArtifactReference | undefined> {
+  const indexStore = await artifactIndexStore(options);
   const existing = await indexStore.get(key, { type: "json" }).catch(() => null);
   if (!existing) return undefined;
   if (typeof existing === "string") {
@@ -110,16 +112,16 @@ export async function readArtifactReference(requestId: string, sha256: string): 
   return readArtifactReferenceAtKey(requestArtifactReferenceKey(requestId, sha256));
 }
 
-export async function readArtifactReferenceBySlot(projectId: string, requestId: string, slot: string): Promise<ArtifactReference | undefined> {
-  const scoped = await readArtifactReferenceAtKey(artifactSlotPointerKey(projectId, requestId, slot));
+export async function readArtifactReferenceBySlot(projectId: string, requestId: string, slot: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ArtifactReference | undefined> {
+  const scoped = await readArtifactReferenceAtKey(artifactSlotPointerKey(projectId, requestId, slot), options);
   if (scoped) return scoped;
-  return readArtifactReferenceAtKey(legacyArtifactSlotPointerKey(requestId, slot));
+  return readArtifactReferenceAtKey(legacyArtifactSlotPointerKey(requestId, slot), options);
 }
 
-export async function readArtifactReferenceByFilename(projectId: string, requestId: string, filename: string): Promise<ArtifactReference | undefined> {
-  const scoped = await readArtifactReferenceAtKey(artifactFilenamePointerKey(projectId, requestId, filename));
+export async function readArtifactReferenceByFilename(projectId: string, requestId: string, filename: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ArtifactReference | undefined> {
+  const scoped = await readArtifactReferenceAtKey(artifactFilenamePointerKey(projectId, requestId, filename), options);
   if (scoped) return scoped;
-  return readArtifactReferenceAtKey(legacyArtifactFilenamePointerKey(requestId, filename));
+  return readArtifactReferenceAtKey(legacyArtifactFilenamePointerKey(requestId, filename), options);
 }
 
 type BlobListItem = { key: string };
@@ -135,8 +137,8 @@ function collectBlobKeys(items: BlobListItem[] | undefined, keys: string[]): voi
   }
 }
 
-export async function readArtifactIndexKeys(prefix: string): Promise<string[]> {
-  const indexStore = await artifactIndexStore();
+export async function readArtifactIndexKeys(prefix: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<string[]> {
+  const indexStore = await artifactIndexStore(options);
   if (!indexStore.list) return [];
   const result = await indexStore.list({ prefix, directories: false, paginate: true });
   const keys: string[] = [];

@@ -33,15 +33,15 @@ export function imageGenerationRequest(options: {
   size?: string;
   outputFormat?: "png" | "jpeg" | "webp";
 }): Record<string, unknown> {
-  const model = options.model ?? "gpt-image-1";
+  if (!options.model) throw new Error("Image generation model is not configured");
   const request: Record<string, unknown> = {
-    model,
+    model: options.model,
     prompt: options.prompt,
     size: options.size ?? "1024x1024",
     output_format: options.outputFormat ?? "png"
   };
 
-  if (model.toLowerCase().startsWith("dall-e")) {
+  if (options.model.toLowerCase().startsWith("dall-e")) {
     request.response_format = "b64_json";
   }
 
@@ -49,7 +49,7 @@ export function imageGenerationRequest(options: {
 }
 
 async function defaultOpenAIClient(providedKey?: string): Promise<ImageGenerationClient> {
-  const apiKey = providedKey ?? process.env.DR_LURIE_OPENAI_API_KEY ?? process.env.OPENAI_API_KEY;
+  const apiKey = providedKey ?? process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
