@@ -42,6 +42,7 @@ export interface SaveArtifactBytesInput {
   sha256?: string;
   tags: string[];
   label?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export function sha256Hex(bytes: Buffer | Uint8Array | string): string {

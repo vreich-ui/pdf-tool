@@ -33,7 +33,7 @@ export async function handler(event: FunctionEvent) {
     return jsonResponse(404, { error: "Artifact job not found" });
   }
   if (job.status === "complete" || job.status === "running") {
-    return jsonResponse(200, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, workflowPatchStatus: "skipped_by_design", artifactReference: job.artifactReference ?? job.artifact });
+    return jsonResponse(200, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", artifactReference: job.artifactReference ?? job.artifact });
   }
 
   let runningJob = job;
@@ -59,11 +59,15 @@ export async function handler(event: FunctionEvent) {
       bytes: generated.bytes,
       sha256,
       tags: runningJob.tags,
-      label: runningJob.label
+      label: runningJob.label,
+      metadata: runningJob.requirements?.image ? {
+        imageRole: runningJob.requirements.image.role,
+        usageContext: runningJob.requirements.image.usageContext
+      } : undefined
     });
     const workflowPatchStatus = "skipped_by_design";
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined });
-    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: complete.selectedModel, workflowPatchStatus, artifactReference: complete.artifactReference });
+    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: complete.selectedModel, requirements: complete.requirements, workflowPatchStatus, artifactReference: complete.artifactReference });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });
     return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error });

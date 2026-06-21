@@ -1,4 +1,4 @@
-import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobStatus } from "./agent-artifact-jobs.js";
+import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type ArtifactJobStatus } from "./agent-artifact-jobs.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./artifact-core/index.js";
 import { resolveProjectArtifactIndexOptions } from "./agent-project-registry.js";
@@ -15,6 +15,7 @@ export interface CreateAgentArtifactJobInput {
   agentName?: string;
   promptId?: string;
   model?: string;
+  requirements?: ArtifactJobRequirements;
 }
 
 export interface GetAgentArtifactJobStatusInput { projectId: string; jobId: string }
@@ -35,7 +36,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatusInput) {
@@ -43,7 +44,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const job = await readArtifactJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Artifact job not found" };
   const artifactReference = job.artifactReference ?? job.artifact;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
 }
 
 
