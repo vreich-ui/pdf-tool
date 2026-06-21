@@ -274,47 +274,55 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   }
 
   if (artifactKind === "pdf") {
-    const hasNestedPdf = value.pdf !== undefined;
-    const pdfBasePath = hasNestedPdf ? ["requirements", "pdf"] : ["requirements"];
-    const pdfValue = value.pdf && typeof value.pdf === "object" && !Array.isArray(value.pdf) ? value.pdf as Record<string, unknown> : value;
-    if (value.pdf !== undefined && (!value.pdf || typeof value.pdf !== "object" || Array.isArray(value.pdf))) issues.push({ path: ["requirements", "pdf"], message: "PDF requirements must be an object" });
     const pdf: NormalizedPdfRequirements = {};
-    const pageCount = pdfValue.pageCount;
-    if (pageCount !== undefined) {
-      if (!pageCount || typeof pageCount !== "object" || Array.isArray(pageCount)) {
-        issues.push({ path: [...pdfBasePath, "pageCount"], message: "PDF pageCount must be an object" });
-      } else {
-        const pc = pageCount as Record<string, unknown>;
-        const min = pc.min;
-        const max = pc.max;
-        if (min !== undefined && (typeof min !== "number" || !Number.isInteger(min) || min <= 0)) issues.push({ path: [...pdfBasePath, "pageCount", "min"], message: "PDF pageCount.min must be a positive integer" });
-        if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max <= 0)) issues.push({ path: [...pdfBasePath, "pageCount", "max"], message: "PDF pageCount.max must be a positive integer" });
-        if (typeof min === "number" && typeof max === "number" && min > max) issues.push({ path: [...pdfBasePath, "pageCount"], message: "PDF pageCount.min must be less than or equal to max" });
-        pdf.pageCount = { ...(typeof min === "number" ? { min } : {}), ...(typeof max === "number" ? { max } : {}) };
-      }
-    }
-    if (pdfValue.format !== undefined) {
-      if (pdfValue.format !== "A4" && pdfValue.format !== "Letter") issues.push({ path: [...pdfBasePath, "format"], message: "PDF format must be A4 or Letter" });
-      else pdf.format = pdfValue.format;
-    }
-    if (pdfValue.orientation !== undefined) {
-      if (pdfValue.orientation !== "portrait" && pdfValue.orientation !== "landscape") issues.push({ path: [...pdfBasePath, "orientation"], message: "PDF orientation must be portrait or landscape" });
-      else pdf.orientation = pdfValue.orientation;
-    }
-    if (pdfValue.margins !== undefined) {
-      if (!pdfValue.margins || typeof pdfValue.margins !== "object" || Array.isArray(pdfValue.margins)) issues.push({ path: [...pdfBasePath, "margins"], message: "PDF margins must be an object" });
-      else {
-        const mv = pdfValue.margins as Record<string, unknown>;
-        const margins: PdfRequirementMargins = {};
-        for (const side of ["top", "right", "bottom", "left"] as const) {
-          if (mv[side] !== undefined) {
-            if (typeof mv[side] !== "string" || !/^\d+(\.\d+)?(mm|in|cm|px)$/.test(mv[side] as string)) issues.push({ path: [...pdfBasePath, "margins", side], message: "PDF margin must be a CSS length using mm, cm, in, or px" });
-            else margins[side] = mv[side] as string;
-          }
+    const processPdfFields = (source: Record<string, unknown>, basePath: string[]) => {
+      const pageCount = source.pageCount;
+      if (pageCount !== undefined) {
+        if (!pageCount || typeof pageCount !== "object" || Array.isArray(pageCount)) {
+          issues.push({ path: [...basePath, "pageCount"], message: "PDF pageCount must be an object" });
+        } else {
+          const pc = pageCount as Record<string, unknown>;
+          const min = pc.min;
+          const max = pc.max;
+          if (min !== undefined && (typeof min !== "number" || !Number.isInteger(min) || min <= 0)) issues.push({ path: [...basePath, "pageCount", "min"], message: "PDF pageCount.min must be a positive integer" });
+          if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max <= 0)) issues.push({ path: [...basePath, "pageCount", "max"], message: "PDF pageCount.max must be a positive integer" });
+          if (typeof min === "number" && typeof max === "number" && min > max) issues.push({ path: [...basePath, "pageCount"], message: "PDF pageCount.min must be less than or equal to max" });
+          pdf.pageCount = { ...pdf.pageCount, ...(typeof min === "number" ? { min } : {}), ...(typeof max === "number" ? { max } : {}) };
         }
-        pdf.margins = margins;
+      }
+      if (source.format !== undefined) {
+        if (source.format !== "A4" && source.format !== "Letter") issues.push({ path: [...basePath, "format"], message: "PDF format must be A4 or Letter" });
+        else pdf.format = source.format as "A4" | "Letter";
+      }
+      if (source.orientation !== undefined) {
+        if (source.orientation !== "portrait" && source.orientation !== "landscape") issues.push({ path: [...basePath, "orientation"], message: "PDF orientation must be portrait or landscape" });
+        else pdf.orientation = source.orientation as "portrait" | "landscape";
+      }
+      if (source.margins !== undefined) {
+        if (!source.margins || typeof source.margins !== "object" || Array.isArray(source.margins)) issues.push({ path: [...basePath, "margins"], message: "PDF margins must be an object" });
+        else {
+          const mv = source.margins as Record<string, unknown>;
+          const margins: PdfRequirementMargins = pdf.margins || {};
+          for (const side of ["top", "right", "bottom", "left"] as const) {
+            if (mv[side] !== undefined) {
+              if (typeof mv[side] !== "string" || !/^\d+(\.\d+)?(mm|in|cm|px)$/.test(mv[side] as string)) issues.push({ path: [...basePath, "margins", side], message: "PDF margin must be a CSS length using mm, cm, in, or px" });
+              else margins[side] = mv[side] as string;
+            }
+          }
+          pdf.margins = margins;
+        }
+      }
+    };
+
+    processPdfFields(value, ["requirements"]);
+    if (value.pdf !== undefined) {
+      if (!value.pdf || typeof value.pdf !== "object" || Array.isArray(value.pdf)) {
+        issues.push({ path: ["requirements", "pdf"], message: "PDF requirements must be an object" });
+      } else {
+        processPdfFields(value.pdf as Record<string, unknown>, ["requirements", "pdf"]);
       }
     }
+
     const out: NormalizedArtifactJobRequirements = { ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }) };
     if (Object.keys(pdf).length > 0) out.pdf = pdf;
     return { requirements: Object.keys(out).length === 0 ? undefined : out, issues };

@@ -1043,3 +1043,127 @@ test("MCP tools/list schema includes image edit fields", async () => {
   assert.ok(properties.requirements.properties.pdf.properties.orientation);
   assert.ok(properties.requirements.properties.pdf.properties.margins.properties.top);
 });
+
+test("MCP tools/list schema includes all PDF-specific fields and top-level requirements", async () => {
+  const response = await mcpRpc("tools/list");
+  assert.equal(response.statusCode, 200);
+  const tools = JSON.parse(response.body).result.tools;
+  const createTool = tools.find((tool: { name: string }) => tool.name === "create_agent_artifact_job");
+  const properties = createTool.inputSchema.properties;
+
+  assert.ok(properties.templateId);
+  assert.ok(properties.templateRef);
+  assert.equal(properties.templateRef.type, "object");
+  assert.deepEqual(properties.templateRef.required, ["blobKey"]);
+  assert.ok(properties.data);
+  assert.ok(properties.assets);
+  assert.ok(properties.assets.properties.images);
+
+  const reqs = properties.requirements.properties;
+  assert.ok(reqs.maxBytes);
+  assert.ok(reqs.pageCount);
+  assert.ok(reqs.format);
+  assert.ok(reqs.orientation);
+  assert.ok(reqs.margins);
+
+  assert.ok(reqs.pdf.properties.pageCount);
+  assert.ok(reqs.pdf.properties.format);
+  assert.ok(reqs.pdf.properties.orientation);
+  assert.ok(reqs.pdf.properties.margins);
+});
+
+test("PDF job requirements can be submitted via top-level or nested fields and normalize correctly", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    // 1. Top-level requirements
+    const topLevelResponse = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-pdf-top",
+        artifactKind: "pdf",
+        filename: "top.pdf",
+        templateId: "article_export_v1",
+        tags: [],
+        requirements: {
+          format: "Letter",
+          orientation: "landscape",
+          pageCount: { min: 2, max: 5 },
+          margins: { top: "10mm" }
+        }
+      })
+    });
+    assert.equal(topLevelResponse.statusCode, 202);
+    const topBody = JSON.parse(topLevelResponse.body);
+    const topStored = await readArtifactJob("dr-lurie", topBody.jobId);
+    assert.deepEqual(topStored?.requirements?.pdf, {
+      format: "Letter",
+      orientation: "landscape",
+      pageCount: { min: 2, max: 5 },
+      margins: { top: "10mm" }
+    });
+
+    // 2. Nested requirements
+    const nestedResponse = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-pdf-nested",
+        artifactKind: "pdf",
+        filename: "nested.pdf",
+        templateId: "article_export_v1",
+        tags: [],
+        requirements: {
+          pdf: {
+            format: "A4",
+            orientation: "portrait",
+            pageCount: { min: 1, max: 1 },
+            margins: { left: "15mm" }
+          }
+        }
+      })
+    });
+    assert.equal(nestedResponse.statusCode, 202);
+    const nestedBody = JSON.parse(nestedResponse.body);
+    const nestedStored = await readArtifactJob("dr-lurie", nestedBody.jobId);
+    assert.deepEqual(nestedStored?.requirements?.pdf, {
+      format: "A4",
+      orientation: "portrait",
+      pageCount: { min: 1, max: 1 },
+      margins: { left: "15mm" }
+    });
+
+    // 3. Mixed requirements (nested should override top-level where they overlap)
+    const mixedResponse = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-pdf-mixed",
+        artifactKind: "pdf",
+        filename: "mixed.pdf",
+        templateId: "article_export_v1",
+        tags: [],
+        requirements: {
+          format: "Letter",
+          pdf: {
+            format: "A4",
+            orientation: "landscape"
+          }
+        }
+      })
+    });
+    assert.equal(mixedResponse.statusCode, 202);
+    const mixedBody = JSON.parse(mixedResponse.body);
+    const mixedStored = await readArtifactJob("dr-lurie", mixedBody.jobId);
+    assert.deepEqual(mixedStored?.requirements?.pdf, {
+      format: "A4",
+      orientation: "landscape"
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
