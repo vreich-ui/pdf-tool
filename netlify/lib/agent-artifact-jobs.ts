@@ -20,8 +20,40 @@ export type ImageRequirementUsageContext =
   | "instagram_story"
   | "ad_platform";
 
+export interface PdfTemplateRef {
+  storeName?: string;
+  blobKey: string;
+  version?: number;
+}
+
+export interface PdfRequirementMargins {
+  top?: string;
+  right?: string;
+  bottom?: string;
+  left?: string;
+}
+
+export interface PdfRequirementPageCount {
+  min?: number;
+  max?: number;
+}
+
+export interface PdfRequirements {
+  maxBytes?: number;
+  pageCount?: PdfRequirementPageCount;
+  format?: "A4" | "Letter";
+  orientation?: "portrait" | "landscape";
+  margins?: PdfRequirementMargins;
+}
+
+export type NormalizedPdfRequirements = PdfRequirements;
+
 export interface ArtifactJobRequirements {
   maxBytes?: number;
+  pageCount?: PdfRequirementPageCount;
+  format?: "A4" | "Letter";
+  orientation?: "portrait" | "landscape";
+  margins?: PdfRequirementMargins;
   image?: {
     size?: ImageRequirementSize;
     outputFormat?: ImageRequirementOutputFormat;
@@ -32,6 +64,10 @@ export interface ArtifactJobRequirements {
 
 export interface NormalizedArtifactJobRequirements {
   maxBytes?: number;
+  pageCount?: PdfRequirementPageCount;
+  format?: "A4" | "Letter";
+  orientation?: "portrait" | "landscape";
+  margins?: PdfRequirementMargins;
   image?: {
     size: ImageRequirementSize;
     outputFormat: ImageRequirementOutputFormat;
@@ -46,6 +82,10 @@ export interface ArtifactJobRequest {
   artifactKind: ArtifactKind;
   prompt: string;
   filename: string;
+  templateId?: string;
+  templateRef?: PdfTemplateRef;
+  data?: unknown;
+  assets?: { images?: unknown[] };
   slot?: string;
   tags: string[];
   label?: string;
@@ -76,6 +116,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
       prompt: z.string().min(1),
       filename: z.string().min(1),
+      templateId: z.string().min(1).optional(),
+      templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
+      data: z.unknown().optional(),
+      assets: z.object({ images: z.array(z.unknown()).optional() }).optional(),
       slot: z.string().optional(),
       tags: z.array(z.string()).default([]),
       label: z.string().optional(),
@@ -84,6 +128,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       model: z.string().optional(),
       requirements: z.object({
         maxBytes: z.number().int().positive().max(MAX_ARTIFACT_OUTPUT_BYTES).optional(),
+        pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
+        format: z.enum(["A4", "Letter"]).optional(),
+        orientation: z.enum(["portrait", "landscape"]).optional(),
+        margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional(),
         image: z.object({
           size: z.literal("1024x1024").optional(),
           outputFormat: z.literal("png").optional(),
@@ -97,6 +145,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       }
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
+      }
+      if (value.artifactKind === "pdf") {
+        if (!value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
+        if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
       }
       if (value.artifactKind === "image") {
         const outputFormat = value.requirements?.image?.outputFormat ?? "png";
@@ -151,6 +203,47 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
     }
   }
 
+  if (artifactKind === "pdf") {
+    const out: NormalizedArtifactJobRequirements = { ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }) };
+    const pageCount = value.pageCount;
+    if (pageCount !== undefined) {
+      if (!pageCount || typeof pageCount !== "object" || Array.isArray(pageCount)) {
+        issues.push({ path: ["requirements", "pageCount"], message: "PDF pageCount must be an object" });
+      } else {
+        const pc = pageCount as Record<string, unknown>;
+        const min = pc.min;
+        const max = pc.max;
+        if (min !== undefined && (typeof min !== "number" || !Number.isInteger(min) || min <= 0)) issues.push({ path: ["requirements", "pageCount", "min"], message: "PDF pageCount.min must be a positive integer" });
+        if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max <= 0)) issues.push({ path: ["requirements", "pageCount", "max"], message: "PDF pageCount.max must be a positive integer" });
+        if (typeof min === "number" && typeof max === "number" && min > max) issues.push({ path: ["requirements", "pageCount"], message: "PDF pageCount.min must be less than or equal to max" });
+        out.pageCount = { ...(typeof min === "number" ? { min } : {}), ...(typeof max === "number" ? { max } : {}) };
+      }
+    }
+    if (value.format !== undefined) {
+      if (value.format !== "A4" && value.format !== "Letter") issues.push({ path: ["requirements", "format"], message: "PDF format must be A4 or Letter" });
+      else out.format = value.format;
+    }
+    if (value.orientation !== undefined) {
+      if (value.orientation !== "portrait" && value.orientation !== "landscape") issues.push({ path: ["requirements", "orientation"], message: "PDF orientation must be portrait or landscape" });
+      else out.orientation = value.orientation;
+    }
+    if (value.margins !== undefined) {
+      if (!value.margins || typeof value.margins !== "object" || Array.isArray(value.margins)) issues.push({ path: ["requirements", "margins"], message: "PDF margins must be an object" });
+      else {
+        const mv = value.margins as Record<string, unknown>;
+        const margins: PdfRequirementMargins = {};
+        for (const side of ["top", "right", "bottom", "left"] as const) {
+          if (mv[side] !== undefined) {
+            if (typeof mv[side] !== "string" || !/^\d+(\.\d+)?(mm|in|cm|px)$/.test(mv[side] as string)) issues.push({ path: ["requirements", "margins", side], message: "PDF margin must be a CSS length using mm, cm, in, or px" });
+            else margins[side] = mv[side] as string;
+          }
+        }
+        out.margins = margins;
+      }
+    }
+    return { requirements: Object.keys(out).length === 0 ? undefined : out, issues };
+  }
+
   if (artifactKind !== "image") {
     return { requirements: normalizedMaxBytes === undefined ? undefined : { maxBytes: normalizedMaxBytes }, issues };
   }
@@ -195,6 +288,10 @@ export const artifactJobRequestSchema = {
     const prompt = typeof value.prompt === "string" ? value.prompt : "";
     const filename = typeof value.filename === "string" ? value.filename.trim() : "";
     const artifactKind = typeof value.artifactKind === "string" ? value.artifactKind : "image";
+    const templateId = typeof value.templateId === "string" ? value.templateId.trim() : undefined;
+    const templateRef = value.templateRef && typeof value.templateRef === "object" && !Array.isArray(value.templateRef) ? value.templateRef as PdfTemplateRef : undefined;
+    const data = value.data;
+    const assets = value.assets && typeof value.assets === "object" && !Array.isArray(value.assets) ? value.assets as { images?: unknown[] } : undefined;
     const slot = typeof value.slot === "string" ? value.slot : undefined;
     const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : [];
     const label = typeof value.label === "string" ? value.label : undefined;
@@ -208,6 +305,11 @@ export const artifactJobRequestSchema = {
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
+    if (artifactKind === "pdf") {
+      if (!templateId && !templateRef) issues.push({ path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
+      if (filename && !filename.toLowerCase().endsWith(".pdf")) issues.push({ path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
+      if (templateRef && (typeof templateRef.blobKey !== "string" || !templateRef.blobKey.trim())) issues.push({ path: ["templateRef", "blobKey"], message: "templateRef.blobKey is required" });
+    }
     issues.push(...requirementsResult.issues);
     if (slot && !isSafeOptionalPathSegment(slot)) issues.push({ path: ["slot"], message: "slot must be a safe path segment" });
     if (artifactKind === "image" && filename && (requirementsResult.requirements?.image?.outputFormat ?? "png") === "png" && !filename.toLowerCase().endsWith(".png")) {
@@ -221,7 +323,7 @@ export const artifactJobRequestSchema = {
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, agentName, promptId, model, requirements: requirementsResult.requirements } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, requirements: requirementsResult.requirements } };
   }
 };
 
@@ -238,6 +340,8 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   artifactReference?: ArtifactReference;
   artifact?: ArtifactReference;
   error?: string;
+  renderMetadata?: Record<string, unknown>;
+  validationResults?: Record<string, unknown>;
   adapterVersion: string;
   selectedModel?: string;
   createdAt: string;
@@ -295,7 +399,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error" | "renderMetadata" | "validationResults">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,
