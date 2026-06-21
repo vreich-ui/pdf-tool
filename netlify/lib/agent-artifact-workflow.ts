@@ -99,6 +99,7 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
         model: job.selectedModel
       });
     } else {
+      if (!job.prompt) throw new Error("Image generation jobs require prompt");
       generated = await generateImageArtifactBytes({
       prompt: job.prompt,
       client: options.imageClient,

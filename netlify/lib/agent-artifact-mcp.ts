@@ -12,7 +12,7 @@ export interface CreateAgentArtifactJobInput {
   editMode?: ImageEditMode;
   maskRef?: ArtifactReferenceHolder;
   editInstructions?: ImageEditInstructions;
-  prompt: string;
+  prompt?: string;
   filename: string;
   templateId?: string;
   templateRef?: PdfTemplateRef;

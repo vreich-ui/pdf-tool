@@ -50,10 +50,12 @@ export type NormalizedPdfRequirements = PdfRequirements;
 
 export interface ArtifactJobRequirements {
   maxBytes?: number;
+  /** Backward-compatible PDF fields accepted at the top level. Prefer requirements.pdf. */
   pageCount?: PdfRequirementPageCount;
   format?: "A4" | "Letter";
   orientation?: "portrait" | "landscape";
   margins?: PdfRequirementMargins;
+  pdf?: PdfRequirements;
   image?: {
     size?: ImageRequirementSize;
     outputFormat?: ImageRequirementOutputFormat;
@@ -64,10 +66,12 @@ export interface ArtifactJobRequirements {
 
 export interface NormalizedArtifactJobRequirements {
   maxBytes?: number;
+  /** Backward-compatible PDF fields may still be read, but new jobs persist under pdf. */
   pageCount?: PdfRequirementPageCount;
   format?: "A4" | "Letter";
   orientation?: "portrait" | "landscape";
   margins?: PdfRequirementMargins;
+  pdf?: NormalizedPdfRequirements;
   image?: {
     size: ImageRequirementSize;
     outputFormat: ImageRequirementOutputFormat;
@@ -99,7 +103,7 @@ export interface ArtifactJobRequest {
   requestId: string;
   artifactKind: ArtifactKind;
   operation?: ArtifactJobOperation;
-  prompt: string;
+  prompt?: string;
   filename: string;
   templateId?: string;
   templateRef?: PdfTemplateRef;
@@ -138,7 +142,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       requestId: z.string().min(1),
       artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
       operation: z.enum(["generate", "edit"]).default("generate"),
-      prompt: z.string().min(1),
+      prompt: z.string().min(1).optional(),
       filename: z.string().min(1),
       templateId: z.string().min(1).optional(),
       templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
@@ -160,6 +164,12 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         format: z.enum(["A4", "Letter"]).optional(),
         orientation: z.enum(["portrait", "landscape"]).optional(),
         margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional(),
+        pdf: z.object({
+          pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
+          format: z.enum(["A4", "Letter"]).optional(),
+          orientation: z.enum(["portrait", "landscape"]).optional(),
+          margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional()
+        }).optional(),
         image: z.object({
           size: z.literal("1024x1024").optional(),
           outputFormat: z.literal("png").optional(),
@@ -183,6 +193,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && !value.editInstructions?.change) ctx.addIssue({ code: "custom", path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
         if (value.editMode === "masked_edit" && !value.maskRef) ctx.addIssue({ code: "custom", path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
       }
+      if (value.artifactKind === "image" && !value.prompt) ctx.addIssue({ code: "custom", path: ["prompt"], message: "prompt is required for image jobs" });
       if (value.artifactKind === "pdf") {
         if (!value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
         if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
@@ -202,6 +213,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
     const result = schema.safeParse(input);
     if (result.success) {
       const normalized = normalizeArtifactJobRequirements((result.data as { requirements?: unknown }).requirements, (result.data as ArtifactJobRequest).artifactKind);
+      if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
       return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
     }
     return {
@@ -240,43 +252,49 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   }
 
   if (artifactKind === "pdf") {
-    const out: NormalizedArtifactJobRequirements = { ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }) };
-    const pageCount = value.pageCount;
+    const hasNestedPdf = value.pdf !== undefined;
+    const pdfBasePath = hasNestedPdf ? ["requirements", "pdf"] : ["requirements"];
+    const pdfValue = value.pdf && typeof value.pdf === "object" && !Array.isArray(value.pdf) ? value.pdf as Record<string, unknown> : value;
+    if (value.pdf !== undefined && (!value.pdf || typeof value.pdf !== "object" || Array.isArray(value.pdf))) issues.push({ path: ["requirements", "pdf"], message: "PDF requirements must be an object" });
+    const pdf: NormalizedPdfRequirements = {};
+    const pageCount = pdfValue.pageCount;
     if (pageCount !== undefined) {
       if (!pageCount || typeof pageCount !== "object" || Array.isArray(pageCount)) {
-        issues.push({ path: ["requirements", "pageCount"], message: "PDF pageCount must be an object" });
+        issues.push({ path: [...pdfBasePath, "pageCount"], message: "PDF pageCount must be an object" });
       } else {
         const pc = pageCount as Record<string, unknown>;
         const min = pc.min;
         const max = pc.max;
-        if (min !== undefined && (typeof min !== "number" || !Number.isInteger(min) || min <= 0)) issues.push({ path: ["requirements", "pageCount", "min"], message: "PDF pageCount.min must be a positive integer" });
-        if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max <= 0)) issues.push({ path: ["requirements", "pageCount", "max"], message: "PDF pageCount.max must be a positive integer" });
-        if (typeof min === "number" && typeof max === "number" && min > max) issues.push({ path: ["requirements", "pageCount"], message: "PDF pageCount.min must be less than or equal to max" });
-        out.pageCount = { ...(typeof min === "number" ? { min } : {}), ...(typeof max === "number" ? { max } : {}) };
+        if (min !== undefined && (typeof min !== "number" || !Number.isInteger(min) || min <= 0)) issues.push({ path: [...pdfBasePath, "pageCount", "min"], message: "PDF pageCount.min must be a positive integer" });
+        if (max !== undefined && (typeof max !== "number" || !Number.isInteger(max) || max <= 0)) issues.push({ path: [...pdfBasePath, "pageCount", "max"], message: "PDF pageCount.max must be a positive integer" });
+        if (typeof min === "number" && typeof max === "number" && min > max) issues.push({ path: [...pdfBasePath, "pageCount"], message: "PDF pageCount.min must be less than or equal to max" });
+        pdf.pageCount = { ...(typeof min === "number" ? { min } : {}), ...(typeof max === "number" ? { max } : {}) };
       }
     }
-    if (value.format !== undefined) {
-      if (value.format !== "A4" && value.format !== "Letter") issues.push({ path: ["requirements", "format"], message: "PDF format must be A4 or Letter" });
-      else out.format = value.format;
+    if (pdfValue.format !== undefined) {
+      if (pdfValue.format !== "A4" && pdfValue.format !== "Letter") issues.push({ path: [...pdfBasePath, "format"], message: "PDF format must be A4 or Letter" });
+      else pdf.format = pdfValue.format;
     }
-    if (value.orientation !== undefined) {
-      if (value.orientation !== "portrait" && value.orientation !== "landscape") issues.push({ path: ["requirements", "orientation"], message: "PDF orientation must be portrait or landscape" });
-      else out.orientation = value.orientation;
+    if (pdfValue.orientation !== undefined) {
+      if (pdfValue.orientation !== "portrait" && pdfValue.orientation !== "landscape") issues.push({ path: [...pdfBasePath, "orientation"], message: "PDF orientation must be portrait or landscape" });
+      else pdf.orientation = pdfValue.orientation;
     }
-    if (value.margins !== undefined) {
-      if (!value.margins || typeof value.margins !== "object" || Array.isArray(value.margins)) issues.push({ path: ["requirements", "margins"], message: "PDF margins must be an object" });
+    if (pdfValue.margins !== undefined) {
+      if (!pdfValue.margins || typeof pdfValue.margins !== "object" || Array.isArray(pdfValue.margins)) issues.push({ path: [...pdfBasePath, "margins"], message: "PDF margins must be an object" });
       else {
-        const mv = value.margins as Record<string, unknown>;
+        const mv = pdfValue.margins as Record<string, unknown>;
         const margins: PdfRequirementMargins = {};
         for (const side of ["top", "right", "bottom", "left"] as const) {
           if (mv[side] !== undefined) {
-            if (typeof mv[side] !== "string" || !/^\d+(\.\d+)?(mm|in|cm|px)$/.test(mv[side] as string)) issues.push({ path: ["requirements", "margins", side], message: "PDF margin must be a CSS length using mm, cm, in, or px" });
+            if (typeof mv[side] !== "string" || !/^\d+(\.\d+)?(mm|in|cm|px)$/.test(mv[side] as string)) issues.push({ path: [...pdfBasePath, "margins", side], message: "PDF margin must be a CSS length using mm, cm, in, or px" });
             else margins[side] = mv[side] as string;
           }
         }
-        out.margins = margins;
+        pdf.margins = margins;
       }
     }
+    const out: NormalizedArtifactJobRequirements = { ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }) };
+    if (Object.keys(pdf).length > 0) out.pdf = pdf;
     return { requirements: Object.keys(out).length === 0 ? undefined : out, issues };
   }
 
@@ -322,7 +340,7 @@ export const artifactJobRequestSchema = {
     const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
     const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
     const operation = value.operation === "edit" ? "edit" : "generate";
-    const prompt = typeof value.prompt === "string" ? value.prompt : "";
+    const prompt = typeof value.prompt === "string" ? value.prompt : undefined;
     const filename = typeof value.filename === "string" ? value.filename.trim() : "";
     const artifactKind = typeof value.artifactKind === "string" ? value.artifactKind : "image";
     const templateId = typeof value.templateId === "string" ? value.templateId.trim() : undefined;
@@ -345,7 +363,7 @@ export const artifactJobRequestSchema = {
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
-    if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
+    if (artifactKind === "image" && !prompt) issues.push({ path: ["prompt"], message: "prompt is required for image jobs" });
     if (operation === "edit") {
       if (artifactKind !== "image") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image" });
       if (!sourceArtifact?.artifactReference) issues.push({ path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });

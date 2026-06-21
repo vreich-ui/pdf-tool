@@ -59,6 +59,8 @@ Direct integrations can call these HTTP endpoints instead of moving binary paylo
 
 Artifact destinations are explicit metadata contracts containing `projectId`, `requestId`, `artifactKind`, optional `slot`, and `filename`. Generic pdf-tool responses wrap the project-native artifact reference as `artifactReference` with `projectId`, `requestId`, `jobId`, `artifactKind`, and `workflowPatchStatus`; they do not replace project-specific `ArtifactReference` shapes.
 
+`create_agent_artifact_job` accepts structured job fields rather than requiring agents to hide requirements in prompts. Image jobs support `requirements.image` (`size`, `outputFormat`, `role`, `usageContext`) and `requirements.maxBytes`. Image edit jobs set `operation: "edit"`, lock a `sourceArtifact` by `expectedSha256`, choose an `editMode`, and can supply `maskRef` plus `editInstructions`. Template PDF jobs use `artifactKind: "pdf"` with `templateId` or `templateRef`, structured `data`, optional `assets.images`, and `requirements.pdf` (`pageCount`, `format`, `orientation`, `margins`). PDF templates remain project-owned assets in the configured project template Blob store; pdf-tool renders/saves artifacts and never mutates workflow JSON.
+
 #### MCP endpoint for ChatGPT Agents
 
 - `POST https://pdf-x.netlify.app/mcp`
