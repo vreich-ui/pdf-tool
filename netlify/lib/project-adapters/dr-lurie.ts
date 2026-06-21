@@ -41,6 +41,7 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     openAiKeyEnv: "OPENAI_API_KEY",
     artifactStoreName: "artifacts",
     artifactIndexStoreName: "artifact-index",
+    templateStoreName: "pdf-templates",
     allowedArtifactKinds: ["image", "pdf"],
     artifactReferenceAdapter: "dr-lurie",
     defaultModel: "gpt-image-1",

@@ -1,4 +1,4 @@
-import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type ArtifactJobStatus } from "./agent-artifact-jobs.js";
+import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type PdfTemplateRef, type ArtifactJobStatus } from "./agent-artifact-jobs.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./artifact-core/index.js";
 import { resolveProjectArtifactIndexOptions } from "./agent-project-registry.js";
@@ -9,6 +9,10 @@ export interface CreateAgentArtifactJobInput {
   artifactKind: "image" | "pdf";
   prompt: string;
   filename: string;
+  templateId?: string;
+  templateRef?: PdfTemplateRef;
+  data?: unknown;
+  assets?: { images?: unknown[] };
   slot?: string;
   tags?: string[];
   label?: string;

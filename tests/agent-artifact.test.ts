@@ -786,3 +786,98 @@ test("MCP JSON-RPC unauthorized and unknown tool return JSON-RPC errors", async 
   body = JSON.parse(response.body);
   assert.equal(body.error.code, -32602);
 });
+
+async function writePdfTemplate(overrides: Record<string, unknown> = {}) {
+  const store = await projectBlobStore("pdf-templates", { siteID: "dr-site", token: "dr-token", consistency: "strong" });
+  const template = {
+    templateId: "article_export_v1",
+    projectId: "dr-lurie",
+    renderer: "html_chromium",
+    status: "active",
+    version: 1,
+    name: "Article Export",
+    defaultRequirements: { format: "A4", orientation: "portrait", margins: { top: "20mm", right: "18mm", bottom: "20mm", left: "18mm" }, maxBytes: 5000000 },
+    dataSchema: { type: "object", required: ["title"], properties: { title: { type: "string" } }, additionalProperties: true },
+    htmlTemplate: "<h1>{{title}}</h1>",
+    css: "h1{font-size:20px}",
+    allowedAssets: { images: true },
+    ...overrides
+  };
+  await store.setJSON("templates/article_export_v1.json", template);
+  return template;
+}
+
+test("PDF job validation requires templateId or templateRef and .pdf filename", async () => {
+  let response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-invalid", artifactKind: "pdf", prompt: "export", filename: "article.pdf", tags: [], data: {} })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body).issues[0].path, ["templateId"]);
+
+  response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-bad-filename", artifactKind: "pdf", prompt: "export", filename: "article.png", templateId: "article_export_v1", tags: [], data: {} })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.ok(JSON.parse(response.body).issues.some((issue: { path: string[] }) => issue.path[0] === "filename"));
+});
+
+test("PDF job requirements are persisted", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const requirements = { maxBytes: 5000000, pageCount: { min: 1, max: 12 }, format: "A4", orientation: "portrait", margins: { top: "20mm", right: "18mm", bottom: "20mm", left: "18mm" } };
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-reqs", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" }, requirements })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    const stored = await readArtifactJob("dr-lurie", body.jobId);
+    assert.deepEqual(stored?.requirements, requirements);
+    assert.equal(stored?.templateId, "article_export_v1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("PDF worker retrieves active project template and stores application/pdf", async () => {
+  await writePdfTemplate();
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ok", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "<Unsafe>" }, tags: ["pdf"], label: undefined, requirements: { pageCount: { min: 1, max: 1 } } });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.artifactReference.contentType, "application/pdf");
+  assert.match(body.artifactReference.blobKey, /^pdf\/req-pdf-ok\/[a-f0-9]{64}\.pdf$/);
+  assert.equal(body.artifactReference.metadata.templateId, "article_export_v1");
+  const stored = await readArtifactJob("dr-lurie", job.jobId);
+  assert.equal(stored?.validationResults?.pageCount, 1);
+  assert.ok(projectBlobStoreCallLog().some((call) => call.name === "pdf-templates" && call.siteID === "dr-site" && call.token === "dr-token"));
+});
+
+test("PDF worker fails safely for unknown or disabled templates", async () => {
+  const missing = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-missing", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
+  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: missing.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /template not found/i);
+
+  await writePdfTemplate({ status: "disabled" });
+  const disabled = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-disabled", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: disabled.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /not active/i);
+});
+
+test("PDF data schema validation failure fails the job", async () => {
+  await writePdfTemplate();
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-schema", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: {}, tags: [], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 500);
+  const stored = await readArtifactJob("dr-lurie", job.jobId);
+  assert.equal(stored?.status, "failed");
+  assert.match(stored?.error ?? "", /data validation failed/i);
+});

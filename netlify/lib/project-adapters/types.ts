@@ -7,6 +7,7 @@ export interface ProjectConfig {
   openAiKeyEnv: string;
   artifactStoreName: string;
   artifactIndexStoreName: string;
+  templateStoreName?: string;
   allowedArtifactKinds: ArtifactKind[];
   artifactReferenceAdapter: string;
   defaultModel: string;

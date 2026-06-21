@@ -19,6 +19,10 @@ const tools = [
         artifactKind: { type: "string", enum: ["image", "pdf"] },
         prompt: { type: "string" },
         filename: { type: "string" },
+        templateId: { type: "string" },
+        templateRef: { type: "object", additionalProperties: false, required: ["blobKey"], properties: { storeName: { type: "string" }, blobKey: { type: "string" }, version: { type: "number" } } },
+        data: { type: "object" },
+        assets: { type: "object", additionalProperties: false, properties: { images: { type: "array", items: { type: "object" } } } },
         slot: { type: "string" },
         tags: { type: "array", items: { type: "string" } },
         label: { type: "string" },
@@ -30,6 +34,10 @@ const tools = [
           additionalProperties: false,
           properties: {
             maxBytes: { type: "number" },
+            pageCount: { type: "object", additionalProperties: false, properties: { min: { type: "number" }, max: { type: "number" } } },
+            format: { type: "string", enum: ["A4", "Letter"] },
+            orientation: { type: "string", enum: ["portrait", "landscape"] },
+            margins: { type: "object", additionalProperties: false, properties: { top: { type: "string" }, right: { type: "string" }, bottom: { type: "string" }, left: { type: "string" } } },
             image: {
               type: "object",
               additionalProperties: false,
