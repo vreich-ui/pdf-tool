@@ -63,6 +63,18 @@ export async function handler(event: FunctionEvent) {
         templateVersion: generated.template.version,
         renderer: generated.template.renderer,
         pageCount: generated.validation.pageCount
+      } : runningJob.operation === "edit" && runningJob.sourceArtifact ? {
+        imageRole: runningJob.requirements?.image?.role,
+        usageContext: runningJob.requirements?.image?.usageContext,
+        operation: "edit",
+        derivedFrom: {
+          blobKey: runningJob.sourceArtifact.artifactReference.blobKey,
+          sha256: runningJob.sourceArtifact.expectedSha256
+        },
+        editMode: runningJob.editMode,
+        editSummary: runningJob.editInstructions?.change ?? runningJob.prompt,
+        preserved: runningJob.editInstructions?.preserve ?? [],
+        sourceArtifactKind: "image"
       } : runningJob.requirements?.image ? {
         imageRole: runningJob.requirements.image.role,
         usageContext: runningJob.requirements.image.usageContext

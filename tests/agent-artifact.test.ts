@@ -825,15 +825,38 @@ test("PDF job validation requires templateId or templateRef and .pdf filename", 
   assert.ok(JSON.parse(response.body).issues.some((issue: { path: string[] }) => issue.path[0] === "filename"));
 });
 
+
+
+test("PDF job can omit prompt when template data is provided", async () => {
+  await writePdfTemplate();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.test" },
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-no-prompt", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" } })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    const stored = await readArtifactJob("dr-lurie", body.jobId);
+    assert.equal(stored?.prompt, undefined);
+    assert.equal(stored?.templateId, "article_export_v1");
+    assert.deepEqual(stored?.data, { title: "Hello" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("PDF job requirements are persisted", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
-    const requirements = { maxBytes: 5000000, pageCount: { min: 1, max: 12 }, format: "A4", orientation: "portrait", margins: { top: "20mm", right: "18mm", bottom: "20mm", left: "18mm" } };
+    const requirements = { maxBytes: 5000000, pdf: { pageCount: { min: 1, max: 12 }, format: "A4", orientation: "portrait", margins: { top: "20mm", right: "18mm", bottom: "20mm", left: "18mm" } } };
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-reqs", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" }, requirements })
+      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-reqs", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" }, requirements })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -847,7 +870,7 @@ test("PDF job requirements are persisted", async () => {
 
 test("PDF worker retrieves active project template and stores application/pdf", async () => {
   await writePdfTemplate();
-  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ok", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "<Unsafe>" }, tags: ["pdf"], label: undefined, requirements: { pageCount: { min: 1, max: 1 } } });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ok", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", data: { title: "<Unsafe>" }, tags: ["pdf"], label: undefined, requirements: { pdf: { pageCount: { min: 1, max: 1 } } } });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
@@ -872,6 +895,18 @@ test("PDF worker fails safely for unknown or disabled templates", async () => {
   assert.match(JSON.parse(response.body).error, /not active/i);
 });
 
+
+
+test("PDF worker fails clearly for unsupported template renderer", async () => {
+  const template = await writePdfTemplate();
+  const store = await projectBlobStore("pdf-templates", { siteID: "dr-site", token: "dr-token", consistency: "strong" });
+  await store.setJSON("templates/article_export_v1.json", { ...template, renderer: "unsupported_renderer" });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-renderer", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /Unsupported PDF renderer/i);
+});
+
 test("PDF data schema validation failure fails the job", async () => {
   await writePdfTemplate();
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-schema", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: {}, tags: [], label: undefined });
@@ -880,4 +915,74 @@ test("PDF data schema validation failure fails the job", async () => {
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.status, "failed");
   assert.match(stored?.error ?? "", /data validation failed/i);
+});
+
+test("image edit job validation requires source lock, image kind, supported mode, and preservation constraints", async () => {
+  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], editMode: "deterministic_transform" }) });
+  assert.equal(missingSource.statusCode, 400);
+  assert.deepEqual(JSON.parse(missingSource.body).issues[0].path, ["sourceArtifact", "artifactReference"]);
+
+  const pdfEdit = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-pdf", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edit.pdf", templateId: "article_export_v1", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform" }) });
+  assert.equal(pdfEdit.statusCode, 400);
+  assert.ok(JSON.parse(pdfEdit.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "artifactKind"));
+
+  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
+  assert.equal(unsupportedMode.statusCode, 400);
+  assert.ok(JSON.parse(unsupportedMode.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
+
+  const missingPreserve = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-preserve", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "image_variation", editInstructions: { change: "make it brighter" } }) });
+  assert.equal(missingPreserve.statusCode, 400);
+  assert.ok(JSON.parse(missingPreserve.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editInstructions.preserve"));
+});
+
+test("image edit source sha256 mismatch fails before edit execution", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-mismatch", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: source, expectedSha256: "bad-sha" }, editMode: "deterministic_transform", editInstructions: { change: "", preserve: [], negativeInstructions: [] } });
+  await assert.rejects(() => executeAgentArtifactWorkflow(job), /sha256 mismatch/);
+});
+
+test("successful deterministic image edit writes a new artifact with lineage metadata", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-ok", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "metadata-only deterministic transform", preserve: ["composition"], negativeInstructions: [] } });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.notEqual(body.artifactReference.blobKey, source.blobKey);
+  assert.equal(body.artifactReference.metadata.operation, "edit");
+  assert.deepEqual(body.artifactReference.metadata.derivedFrom, { blobKey: source.blobKey, sha256: source.sha256 });
+  assert.equal(body.artifactReference.metadata.editMode, "deterministic_transform");
+  assert.deepEqual(body.artifactReference.metadata.preserved, ["composition"]);
+});
+
+test("image edit filename outputFormat and contentType consistency is enforced", async () => {
+  const badFilename = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-bad-ext", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.jpg", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform", requirements: { image: { outputFormat: "png" } } }) });
+  assert.equal(badFilename.statusCode, 400);
+  assert.ok(JSON.parse(badFilename.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "filename"));
+
+  assert.match(JSON.stringify(JSON.parse(badFilename.body).issues), /filename extension must match image outputFormat png/);
+});
+
+test("MCP tools/list schema includes image edit fields", async () => {
+  const response = await mcpRpc("tools/list");
+  assert.equal(response.statusCode, 200);
+  const tools = JSON.parse(response.body).result.tools;
+  const createTool = tools.find((tool: { name: string }) => tool.name === "create_agent_artifact_job");
+  const properties = createTool.inputSchema.properties;
+  assert.deepEqual(properties.operation.enum, ["generate", "edit"]);
+  assert.ok(properties.sourceArtifact);
+  assert.ok(properties.editMode);
+  assert.ok(properties.maskRef);
+  assert.ok(properties.editInstructions);
+  assert.deepEqual(properties.requirements.properties.image.properties.size.enum, ["1024x1024"]);
+  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png"]);
+  assert.deepEqual(properties.requirements.properties.image.properties.role.enum, ["featured"]);
+  assert.ok(properties.requirements.properties.image.properties.usageContext);
+  assert.ok(properties.requirements.properties.pdf);
+  assert.ok(properties.requirements.properties.pdf.properties.pageCount.properties.min);
+  assert.ok(properties.requirements.properties.pdf.properties.pageCount.properties.max);
+  assert.ok(properties.requirements.properties.pdf.properties.format);
+  assert.ok(properties.requirements.properties.pdf.properties.orientation);
+  assert.ok(properties.requirements.properties.pdf.properties.margins.properties.top);
 });

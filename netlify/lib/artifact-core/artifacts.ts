@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import { resolveProjectArtifactIndexOptions } from "../agent-project-registry.js";
 import { artifactIndexStore, readArtifactIndexKeys, writeArtifactReferenceIndexes } from "./artifact-index.js";
@@ -115,7 +115,9 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
   const artifactId = `${input.artifactKind}-${sha256.slice(0, 16)}`;
   const extension = extensionForContentType(input.contentType);
   const storedFilename = extension && !filename.toLowerCase().endsWith(extension) ? `${filename}${extension}` : filename;
-  const blobKey = `projects/${projectId}/artifacts/${requestId}/${artifactId}/${storedFilename}`;
+  const blobKey = input.metadata?.operation === "edit"
+    ? `projects/${projectId}/artifacts/${requestId}/${artifactId}/edits/${randomUUID()}/${storedFilename}`
+    : `projects/${projectId}/artifacts/${requestId}/${artifactId}/${storedFilename}`;
 
   const artifact: ArtifactReference = {
     projectId: input.projectId,
@@ -130,6 +132,7 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
     blobKey,
     tags: input.tags ?? [],
     label: input.label,
+    metadata: input.metadata ?? {},
     createdAt
   };
 

@@ -1,7 +1,7 @@
 import Ajv from "ajv/dist/ajv.js";
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
-import { MAX_ARTIFACT_OUTPUT_BYTES, type NormalizedPdfRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
+import { MAX_ARTIFACT_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface PdfTemplateRecord {
   templateId: string;
@@ -11,7 +11,7 @@ export interface PdfTemplateRecord {
   version?: number;
   name?: string;
   description?: string;
-  defaultRequirements?: NormalizedPdfRequirements;
+  defaultRequirements?: NormalizedPdfRequirements | NormalizedArtifactJobRequirements;
   dataSchema?: Record<string, unknown> | boolean;
   htmlTemplate: string;
   css?: string;
@@ -23,7 +23,7 @@ export interface RenderPdfInput {
   templateId?: string;
   templateRef?: PdfTemplateRef;
   data?: unknown;
-  requirements?: NormalizedPdfRequirements;
+  requirements?: NormalizedArtifactJobRequirements;
 }
 
 export interface RenderPdfOutput {
@@ -59,12 +59,26 @@ export async function readProjectPdfTemplate(projectId: string, templateId?: str
   return template;
 }
 
-function mergeRequirements(defaults?: NormalizedPdfRequirements, overrides?: NormalizedPdfRequirements): NormalizedPdfRequirements {
+function pdfRequirements(input?: NormalizedPdfRequirements | NormalizedArtifactJobRequirements): NormalizedPdfRequirements | undefined {
+  if (!input) return undefined;
   return {
-    ...defaults,
-    ...overrides,
-    margins: { ...(defaults?.margins ?? {}), ...(overrides?.margins ?? {}) },
-    pageCount: { ...(defaults?.pageCount ?? {}), ...(overrides?.pageCount ?? {}) }
+    ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+    ...(input.pageCount ? { pageCount: input.pageCount } : {}),
+    ...(input.format ? { format: input.format } : {}),
+    ...(input.orientation ? { orientation: input.orientation } : {}),
+    ...(input.margins ? { margins: input.margins } : {}),
+    ...("pdf" in input && input.pdf ? input.pdf : {})
+  };
+}
+
+function mergeRequirements(defaults?: NormalizedPdfRequirements | NormalizedArtifactJobRequirements, overrides?: NormalizedArtifactJobRequirements): NormalizedPdfRequirements {
+  const normalizedDefaults = pdfRequirements(defaults);
+  const normalizedOverrides = pdfRequirements(overrides);
+  return {
+    ...normalizedDefaults,
+    ...normalizedOverrides,
+    margins: { ...(normalizedDefaults?.margins ?? {}), ...(normalizedOverrides?.margins ?? {}) },
+    pageCount: { ...(normalizedDefaults?.pageCount ?? {}), ...(normalizedOverrides?.pageCount ?? {}) }
   };
 }
 

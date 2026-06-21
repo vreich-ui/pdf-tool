@@ -12,11 +12,16 @@ const tools = [
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["projectId", "requestId", "artifactKind", "prompt", "filename"],
+      required: ["projectId", "requestId", "artifactKind", "filename"],
       properties: {
         projectId: { type: "string" },
         requestId: { type: "string" },
         artifactKind: { type: "string", enum: ["image", "pdf"] },
+        operation: { type: "string", enum: ["generate", "edit"] },
+        sourceArtifact: { type: "object", additionalProperties: false, required: ["artifactReference", "expectedSha256"], properties: { artifactReference: { type: "object", additionalProperties: true }, expectedSha256: { type: "string" } } },
+        editMode: { type: "string", enum: ["deterministic_transform", "masked_edit", "image_variation"] },
+        maskRef: { type: "object", additionalProperties: false, required: ["artifactReference"], properties: { artifactReference: { type: "object", additionalProperties: true } } },
+        editInstructions: { type: "object", additionalProperties: false, properties: { change: { type: "string" }, preserve: { type: "array", items: { type: "string" } }, negativeInstructions: { type: "array", items: { type: "string" } } } },
         prompt: { type: "string" },
         filename: { type: "string" },
         templateId: { type: "string" },
@@ -34,10 +39,6 @@ const tools = [
           additionalProperties: false,
           properties: {
             maxBytes: { type: "number" },
-            pageCount: { type: "object", additionalProperties: false, properties: { min: { type: "number" }, max: { type: "number" } } },
-            format: { type: "string", enum: ["A4", "Letter"] },
-            orientation: { type: "string", enum: ["portrait", "landscape"] },
-            margins: { type: "object", additionalProperties: false, properties: { top: { type: "string" }, right: { type: "string" }, bottom: { type: "string" }, left: { type: "string" } } },
             image: {
               type: "object",
               additionalProperties: false,
@@ -46,6 +47,16 @@ const tools = [
                 outputFormat: { type: "string", enum: ["png"] },
                 role: { type: "string", enum: ["featured"] },
                 usageContext: { type: "string", enum: ["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"] }
+              }
+            },
+            pdf: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                pageCount: { type: "object", additionalProperties: false, properties: { min: { type: "number" }, max: { type: "number" } } },
+                format: { type: "string", enum: ["A4", "Letter"] },
+                orientation: { type: "string", enum: ["portrait", "landscape"] },
+                margins: { type: "object", additionalProperties: false, properties: { top: { type: "string" }, right: { type: "string" }, bottom: { type: "string" }, left: { type: "string" } } }
               }
             }
           }
