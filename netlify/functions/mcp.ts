@@ -24,7 +24,24 @@ const tools = [
         label: { type: "string" },
         agentName: { type: "string" },
         promptId: { type: "string" },
-        model: { type: "string" }
+        model: { type: "string" },
+        requirements: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            maxBytes: { type: "number" },
+            image: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                size: { type: "string", enum: ["1024x1024"] },
+                outputFormat: { type: "string", enum: ["png"] },
+                role: { type: "string", enum: ["featured"] },
+                usageContext: { type: "string", enum: ["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"] }
+              }
+            }
+          }
+        }
       }
     }
   },

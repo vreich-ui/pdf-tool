@@ -80,7 +80,9 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       prompt: job.prompt,
       client: options.imageClient,
       apiKey: options.apiKey,
-      outputFormat: imageOutputFormatFromFilename(job.filename),
+      size: job.requirements?.image?.size,
+      outputFormat: job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename),
+      maxBytes: job.requirements?.maxBytes,
       model: job.selectedModel
     });
     return {

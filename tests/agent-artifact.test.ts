@@ -238,6 +238,97 @@ test("non-GPT image request omits unsupported image output parameters", () => {
   assert.equal("output_format" in request, false);
 });
 
+
+test("structured image requirements are validated, persisted, and passed to generation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-requirements",
+        artifactKind: "image",
+        prompt: "make image",
+        filename: "hero.png",
+        tags: [],
+        requirements: { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
+      })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(body.requirements, { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } });
+    const stored = await readArtifactJob("dr-lurie", body.jobId);
+    assert.deepEqual(stored?.requirements, body.requirements);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  let captured: Record<string, unknown> | undefined;
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-requirements-run",
+    artifactKind: "image",
+    prompt: "x",
+    filename: "hero.png",
+    tags: [],
+    label: undefined,
+    requirements: { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
+  });
+  await executeAgentArtifactWorkflow(job, { imageClient: { images: { generate: async (input) => { captured = input; return { data: [{ b64_json: pngBytes.toString("base64") }] }; } } } });
+  assert.equal(captured?.size, "1024x1024");
+  assert.equal(captured?.output_format, "png");
+});
+
+test("structured image requirements reject unsupported values and enforce maxBytes", async () => {
+  let response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-format", artifactKind: "image", prompt: "x", filename: "hero.webp", tags: [], requirements: { image: { outputFormat: "webp" } } })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body).issues[0].path, ["requirements", "image", "outputFormat"]);
+
+  response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-ext", artifactKind: "image", prompt: "x", filename: "hero.jpg", tags: [], requirements: { image: { outputFormat: "png" } } })
+  });
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(JSON.parse(response.body).issues[0].path, ["filename"]);
+
+  const tooLarge = Buffer.alloc(20).toString("base64");
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-small-max",
+    artifactKind: "image",
+    prompt: "x",
+    filename: "hero.png",
+    tags: [],
+    label: undefined,
+    requirements: { maxBytes: 10, image: { size: "1024x1024", outputFormat: "png", role: "featured" } }
+  });
+  await assert.rejects(() => executeAgentArtifactWorkflow(job, { imageClient: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
+});
+
+test("structured image role and usageContext are stored as artifact metadata", async () => {
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-image-metadata",
+    artifactKind: "image",
+    prompt: "x",
+    filename: "hero.png",
+    tags: [],
+    label: undefined,
+    requirements: { image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "newsletter" } }
+  });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.deepEqual(body.artifactReference.metadata, { imageRole: "featured", usageContext: "newsletter" });
+});
+
 test("model resolution uses explicit input, adapter default, and rejects unsupported models", async () => {
   const explicit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-explicit", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined, model: "alternate-test-image-model" });
   assert.equal(explicit.selectedModel, "alternate-test-image-model");

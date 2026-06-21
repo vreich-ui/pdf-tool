@@ -7,6 +7,39 @@ export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
 export const DEFAULT_PROJECT_ID = "dr-lurie";
 
+export type ImageRequirementSize = "1024x1024";
+export type ImageRequirementOutputFormat = "png";
+export type ImageRequirementRole = "featured";
+export type ImageRequirementUsageContext =
+  | "article_header"
+  | "article_body"
+  | "category_page"
+  | "newsletter"
+  | "open_graph"
+  | "search_preview"
+  | "instagram_story"
+  | "ad_platform";
+
+export interface ArtifactJobRequirements {
+  maxBytes?: number;
+  image?: {
+    size?: ImageRequirementSize;
+    outputFormat?: ImageRequirementOutputFormat;
+    role?: ImageRequirementRole;
+    usageContext?: ImageRequirementUsageContext;
+  };
+}
+
+export interface NormalizedArtifactJobRequirements {
+  maxBytes?: number;
+  image?: {
+    size: ImageRequirementSize;
+    outputFormat: ImageRequirementOutputFormat;
+    role: ImageRequirementRole;
+    usageContext?: ImageRequirementUsageContext;
+  };
+}
+
 export interface ArtifactJobRequest {
   projectId: string;
   requestId: string;
@@ -19,6 +52,7 @@ export interface ArtifactJobRequest {
   agentName?: string;
   promptId?: string;
   model?: string;
+  requirements?: NormalizedArtifactJobRequirements;
 }
 
 
@@ -47,13 +81,29 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       label: z.string().optional(),
       agentName: z.string().optional(),
       promptId: z.string().optional(),
-      model: z.string().optional()
+      model: z.string().optional(),
+      requirements: z.object({
+        maxBytes: z.number().int().positive().max(MAX_ARTIFACT_OUTPUT_BYTES).optional(),
+        image: z.object({
+          size: z.literal("1024x1024").optional(),
+          outputFormat: z.literal("png").optional(),
+          role: z.literal("featured").optional(),
+          usageContext: z.enum(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]).optional()
+        }).optional()
+      }).optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
       if (!supportedProjectIds().has(value.projectId)) {
         ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
       }
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
+      }
+      if (value.artifactKind === "image") {
+        const outputFormat = value.requirements?.image?.outputFormat ?? "png";
+        const lowerFilename = value.filename.toLowerCase();
+        if (outputFormat === "png" && !lowerFilename.endsWith(".png")) {
+          ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must match image outputFormat png" });
+        }
       }
       const kindIssue = validateProjectArtifactKind(value.projectId, value.artifactKind);
       if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
@@ -62,7 +112,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       if (modelIssue) ctx.addIssue({ code: "custom", path: ["model"], message: modelIssue });
     });
     const result = schema.safeParse(input);
-    if (result.success) return { success: true, data: result.data as ArtifactJobRequest };
+    if (result.success) {
+      const normalized = normalizeArtifactJobRequirements((result.data as { requirements?: unknown }).requirements, (result.data as ArtifactJobRequest).artifactKind);
+      return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
+    }
     return {
       success: false,
       error: {
@@ -75,6 +128,58 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
   } catch {
     return undefined;
   }
+}
+
+function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
+  const issues: ValidationIssue[] = [];
+  if (input === undefined) {
+    return artifactKind === "image" ? { requirements: { image: { size: "1024x1024", outputFormat: "png", role: "featured" } }, issues } : { issues };
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { issues: [{ path: ["requirements"], message: "requirements must be an object" }] };
+  }
+
+  const value = input as Record<string, unknown>;
+  const maxBytes = value.maxBytes;
+  const image = value.image;
+  let normalizedMaxBytes: number | undefined;
+  if (maxBytes !== undefined) {
+    if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_ARTIFACT_OUTPUT_BYTES) {
+      issues.push({ path: ["requirements", "maxBytes"], message: `maxBytes must be a positive integer no greater than ${MAX_ARTIFACT_OUTPUT_BYTES}` });
+    } else {
+      normalizedMaxBytes = maxBytes;
+    }
+  }
+
+  if (artifactKind !== "image") {
+    return { requirements: normalizedMaxBytes === undefined ? undefined : { maxBytes: normalizedMaxBytes }, issues };
+  }
+
+  if (image !== undefined && (!image || typeof image !== "object" || Array.isArray(image))) {
+    issues.push({ path: ["requirements", "image"], message: "image requirements must be an object" });
+  }
+  const imageValue = image && typeof image === "object" && !Array.isArray(image) ? image as Record<string, unknown> : {};
+  if (imageValue.size !== undefined && imageValue.size !== "1024x1024") issues.push({ path: ["requirements", "image", "size"], message: "image size must be 1024x1024" });
+  if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png" });
+  if (imageValue.role !== undefined && imageValue.role !== "featured") issues.push({ path: ["requirements", "image", "role"], message: "image role must be featured" });
+  const usageContexts = new Set(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]);
+  const usageContext = imageValue.usageContext;
+  if (usageContext !== undefined && (typeof usageContext !== "string" || !usageContexts.has(usageContext))) {
+    issues.push({ path: ["requirements", "image", "usageContext"], message: "image usageContext is unsupported" });
+  }
+
+  return {
+    requirements: {
+      ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }),
+      image: {
+        size: "1024x1024",
+        outputFormat: "png",
+        role: "featured",
+        ...(typeof usageContext === "string" && usageContexts.has(usageContext) ? { usageContext: usageContext as ImageRequirementUsageContext } : {})
+      }
+    },
+    issues
+  };
 }
 
 export const artifactJobRequestSchema = {
@@ -96,13 +201,18 @@ export const artifactJobRequestSchema = {
     const agentName = typeof value.agentName === "string" ? value.agentName : undefined;
     const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
     const model = typeof value.model === "string" ? value.model.trim() : undefined;
+    const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind);
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
+    issues.push(...requirementsResult.issues);
     if (slot && !isSafeOptionalPathSegment(slot)) issues.push({ path: ["slot"], message: "slot must be a safe path segment" });
+    if (artifactKind === "image" && filename && (requirementsResult.requirements?.image?.outputFormat ?? "png") === "png" && !filename.toLowerCase().endsWith(".png")) {
+      issues.push({ path: ["filename"], message: "filename extension must match image outputFormat png" });
+    }
     if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
     const kindIssue = validateProjectArtifactKind(projectId, artifactKind as ArtifactKind);
     if (projectId && kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
@@ -111,7 +221,7 @@ export const artifactJobRequestSchema = {
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, agentName, promptId, model } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, slot, tags, label, agentName, promptId, model, requirements: requirementsResult.requirements } };
   }
 };
 
