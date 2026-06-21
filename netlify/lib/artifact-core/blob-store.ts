@@ -3,7 +3,7 @@ const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eve
 const memoryListOverrides = new Map<string, ProjectBlobStore["list"]>();
 
 export interface ProjectBlobStore {
-  get(key: string, options?: { type?: "json" }): Promise<unknown>;
+  get(key: string, options?: { type?: "json" | "arrayBuffer" }): Promise<unknown>;
   set(key: string, value: unknown, options?: unknown): Promise<void>;
   setJSON(key: string, value: unknown, options?: unknown): Promise<void>;
   list?(options?: unknown): Promise<unknown>;
@@ -16,10 +16,17 @@ function memoryStore(name: string): ProjectBlobStore {
     memoryStores.set(name, store);
   }
   return {
-    async get(key: string, options?: { type?: "json" }) {
+    async get(key: string, options?: { type?: "json" | "arrayBuffer" }) {
       const value = store.get(key);
       if (value === undefined) return null;
       if (options?.type === "json") return value;
+      if (options?.type === "arrayBuffer") {
+        if (value instanceof ArrayBuffer) return value;
+        if (Buffer.isBuffer(value)) return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        if (value instanceof Uint8Array) return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        if (typeof value === "string") return new TextEncoder().encode(value).buffer;
+        return value;
+      }
       return value;
     },
     async set(key: string, value: unknown) {

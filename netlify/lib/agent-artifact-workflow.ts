@@ -81,10 +81,6 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       if (!job.sourceArtifact || !job.editMode) throw new Error("Image edit jobs require sourceArtifact and editMode");
       const source = await readSourceArtifactBytes(job.projectId, job.sourceArtifact);
       const outputFormat = job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename);
-      const outputContentType = contentTypeForImageOutputFormat(outputFormat);
-      if (job.editMode === "deterministic_transform" && source.reference.contentType !== outputContentType) {
-        throw new Error("deterministic_transform format conversion is not supported without an image transform backend");
-      }
       const mask = job.maskRef ? await readSourceArtifactBytes(job.projectId, { artifactReference: job.maskRef.artifactReference, expectedSha256: job.maskRef.artifactReference.sha256 }) : undefined;
       generated = await editImageArtifactBytes({
         mode: job.editMode as import("./agent-artifact-jobs.js").ImageEditMode,
