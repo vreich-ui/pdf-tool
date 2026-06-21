@@ -76,10 +76,29 @@ export interface NormalizedArtifactJobRequirements {
   };
 }
 
+export type ArtifactJobOperation = "generate" | "edit";
+export type ImageEditMode = "deterministic_transform" | "masked_edit" | "image_variation";
+
+export interface SourceArtifactLock {
+  artifactReference: ArtifactReference;
+  expectedSha256: string;
+}
+
+export interface ArtifactReferenceHolder {
+  artifactReference: ArtifactReference;
+}
+
+export interface ImageEditInstructions {
+  change: string;
+  preserve: string[];
+  negativeInstructions: string[];
+}
+
 export interface ArtifactJobRequest {
   projectId: string;
   requestId: string;
   artifactKind: ArtifactKind;
+  operation?: ArtifactJobOperation;
   prompt: string;
   filename: string;
   templateId?: string;
@@ -92,6 +111,10 @@ export interface ArtifactJobRequest {
   agentName?: string;
   promptId?: string;
   model?: string;
+  sourceArtifact?: SourceArtifactLock;
+  editMode?: ImageEditMode;
+  maskRef?: ArtifactReferenceHolder;
+  editInstructions?: ImageEditInstructions;
   requirements?: NormalizedArtifactJobRequirements;
 }
 
@@ -114,6 +137,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       projectId: z.string().min(1),
       requestId: z.string().min(1),
       artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
+      operation: z.enum(["generate", "edit"]).default("generate"),
       prompt: z.string().min(1),
       filename: z.string().min(1),
       templateId: z.string().min(1).optional(),
@@ -126,6 +150,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       agentName: z.string().optional(),
       promptId: z.string().optional(),
       model: z.string().optional(),
+      sourceArtifact: z.object({ artifactReference: z.object({}).passthrough(), expectedSha256: z.string().min(1) }).optional(),
+      editMode: z.enum(["deterministic_transform", "masked_edit", "image_variation"]).optional(),
+      maskRef: z.object({ artifactReference: z.object({}).passthrough() }).optional(),
+      editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
       requirements: z.object({
         maxBytes: z.number().int().positive().max(MAX_ARTIFACT_OUTPUT_BYTES).optional(),
         pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
@@ -146,6 +174,15 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
       }
+      if (value.operation === "edit") {
+        if (value.artifactKind !== "image") ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "edit jobs require artifactKind image" });
+        if (!value.sourceArtifact?.artifactReference) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
+        if (!value.sourceArtifact?.expectedSha256) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
+        if (!value.editMode) ctx.addIssue({ code: "custom", path: ["editMode"], message: "edit jobs require editMode" });
+        if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && (!value.editInstructions?.preserve || value.editInstructions.preserve.length === 0)) ctx.addIssue({ code: "custom", path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
+        if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && !value.editInstructions?.change) ctx.addIssue({ code: "custom", path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
+        if (value.editMode === "masked_edit" && !value.maskRef) ctx.addIssue({ code: "custom", path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
+      }
       if (value.artifactKind === "pdf") {
         if (!value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
         if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
@@ -153,9 +190,8 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       if (value.artifactKind === "image") {
         const outputFormat = value.requirements?.image?.outputFormat ?? "png";
         const lowerFilename = value.filename.toLowerCase();
-        if (outputFormat === "png" && !lowerFilename.endsWith(".png")) {
-          ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must match image outputFormat png" });
-        }
+        const ok = outputFormat === "png" ? lowerFilename.endsWith(".png") : outputFormat === "webp" ? lowerFilename.endsWith(".webp") : (lowerFilename.endsWith(".jpg") || lowerFilename.endsWith(".jpeg"));
+        if (!ok) ctx.addIssue({ code: "custom", path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
       }
       const kindIssue = validateProjectArtifactKind(value.projectId, value.artifactKind);
       if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
@@ -285,6 +321,7 @@ export const artifactJobRequestSchema = {
 
     const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
     const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
+    const operation = value.operation === "edit" ? "edit" : "generate";
     const prompt = typeof value.prompt === "string" ? value.prompt : "";
     const filename = typeof value.filename === "string" ? value.filename.trim() : "";
     const artifactKind = typeof value.artifactKind === "string" ? value.artifactKind : "image";
@@ -299,11 +336,25 @@ export const artifactJobRequestSchema = {
     const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
     const model = typeof value.model === "string" ? value.model.trim() : undefined;
     const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind);
+    const sourceArtifact = value.sourceArtifact && typeof value.sourceArtifact === "object" && !Array.isArray(value.sourceArtifact) ? value.sourceArtifact as SourceArtifactLock : undefined;
+    const editMode = typeof value.editMode === "string" ? value.editMode as ImageEditMode : undefined;
+    const maskRef = value.maskRef && typeof value.maskRef === "object" && !Array.isArray(value.maskRef) ? value.maskRef as ArtifactReferenceHolder : undefined;
+    const rawEditInstructions = value.editInstructions && typeof value.editInstructions === "object" && !Array.isArray(value.editInstructions) ? value.editInstructions as Record<string, unknown> : undefined;
+    const editInstructions = rawEditInstructions ? { change: typeof rawEditInstructions.change === "string" ? rawEditInstructions.change : "", preserve: Array.isArray(rawEditInstructions.preserve) ? rawEditInstructions.preserve.filter((item): item is string => typeof item === "string") : [], negativeInstructions: Array.isArray(rawEditInstructions.negativeInstructions) ? rawEditInstructions.negativeInstructions.filter((item): item is string => typeof item === "string") : [] } : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (!prompt) issues.push({ path: ["prompt"], message: "prompt is required" });
+    if (operation === "edit") {
+      if (artifactKind !== "image") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image" });
+      if (!sourceArtifact?.artifactReference) issues.push({ path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
+      if (!sourceArtifact?.expectedSha256) issues.push({ path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
+      if (!editMode || !["deterministic_transform", "masked_edit", "image_variation"].includes(editMode)) issues.push({ path: ["editMode"], message: "edit jobs require a supported editMode" });
+      if ((editMode === "masked_edit" || editMode === "image_variation") && (!editInstructions?.preserve || editInstructions.preserve.length === 0)) issues.push({ path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
+      if ((editMode === "masked_edit" || editMode === "image_variation") && !editInstructions?.change) issues.push({ path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
+      if (editMode === "masked_edit" && !maskRef?.artifactReference) issues.push({ path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
+    }
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
     if (artifactKind === "pdf") {
       if (!templateId && !templateRef) issues.push({ path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
@@ -312,8 +363,11 @@ export const artifactJobRequestSchema = {
     }
     issues.push(...requirementsResult.issues);
     if (slot && !isSafeOptionalPathSegment(slot)) issues.push({ path: ["slot"], message: "slot must be a safe path segment" });
-    if (artifactKind === "image" && filename && (requirementsResult.requirements?.image?.outputFormat ?? "png") === "png" && !filename.toLowerCase().endsWith(".png")) {
-      issues.push({ path: ["filename"], message: "filename extension must match image outputFormat png" });
+    if (artifactKind === "image" && filename) {
+      const outputFormat = requirementsResult.requirements?.image?.outputFormat ?? "png";
+      const lower = filename.toLowerCase();
+      const ok = outputFormat === "png" ? lower.endsWith(".png") : outputFormat === "webp" ? lower.endsWith(".webp") : (lower.endsWith(".jpg") || lower.endsWith(".jpeg"));
+      if (!ok) issues.push({ path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
     }
     if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
     const kindIssue = validateProjectArtifactKind(projectId, artifactKind as ArtifactKind);
@@ -323,7 +377,7 @@ export const artifactJobRequestSchema = {
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, requirements: requirementsResult.requirements } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, requirements: requirementsResult.requirements } };
   }
 };
 
@@ -378,6 +432,7 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,
+    operation: input.operation ?? "generate",
     jobId: randomUUID(),
     status: "pending",
     createdAt: now,

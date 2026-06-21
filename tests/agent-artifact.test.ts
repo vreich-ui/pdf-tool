@@ -881,3 +881,64 @@ test("PDF data schema validation failure fails the job", async () => {
   assert.equal(stored?.status, "failed");
   assert.match(stored?.error ?? "", /data validation failed/i);
 });
+
+test("image edit job validation requires source lock, image kind, supported mode, and preservation constraints", async () => {
+  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], editMode: "deterministic_transform" }) });
+  assert.equal(missingSource.statusCode, 400);
+  assert.deepEqual(JSON.parse(missingSource.body).issues[0].path, ["sourceArtifact", "artifactReference"]);
+
+  const pdfEdit = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-pdf", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edit.pdf", templateId: "article_export_v1", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform" }) });
+  assert.equal(pdfEdit.statusCode, 400);
+  assert.ok(JSON.parse(pdfEdit.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "artifactKind"));
+
+  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
+  assert.equal(unsupportedMode.statusCode, 400);
+  assert.ok(JSON.parse(unsupportedMode.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
+
+  const missingPreserve = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-preserve", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "image_variation", editInstructions: { change: "make it brighter" } }) });
+  assert.equal(missingPreserve.statusCode, 400);
+  assert.ok(JSON.parse(missingPreserve.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editInstructions.preserve"));
+});
+
+test("image edit source sha256 mismatch fails before edit execution", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-mismatch", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: source, expectedSha256: "bad-sha" }, editMode: "deterministic_transform", editInstructions: { change: "", preserve: [], negativeInstructions: [] } });
+  await assert.rejects(() => executeAgentArtifactWorkflow(job), /sha256 mismatch/);
+});
+
+test("successful deterministic image edit writes a new artifact with lineage metadata", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-ok", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "metadata-only deterministic transform", preserve: ["composition"], negativeInstructions: [] } });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.notEqual(body.artifactReference.blobKey, source.blobKey);
+  assert.equal(body.artifactReference.metadata.operation, "edit");
+  assert.deepEqual(body.artifactReference.metadata.derivedFrom, { blobKey: source.blobKey, sha256: source.sha256 });
+  assert.equal(body.artifactReference.metadata.editMode, "deterministic_transform");
+  assert.deepEqual(body.artifactReference.metadata.preserved, ["composition"]);
+});
+
+test("image edit filename outputFormat and contentType consistency is enforced", async () => {
+  const badFilename = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-bad-ext", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.jpg", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform", requirements: { image: { outputFormat: "png" } } }) });
+  assert.equal(badFilename.statusCode, 400);
+  assert.ok(JSON.parse(badFilename.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "filename"));
+
+  assert.match(JSON.stringify(JSON.parse(badFilename.body).issues), /filename extension must match image outputFormat png/);
+});
+
+test("MCP tools/list schema includes image edit fields", async () => {
+  const response = await mcpRpc("tools/list");
+  assert.equal(response.statusCode, 200);
+  const tools = JSON.parse(response.body).result.tools;
+  const createTool = tools.find((tool: { name: string }) => tool.name === "create_agent_artifact_job");
+  const properties = createTool.inputSchema.properties;
+  assert.deepEqual(properties.operation.enum, ["generate", "edit"]);
+  assert.ok(properties.sourceArtifact);
+  assert.ok(properties.editMode);
+  assert.ok(properties.maskRef);
+  assert.ok(properties.editInstructions);
+  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png"]);
+});

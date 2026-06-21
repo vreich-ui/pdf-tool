@@ -1,9 +1,10 @@
 import { sha256Hex } from "./artifact-core/index.js";
 import type { ArtifactJobRecord } from "./agent-artifact-jobs.js";
 import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerationClient } from "./agent-image-generation.js";
+import { editImageArtifactBytes, readSourceArtifactBytes, contentTypeForImageOutputFormat, type ImageEditingClient } from "./agent-image-editing.js";
 
 export interface AgentArtifactWorkflowOptions {
-  imageClient?: ImageGenerationClient;
+  imageClient?: ImageGenerationClient & ImageEditingClient;
   apiKey?: string;
   agentSdk?: AgentSdkModule;
 }
@@ -12,7 +13,7 @@ export type ImageOutputFormat = "png" | "jpeg" | "webp";
 
 export interface AgentArtifactWorkflowResult extends GeneratedImageBytes {
   workflowExecuted: true;
-  toolInvoked: "generate_image_artifact";
+  toolInvoked: "generate_image_artifact" | "edit_image_artifact";
 }
 
 type AgentSdkModule = {
@@ -76,7 +77,29 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
   const agents = await loadAgentSdk(options.agentSdk);
   let generated: GeneratedImageBytes | undefined;
   const toolHandler = async () => {
-    generated = await generateImageArtifactBytes({
+    if ((job.operation ?? "generate") === "edit") {
+      if (!job.sourceArtifact || !job.editMode) throw new Error("Image edit jobs require sourceArtifact and editMode");
+      const source = await readSourceArtifactBytes(job.projectId, job.sourceArtifact);
+      const outputFormat = job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename);
+      const outputContentType = contentTypeForImageOutputFormat(outputFormat);
+      if (job.editMode === "deterministic_transform" && source.reference.contentType !== outputContentType) {
+        throw new Error("deterministic_transform format conversion is not supported without an image transform backend");
+      }
+      const mask = job.maskRef ? await readSourceArtifactBytes(job.projectId, { artifactReference: job.maskRef.artifactReference, expectedSha256: job.maskRef.artifactReference.sha256 }) : undefined;
+      generated = await editImageArtifactBytes({
+        mode: job.editMode,
+        sourceBytes: source.bytes,
+        maskBytes: mask?.bytes,
+        instructions: job.editInstructions,
+        client: options.imageClient,
+        apiKey: options.apiKey,
+        size: job.requirements?.image?.size,
+        outputFormat,
+        maxBytes: job.requirements?.maxBytes,
+        model: job.selectedModel
+      });
+    } else {
+      generated = await generateImageArtifactBytes({
       prompt: job.prompt,
       client: options.imageClient,
       apiKey: options.apiKey,
@@ -84,7 +107,8 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       outputFormat: job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename),
       maxBytes: job.requirements?.maxBytes,
       model: job.selectedModel
-    });
+      });
+    }
     return {
       ok: true as const,
       contentType: generated.contentType,
@@ -106,6 +130,6 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
   return {
     ...generated,
     workflowExecuted: true,
-    toolInvoked: "generate_image_artifact"
+    toolInvoked: (job.operation ?? "generate") === "edit" ? "edit_image_artifact" : "generate_image_artifact"
   };
 }
