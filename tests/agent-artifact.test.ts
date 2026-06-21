@@ -917,6 +917,63 @@ test("PDF data schema validation failure fails the job", async () => {
   assert.match(stored?.error ?? "", /data validation failed/i);
 });
 
+
+test("PDF edit job validation requires source lock, supported mode, and mode inputs", async () => {
+  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-missing", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] }) });
+  assert.equal(missingSource.statusCode, 400);
+  assert.ok(JSON.parse(missingSource.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "sourceArtifact.artifactReference"));
+
+  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-mode", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
+  assert.equal(unsupportedMode.statusCode, 400);
+  assert.ok(JSON.parse(unsupportedMode.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
+
+  const missingPatch = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-patch", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", currentData: { title: "Original" } }) });
+  assert.equal(missingPatch.statusCode, 400);
+  const issues = JSON.parse(missingPatch.body).issues.map((issue: { path: string[] }) => issue.path.join("."));
+  assert.ok(issues.includes("dataPatch"));
+  assert.ok(issues.includes("templateId"));
+
+  const missingData = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-data", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", templateId: "article_export_v1", dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] }) });
+  assert.equal(missingData.statusCode, 400);
+  assert.ok(JSON.parse(missingData.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "baseDataRef"));
+});
+
+test("PDF edit execution source-locks and creates derived artifacts", async () => {
+  await writePdfTemplate();
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const sourceJob = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-src", artifactKind: "pdf", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: sourceJob.jobId }) });
+  const source = (await readArtifactJob("dr-lurie", sourceJob.jobId))!.artifactReference!;
+  assert.ok(source.metadata?.renderDataRef);
+
+  const mismatch = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-mismatch", operation: "edit", artifactKind: "pdf", filename: "edited.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: "bad" }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
+  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: mismatch.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /sha256 mismatch/i);
+
+  const patch = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-patch-ok", operation: "edit", artifactKind: "pdf", filename: "edited.pdf", templateId: "article_export_v1", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "template_data_patch", baseDataRef: source.metadata!.renderDataRef as { storeName: string; blobKey: string; version: number }, dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: patch.jobId }) });
+  assert.equal(response.statusCode, 200);
+  let edited = JSON.parse(response.body).artifactReference;
+  assert.notEqual(edited.blobKey, source.blobKey);
+  assert.equal(edited.metadata.derivedFrom.blobKey, source.blobKey);
+  assert.equal(edited.metadata.editMode, "template_data_patch");
+
+  const overlay = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-overlay-ok", operation: "edit", artifactKind: "pdf", filename: "overlay.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: overlay.jobId }) });
+  assert.equal(response.statusCode, 200);
+  edited = JSON.parse(response.body).artifactReference;
+  assert.notEqual(edited.blobKey, source.blobKey);
+  assert.equal(edited.metadata.derivedFrom.sha256, source.sha256);
+
+  const transform = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-transform-ok", operation: "edit", artifactKind: "pdf", filename: "transform.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_transform", transformInstructions: { metadata: { title: "Updated title" } } });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: transform.jobId }) });
+  assert.equal(response.statusCode, 200);
+  edited = JSON.parse(response.body).artifactReference;
+  assert.notEqual(edited.blobKey, source.blobKey);
+  assert.equal(edited.contentType, "application/pdf");
+});
+
 test("image edit job validation requires source lock, image kind, supported mode, and preservation constraints", async () => {
   const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], editMode: "deterministic_transform" }) });
   assert.equal(missingSource.statusCode, 400);
@@ -924,7 +981,7 @@ test("image edit job validation requires source lock, image kind, supported mode
 
   const pdfEdit = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-pdf", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edit.pdf", templateId: "article_export_v1", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform" }) });
   assert.equal(pdfEdit.statusCode, 400);
-  assert.ok(JSON.parse(pdfEdit.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "artifactKind"));
+  assert.ok(JSON.parse(pdfEdit.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
 
   const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
   assert.equal(unsupportedMode.statusCode, 400);

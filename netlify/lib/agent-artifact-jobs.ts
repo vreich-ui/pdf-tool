@@ -82,6 +82,8 @@ export interface NormalizedArtifactJobRequirements {
 
 export type ArtifactJobOperation = "generate" | "edit";
 export type ImageEditMode = "deterministic_transform" | "masked_edit" | "image_variation";
+export type PdfEditMode = "template_data_patch" | "pdf_overlay" | "pdf_transform";
+export type ArtifactEditMode = ImageEditMode | PdfEditMode;
 
 export interface SourceArtifactLock {
   artifactReference: ArtifactReference;
@@ -116,8 +118,14 @@ export interface ArtifactJobRequest {
   promptId?: string;
   model?: string;
   sourceArtifact?: SourceArtifactLock;
-  editMode?: ImageEditMode;
+  editMode?: ArtifactEditMode;
   maskRef?: ArtifactReferenceHolder;
+  baseDataRef?: PdfTemplateRef;
+  currentData?: unknown;
+  dataPatch?: Array<{ op: "add" | "replace" | "remove"; path: string; value?: unknown }>;
+  overlayInstructions?: unknown[];
+  transformInstructions?: Record<string, unknown>;
+  preservation?: Record<string, unknown>;
   editInstructions?: ImageEditInstructions;
   requirements?: NormalizedArtifactJobRequirements;
 }
@@ -155,8 +163,14 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       promptId: z.string().optional(),
       model: z.string().optional(),
       sourceArtifact: z.object({ artifactReference: z.object({}).passthrough(), expectedSha256: z.string().min(1) }).optional(),
-      editMode: z.enum(["deterministic_transform", "masked_edit", "image_variation"]).optional(),
+      editMode: z.enum(["deterministic_transform", "masked_edit", "image_variation", "template_data_patch", "pdf_overlay", "pdf_transform"]).optional(),
       maskRef: z.object({ artifactReference: z.object({}).passthrough() }).optional(),
+      baseDataRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
+      currentData: z.unknown().optional(),
+      dataPatch: z.array(z.object({ op: z.enum(["add", "replace", "remove"]), path: z.string().min(1), value: z.unknown().optional() })).optional(),
+      overlayInstructions: z.array(z.unknown()).optional(),
+      transformInstructions: z.object({}).passthrough().optional(),
+      preservation: z.object({}).passthrough().optional(),
       editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
       requirements: z.object({
         maxBytes: z.number().int().positive().max(MAX_ARTIFACT_OUTPUT_BYTES).optional(),
@@ -185,17 +199,25 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
       }
       if (value.operation === "edit") {
-        if (value.artifactKind !== "image") ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "edit jobs require artifactKind image" });
+        if (value.artifactKind !== "image" && value.artifactKind !== "pdf") ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
         if (!value.sourceArtifact?.artifactReference) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
         if (!value.sourceArtifact?.expectedSha256) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
         if (!value.editMode) ctx.addIssue({ code: "custom", path: ["editMode"], message: "edit jobs require editMode" });
+        if (value.artifactKind === "pdf") {
+          if (!["template_data_patch", "pdf_overlay", "pdf_transform"].includes(value.editMode ?? "")) ctx.addIssue({ code: "custom", path: ["editMode"], message: "PDF edit jobs require a supported editMode" });
+          if (value.editMode === "template_data_patch" && !value.dataPatch?.length) ctx.addIssue({ code: "custom", path: ["dataPatch"], message: "template_data_patch requires dataPatch" });
+          if (value.editMode === "template_data_patch" && !value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "template_data_patch requires templateId or templateRef" });
+          if (value.editMode === "template_data_patch" && !value.baseDataRef && value.currentData === undefined) ctx.addIssue({ code: "custom", path: ["baseDataRef"], message: "template_data_patch requires baseDataRef or currentData" });
+          if (value.editMode === "pdf_overlay" && !value.overlayInstructions?.length) ctx.addIssue({ code: "custom", path: ["overlayInstructions"], message: "pdf_overlay requires overlayInstructions" });
+          if (value.editMode === "pdf_transform" && !value.transformInstructions) ctx.addIssue({ code: "custom", path: ["transformInstructions"], message: "pdf_transform requires transformInstructions" });
+        }
         if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && (!value.editInstructions?.preserve || value.editInstructions.preserve.length === 0)) ctx.addIssue({ code: "custom", path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
         if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && !value.editInstructions?.change) ctx.addIssue({ code: "custom", path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
         if (value.editMode === "masked_edit" && !value.maskRef) ctx.addIssue({ code: "custom", path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
       }
       if (value.artifactKind === "image" && !value.prompt) ctx.addIssue({ code: "custom", path: ["prompt"], message: "prompt is required for image jobs" });
       if (value.artifactKind === "pdf") {
-        if (!value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
+        if ((value.operation ?? "generate") !== "edit" && !value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
         if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
       }
       if (value.artifactKind === "image") {
@@ -355,7 +377,13 @@ export const artifactJobRequestSchema = {
     const model = typeof value.model === "string" ? value.model.trim() : undefined;
     const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind);
     const sourceArtifact = value.sourceArtifact && typeof value.sourceArtifact === "object" && !Array.isArray(value.sourceArtifact) ? value.sourceArtifact as SourceArtifactLock : undefined;
-    const editMode = typeof value.editMode === "string" ? value.editMode as ImageEditMode : undefined;
+    const editMode = typeof value.editMode === "string" ? value.editMode as ArtifactEditMode : undefined;
+    const baseDataRef = value.baseDataRef && typeof value.baseDataRef === "object" && !Array.isArray(value.baseDataRef) ? value.baseDataRef as PdfTemplateRef : undefined;
+    const currentData = value.currentData;
+    const dataPatch = Array.isArray(value.dataPatch) ? value.dataPatch as ArtifactJobRequest["dataPatch"] : undefined;
+    const overlayInstructions = Array.isArray(value.overlayInstructions) ? value.overlayInstructions : undefined;
+    const transformInstructions = value.transformInstructions && typeof value.transformInstructions === "object" && !Array.isArray(value.transformInstructions) ? value.transformInstructions as Record<string, unknown> : undefined;
+    const preservation = value.preservation && typeof value.preservation === "object" && !Array.isArray(value.preservation) ? value.preservation as Record<string, unknown> : undefined;
     const maskRef = value.maskRef && typeof value.maskRef === "object" && !Array.isArray(value.maskRef) ? value.maskRef as ArtifactReferenceHolder : undefined;
     const rawEditInstructions = value.editInstructions && typeof value.editInstructions === "object" && !Array.isArray(value.editInstructions) ? value.editInstructions as Record<string, unknown> : undefined;
     const editInstructions = rawEditInstructions ? { change: typeof rawEditInstructions.change === "string" ? rawEditInstructions.change : "", preserve: Array.isArray(rawEditInstructions.preserve) ? rawEditInstructions.preserve.filter((item): item is string => typeof item === "string") : [], negativeInstructions: Array.isArray(rawEditInstructions.negativeInstructions) ? rawEditInstructions.negativeInstructions.filter((item): item is string => typeof item === "string") : [] } : undefined;
@@ -365,17 +393,25 @@ export const artifactJobRequestSchema = {
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (artifactKind === "image" && !prompt) issues.push({ path: ["prompt"], message: "prompt is required for image jobs" });
     if (operation === "edit") {
-      if (artifactKind !== "image") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image" });
+      if (artifactKind !== "image" && artifactKind !== "pdf") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
       if (!sourceArtifact?.artifactReference) issues.push({ path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
       if (!sourceArtifact?.expectedSha256) issues.push({ path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
-      if (!editMode || !["deterministic_transform", "masked_edit", "image_variation"].includes(editMode)) issues.push({ path: ["editMode"], message: "edit jobs require a supported editMode" });
+      const supportedModes = artifactKind === "pdf" ? ["template_data_patch", "pdf_overlay", "pdf_transform"] : ["deterministic_transform", "masked_edit", "image_variation"];
+      if (!editMode || !supportedModes.includes(editMode)) issues.push({ path: ["editMode"], message: "edit jobs require a supported editMode" });
+      if (artifactKind === "pdf") {
+        if (editMode === "template_data_patch" && !dataPatch?.length) issues.push({ path: ["dataPatch"], message: "template_data_patch requires dataPatch" });
+        if (editMode === "template_data_patch" && !templateId && !templateRef) issues.push({ path: ["templateId"], message: "template_data_patch requires templateId or templateRef" });
+        if (editMode === "template_data_patch" && !baseDataRef && currentData === undefined) issues.push({ path: ["baseDataRef"], message: "template_data_patch requires baseDataRef or currentData" });
+        if (editMode === "pdf_overlay" && !overlayInstructions?.length) issues.push({ path: ["overlayInstructions"], message: "pdf_overlay requires overlayInstructions" });
+        if (editMode === "pdf_transform" && !transformInstructions) issues.push({ path: ["transformInstructions"], message: "pdf_transform requires transformInstructions" });
+      }
       if ((editMode === "masked_edit" || editMode === "image_variation") && (!editInstructions?.preserve || editInstructions.preserve.length === 0)) issues.push({ path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
       if ((editMode === "masked_edit" || editMode === "image_variation") && !editInstructions?.change) issues.push({ path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
       if (editMode === "masked_edit" && !maskRef?.artifactReference) issues.push({ path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
     }
     if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
     if (artifactKind === "pdf") {
-      if (!templateId && !templateRef) issues.push({ path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
+      if (operation !== "edit" && !templateId && !templateRef) issues.push({ path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
       if (filename && !filename.toLowerCase().endsWith(".pdf")) issues.push({ path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
       if (templateRef && (typeof templateRef.blobKey !== "string" || !templateRef.blobKey.trim())) issues.push({ path: ["templateRef", "blobKey"], message: "templateRef.blobKey is required" });
     }
@@ -395,7 +431,7 @@ export const artifactJobRequestSchema = {
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, requirements: requirementsResult.requirements } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, baseDataRef, currentData, dataPatch, overlayInstructions, transformInstructions, preservation, requirements: requirementsResult.requirements } };
   }
 };
 
