@@ -1061,6 +1061,62 @@ test("maxBytes is enforced in deterministic_transform", async () => {
   assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
 });
 
+test("Dr. Lurie republish 175KB maxBytes is stripped and defaults to system max", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  try {
+    const response = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.com" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-republish",
+        artifactKind: "image",
+        prompt: "republish",
+        filename: "hero.png",
+        tags: [],
+        requirements: { maxBytes: 175000 }
+      })
+    });
+    assert.equal(response.statusCode, 202);
+    const body = JSON.parse(response.body);
+    const stored = await readArtifactJob("dr-lurie", body.jobId);
+    assert.equal(stored?.requirements?.maxBytes, undefined);
+
+    const otherVal = await jobHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token", host: "example.com" },
+      body: JSON.stringify({
+        projectId: "dr-lurie",
+        requestId: "req-other-val",
+        artifactKind: "image",
+        prompt: "test",
+        filename: "test.png",
+        tags: [],
+        requirements: { maxBytes: 150000 }
+      })
+    });
+    if (otherVal.statusCode === 202) {
+      const otherBody = JSON.parse(otherVal.body);
+      const otherStored = await readArtifactJob("dr-lurie", otherBody.jobId);
+      assert.equal(otherStored?.requirements?.maxBytes, 150000);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Dr. Lurie edited artifacts use consistent blob keys without /edits/ segment", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-consistent", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "transform", preserve: ["composition"], negativeInstructions: [] } });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.artifactReference.blobKey.includes("/edits/"), false);
+  assert.match(body.artifactReference.blobKey, /^image\/req-edit-consistent\/[a-f0-9]{64}\.png$/);
+});
+
 test("image edit filename outputFormat and contentType consistency is enforced", async () => {
   const badFilename = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-bad-ext", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.jpg", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform", requirements: { image: { outputFormat: "png" } } }) });
   assert.equal(badFilename.statusCode, 400);

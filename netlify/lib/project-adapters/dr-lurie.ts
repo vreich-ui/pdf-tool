@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "../blob-store.js";
 import { sha256Hex, type ArtifactReference, type SaveArtifactBytesInput } from "../artifact-core/index.js";
 import { writeArtifactReferenceIndexes } from "../artifact-core/artifact-index.js";
@@ -56,9 +55,7 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     const requestId = safePathSegment(input.requestId);
     const kind = safePathSegment(input.artifactKind);
     const extension = extensionForContentType(input.contentType, input.filename);
-    const blobKey = input.metadata?.operation === "edit"
-      ? `${kind}/${requestId}/edits/${randomUUID()}-${sha256}${extension}`
-      : `${kind}/${requestId}/${sha256}${extension}`;
+    const blobKey = `${kind}/${requestId}/${sha256}${extension}`;
     const artifact: ArtifactReference = {
       blobKey,
       sizeBytes: bytes.byteLength,
