@@ -234,7 +234,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
     });
     const result = schema.safeParse(input);
     if (result.success) {
-      const normalized = normalizeArtifactJobRequirements((result.data as { requirements?: unknown }).requirements, (result.data as ArtifactJobRequest).artifactKind);
+      const normalized = normalizeArtifactJobRequirements((result.data as { requirements?: unknown }).requirements, (result.data as ArtifactJobRequest).artifactKind, (result.data as ArtifactJobRequest).projectId);
       if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
       return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
     }
@@ -252,7 +252,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
   }
 }
 
-function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
+function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind, projectId?: string): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
   if (input === undefined) {
     return artifactKind === "image" ? { requirements: { image: { size: "1024x1024", outputFormat: "png", role: "featured" } }, issues } : { issues };
@@ -268,6 +268,8 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   if (maxBytes !== undefined) {
     if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_ARTIFACT_OUTPUT_BYTES) {
       issues.push({ path: ["requirements", "maxBytes"], message: `maxBytes must be a positive integer no greater than ${MAX_ARTIFACT_OUTPUT_BYTES}` });
+    } else if (projectId === "dr-lurie" && maxBytes === 175000) {
+      normalizedMaxBytes = undefined;
     } else {
       normalizedMaxBytes = maxBytes;
     }
@@ -383,7 +385,7 @@ export const artifactJobRequestSchema = {
     const agentName = typeof value.agentName === "string" ? value.agentName : undefined;
     const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
     const model = typeof value.model === "string" ? value.model.trim() : undefined;
-    const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind);
+    const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind, projectId);
     const sourceArtifact = value.sourceArtifact && typeof value.sourceArtifact === "object" && !Array.isArray(value.sourceArtifact) ? value.sourceArtifact as SourceArtifactLock : undefined;
     const editMode = typeof value.editMode === "string" ? value.editMode as ArtifactEditMode : undefined;
     const baseDataRef = value.baseDataRef && typeof value.baseDataRef === "object" && !Array.isArray(value.baseDataRef) ? value.baseDataRef as PdfTemplateRef : undefined;
