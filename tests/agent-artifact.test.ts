@@ -881,3 +881,93 @@ test("PDF data schema validation failure fails the job", async () => {
   assert.equal(stored?.status, "failed");
   assert.match(stored?.error ?? "", /data validation failed/i);
 });
+
+
+test("PDF edit job validation enforces source lock and mode-specific fields", async () => {
+  let response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.pdf", tags: [] })
+  });
+  assert.equal(response.statusCode, 400);
+  let issues = JSON.parse(response.body).issues;
+  assert.ok(issues.some((issue: { path: string[] }) => issue.path.join(".") === "sourceArtifact.artifactReference"));
+  assert.ok(issues.some((issue: { path: string[] }) => issue.path.join(".") === "sourceArtifact.expectedSha256"));
+
+  response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "pdf/source.pdf", sha256: "abc", contentType: "application/pdf", tags: [] }, expectedSha256: "abc" }, editMode: "freeform" })
+  });
+  assert.equal(response.statusCode, 400);
+
+  response = await jobHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-patch", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "pdf/source.pdf", sha256: "abc", contentType: "application/pdf", tags: [] }, expectedSha256: "abc" }, editMode: "template_data_patch" })
+  });
+  assert.equal(response.statusCode, 400);
+  issues = JSON.parse(response.body).issues;
+  assert.ok(issues.some((issue: { path: string[] }) => issue.path[0] === "templateId"));
+  assert.ok(issues.some((issue: { path: string[] }) => issue.path[0] === "dataPatch"));
+  assert.ok(issues.some((issue: { path: string[] }) => issue.path[0] === "baseDataRef"));
+});
+
+test("PDF edit sha256 mismatch fails before editing", async () => {
+  await writePdfTemplate();
+  const source = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-src-mismatch", artifactKind: "pdf", prompt: "export", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: source.jobId }) });
+  const sourceArtifact = (await readArtifactJob("dr-lurie", source.jobId))!.artifactReference!;
+  const edit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-mismatch", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.pdf", sourceArtifact: { artifactReference: sourceArtifact, expectedSha256: "bad-sha" }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760, fontSize: 10 }], tags: [], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: edit.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /sha256 mismatch/i);
+});
+
+test("template_data_patch creates a derived PDF artifact with lineage metadata", async () => {
+  await writePdfTemplate({ dataSchema: { type: "object", required: ["title"], properties: { title: { type: "string" }, sections: { type: "array" } }, additionalProperties: true }, htmlTemplate: "<h1>{{title}}</h1><p>{{sections.0.body}}</p>" });
+  const source = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-src-patch", artifactKind: "pdf", prompt: "export", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original", sections: [{ body: "Old" }] }, tags: [], label: undefined });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: source.jobId }) });
+  const sourceArtifact = (await readArtifactJob("dr-lurie", source.jobId))!.artifactReference!;
+  assert.ok(sourceArtifact.metadata?.renderDataRef);
+  const edit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-patch-ok", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.pdf", sourceArtifact: { artifactReference: sourceArtifact, expectedSha256: sourceArtifact.sha256 }, editMode: "template_data_patch", templateId: "article_export_v1", baseDataRef: sourceArtifact.metadata!.renderDataRef as { storeName: string; blobKey: string; version: number }, dataPatch: [{ op: "replace", path: "/sections/0/body", value: "Updated" }], preservation: { preserveTemplate: true }, tags: [], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: edit.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const edited = JSON.parse(response.body).artifactReference;
+  assert.notEqual(edited.blobKey, sourceArtifact.blobKey);
+  assert.equal(edited.metadata.operation, "edit");
+  assert.deepEqual(edited.metadata.derivedFrom, { blobKey: sourceArtifact.blobKey, sha256: sourceArtifact.sha256 });
+});
+
+test("overlay and transform edits preserve source and create new PDF artifacts", async () => {
+  await writePdfTemplate();
+  const source = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-src-ot", artifactKind: "pdf", prompt: "export", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: source.jobId }) });
+  const sourceArtifact = (await readArtifactJob("dr-lurie", source.jobId))!.artifactReference!;
+
+  for (const [mode, extra] of [
+    ["pdf_overlay", { overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760, fontSize: 10 }] }],
+    ["pdf_transform", { transformInstructions: { rotatePages: [{ page: 1, degrees: 90 }] } }]
+  ] as Array<["pdf_overlay" | "pdf_transform", Record<string, unknown>]>) {
+    const edit = await createArtifactJob({ projectId: "dr-lurie", requestId: `req-${mode}`, operation: "edit", artifactKind: "pdf", prompt: "edit", filename: `${mode}.pdf`, sourceArtifact: { artifactReference: sourceArtifact, expectedSha256: sourceArtifact.sha256 }, editMode: mode, ...extra, tags: [], label: undefined });
+    const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: edit.jobId }) });
+    assert.equal(response.statusCode, 200);
+    const edited = JSON.parse(response.body).artifactReference;
+    assert.notEqual(edited.blobKey, sourceArtifact.blobKey);
+    assert.equal(edited.contentType, "application/pdf");
+    assert.equal(edited.metadata.derivedFrom.blobKey, sourceArtifact.blobKey);
+  }
+});
+
+test("PDF edit filename validation and generated PDF metadata include renderDataRef", async () => {
+  await writePdfTemplate();
+  const bad = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-bad-name", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edited.txt", tags: [], sourceArtifact: { artifactReference: { blobKey: "pdf/source.pdf", sha256: "abc", contentType: "application/pdf", tags: [] }, expectedSha256: "abc" }, editMode: "pdf_transform", transformInstructions: { metadata: { title: "x" } } }) });
+  assert.equal(bad.statusCode, 400);
+
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-render-ref", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const artifact = JSON.parse(response.body).artifactReference;
+  assert.equal(artifact.contentType, "application/pdf");
+  assert.deepEqual(artifact.metadata.renderDataRef, { storeName: "pdf-render-data", blobKey: `render-data/${job.jobId}.json`, version: 1 });
+});

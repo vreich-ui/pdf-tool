@@ -2,7 +2,9 @@ import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js"
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
 import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
+import { projectBlobStore } from "../lib/blob-store.js";
 import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
+import { executePdfEditJob } from "../lib/agent-pdf-edit.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -44,8 +46,17 @@ export async function handler(event: FunctionEvent) {
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
     const generated = runningJob.artifactKind === "pdf"
-      ? await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements })
+      ? runningJob.operation === "edit"
+        ? await executePdfEditJob(runningJob)
+        : await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements })
       : await executeAgentArtifactWorkflow(runningJob, { apiKey: resolveProjectOpenAIKey(runningJob.projectId) });
+
+    let renderDataRef: { storeName: string; blobKey: string; version: number } | undefined;
+    if (runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated) {
+      renderDataRef = { storeName: "pdf-render-data", blobKey: `render-data/${runningJob.jobId}.json`, version: 1 };
+      const renderDataStore = await projectBlobStore(renderDataRef.storeName, { siteID: process.env[adapter.config.siteIdEnv], token: process.env[adapter.config.blobsTokenEnv], consistency: "strong" });
+      await renderDataStore.setJSON(renderDataRef.blobKey, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation });
+    }
     const sha256 = sha256Hex(generated.bytes);
     const artifact = await adapter.saveArtifactBytes({
       projectId: runningJob.projectId,
@@ -58,18 +69,21 @@ export async function handler(event: FunctionEvent) {
       sha256,
       tags: runningJob.tags,
       label: runningJob.label,
-      metadata: runningJob.artifactKind === "pdf" && "template" in generated ? {
+      metadata: runningJob.artifactKind === "pdf" && "metadata" in generated ? generated.metadata : runningJob.artifactKind === "pdf" && "template" in generated ? {
         templateId: generated.template.templateId,
+        templateRef: runningJob.templateRef,
         templateVersion: generated.template.version,
         renderer: generated.template.renderer,
-        pageCount: generated.validation.pageCount
+        requirements: generated.requirements,
+        pageCount: generated.validation.pageCount,
+        renderDataRef
       } : runningJob.requirements?.image ? {
         imageRole: runningJob.requirements.image.role,
         usageContext: runningJob.requirements.image.usageContext
       } : undefined
     });
     const workflowPatchStatus = "skipped_by_design";
-    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
+    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...("template" in generated ? { renderMetadata: { ...generated.template, renderDataRef }, validationResults: generated.validation } : "renderMetadata" in generated ? { renderMetadata: generated.renderMetadata, validationResults: generated.validation } : {}) });
     return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: complete.selectedModel, requirements: complete.requirements, workflowPatchStatus, artifactReference: complete.artifactReference });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });

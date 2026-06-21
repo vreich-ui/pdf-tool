@@ -130,7 +130,8 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
     blobKey,
     tags: input.tags ?? [],
     label: input.label,
-    createdAt
+    createdAt,
+    metadata: input.metadata ?? {}
   };
 
   const store = await projectBlobStore(ARTIFACT_STORE_NAME);
