@@ -45,9 +45,9 @@ export async function readSourceArtifactBytes(projectId: string, source: { artif
   const storeOptions = adapter.config.siteIdEnv || adapter.config.blobsTokenEnv ? { siteID: process.env[adapter.config.siteIdEnv], token: process.env[adapter.config.blobsTokenEnv] } : {};
   const blobKey = source.artifactReference.blobKey;
   if (!blobKey) throw new Error("sourceArtifact.artifactReference.blobKey is required");
-  const value = await (await projectBlobStore(storeName, storeOptions)).get(blobKey);
+  const value = await (await projectBlobStore(storeName, storeOptions)).get(blobKey, { type: "arrayBuffer" });
   if (value == null) throw new Error(`Source artifact not found: ${blobKey}`);
-  const bytes = Buffer.isBuffer(value) ? value : value instanceof Uint8Array ? Buffer.from(value) : typeof value === "string" ? Buffer.from(value) : undefined;
+  const bytes = value instanceof ArrayBuffer ? Buffer.from(value) : Buffer.isBuffer(value) ? value : value instanceof Uint8Array ? Buffer.from(value) : typeof value === "string" ? Buffer.from(value) : undefined;
   if (!bytes) throw new Error("Source artifact bytes could not be read from Blob store");
   const actualSha256 = sha256Hex(bytes);
   if (actualSha256 !== source.expectedSha256) throw new Error(`Source artifact sha256 mismatch: expected ${source.expectedSha256}, got ${actualSha256}`);
@@ -75,7 +75,18 @@ export async function editImageArtifactBytes(options: {
 }): Promise<GeneratedImageBytes> {
   const outputFormat = options.outputFormat ?? "png";
   if (options.mode === "deterministic_transform") {
-    return { bytes: options.sourceBytes, contentType: contentTypeFromFormat(outputFormat) };
+    const { default: sharp } = await import("sharp");
+    let transform = sharp(options.sourceBytes);
+    transform = transform.withMetadata({ exif: undefined });
+    if (outputFormat === "webp") transform = transform.webp();
+    else if (outputFormat === "jpeg") transform = transform.jpeg();
+    else transform = transform.png();
+
+    const bytes = await transform.toBuffer();
+    if (options.maxBytes && bytes.byteLength > options.maxBytes) {
+      throw new Error(`Generated artifact exceeds maximum size of ${options.maxBytes} bytes (got ${bytes.byteLength})`);
+    }
+    return { bytes, contentType: contentTypeFromFormat(outputFormat) };
   }
   const client = options.client ?? await defaultOpenAIClient(options.apiKey);
   const prompt = options.instructions?.change;

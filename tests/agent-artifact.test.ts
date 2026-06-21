@@ -17,7 +17,7 @@ import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-arti
 import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 
-const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFklEQVQYlWP4z8DQQAxmGFX4n67BAwAg+JWdtW1ttQAAAABJRU5ErkJggg==", "base64");
 const webpBytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x04, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
 
 function env() {
@@ -285,7 +285,7 @@ test("structured image requirements reject unsupported values and enforce maxByt
   let response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-format", artifactKind: "image", prompt: "x", filename: "hero.webp", tags: [], requirements: { image: { outputFormat: "webp" } } })
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-format", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requirements: { image: { outputFormat: "bad" } } })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["requirements", "image", "outputFormat"]);
@@ -999,7 +999,7 @@ test("image edit source sha256 mismatch fails before edit execution", async () =
   await assert.rejects(() => executeAgentArtifactWorkflow(job), /sha256 mismatch/);
 });
 
-test("successful deterministic image edit writes a new artifact with lineage metadata", async () => {
+test("successful deterministic image edit writes a new artifact with lineage metadata and strips metadata", async () => {
   const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
   const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-ok", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "metadata-only deterministic transform", preserve: ["composition"], negativeInstructions: [] } });
@@ -1011,6 +1011,54 @@ test("successful deterministic image edit writes a new artifact with lineage met
   assert.deepEqual(body.artifactReference.metadata.derivedFrom, { blobKey: source.blobKey, sha256: source.sha256 });
   assert.equal(body.artifactReference.metadata.editMode, "deterministic_transform");
   assert.deepEqual(body.artifactReference.metadata.preserved, ["composition"]);
+
+  // Verify binary read through readSourceArtifactBytes
+  const { readSourceArtifactBytes } = await import("../netlify/lib/agent-image-editing.js");
+  const readBack = await readSourceArtifactBytes("dr-lurie", { artifactReference: body.artifactReference, expectedSha256: body.artifactReference.sha256 });
+  assert.ok(readBack.bytes.length > 0);
+  assert.equal(readBack.sha256, body.artifactReference.sha256);
+});
+
+test("deterministic compression to WebP", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-webp", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-edit-webp",
+    operation: "edit",
+    artifactKind: "image",
+    prompt: "compress",
+    filename: "edit.webp",
+    tags: ["edited"],
+    sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 },
+    editMode: "deterministic_transform",
+    requirements: { image: { outputFormat: "webp", size: "1024x1024", role: "featured" } }
+  });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.artifactReference.contentType, "image/webp");
+  assert.ok(body.artifactReference.blobKey.endsWith(".webp"));
+});
+
+test("maxBytes is enforced in deterministic_transform", async () => {
+  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
+  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-max", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-edit-max",
+    operation: "edit",
+    artifactKind: "image",
+    prompt: "compress",
+    filename: "edit.png",
+    tags: [],
+    sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 },
+    editMode: "deterministic_transform",
+    requirements: { maxBytes: 10 }
+  });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  assert.equal(response.statusCode, 500);
+  assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
 });
 
 test("image edit filename outputFormat and contentType consistency is enforced", async () => {
@@ -1033,7 +1081,7 @@ test("MCP tools/list schema includes image edit fields", async () => {
   assert.ok(properties.maskRef);
   assert.ok(properties.editInstructions);
   assert.deepEqual(properties.requirements.properties.image.properties.size.enum, ["1024x1024"]);
-  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png"]);
+  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png", "webp"]);
   assert.deepEqual(properties.requirements.properties.image.properties.role.enum, ["featured"]);
   assert.ok(properties.requirements.properties.image.properties.usageContext);
   assert.ok(properties.requirements.properties.pdf);

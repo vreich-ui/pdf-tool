@@ -8,7 +8,7 @@ export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
 export const DEFAULT_PROJECT_ID = "dr-lurie";
 
 export type ImageRequirementSize = "1024x1024";
-export type ImageRequirementOutputFormat = "png";
+export type ImageRequirementOutputFormat = "png" | "webp";
 export type ImageRequirementRole = "featured";
 export type ImageRequirementUsageContext =
   | "article_header"
@@ -186,7 +186,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         }).optional(),
         image: z.object({
           size: z.literal("1024x1024").optional(),
-          outputFormat: z.literal("png").optional(),
+          outputFormat: z.enum(["png", "webp"]).optional(),
           role: z.literal("featured").optional(),
           usageContext: z.enum(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]).optional()
         }).optional()
@@ -337,7 +337,7 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   }
   const imageValue = image && typeof image === "object" && !Array.isArray(image) ? image as Record<string, unknown> : {};
   if (imageValue.size !== undefined && imageValue.size !== "1024x1024") issues.push({ path: ["requirements", "image", "size"], message: "image size must be 1024x1024" });
-  if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png" });
+  if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png" && imageValue.outputFormat !== "webp") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png or webp" });
   if (imageValue.role !== undefined && imageValue.role !== "featured") issues.push({ path: ["requirements", "image", "role"], message: "image role must be featured" });
   const usageContexts = new Set(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]);
   const usageContext = imageValue.usageContext;
@@ -350,7 +350,7 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
       ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }),
       image: {
         size: "1024x1024",
-        outputFormat: "png",
+        outputFormat: (imageValue.outputFormat as ImageRequirementOutputFormat) || "png",
         role: "featured",
         ...(typeof usageContext === "string" && usageContexts.has(usageContext) ? { usageContext: usageContext as ImageRequirementUsageContext } : {})
       }
