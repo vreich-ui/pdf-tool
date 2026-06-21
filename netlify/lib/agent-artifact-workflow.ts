@@ -87,7 +87,7 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       }
       const mask = job.maskRef ? await readSourceArtifactBytes(job.projectId, { artifactReference: job.maskRef.artifactReference, expectedSha256: job.maskRef.artifactReference.sha256 }) : undefined;
       generated = await editImageArtifactBytes({
-        mode: job.editMode,
+        mode: job.editMode as import("./agent-artifact-jobs.js").ImageEditMode,
         sourceBytes: source.bytes,
         maskBytes: mask?.bytes,
         instructions: job.editInstructions,

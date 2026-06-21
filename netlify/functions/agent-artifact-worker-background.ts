@@ -3,6 +3,7 @@ import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonRespon
 import { sha256Hex } from "../lib/artifact-core/index.js";
 import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
 import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
+import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -44,8 +45,13 @@ export async function handler(event: FunctionEvent) {
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
     const generated = runningJob.artifactKind === "pdf"
-      ? await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements })
+      ? (runningJob.operation === "edit"
+        ? await executePdfEditJob(runningJob)
+        : await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements }))
       : await executeAgentArtifactWorkflow(runningJob, { apiKey: resolveProjectOpenAIKey(runningJob.projectId) });
+    const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
+      ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
+      : undefined;
     const sha256 = sha256Hex(generated.bytes);
     const artifact = await adapter.saveArtifactBytes({
       projectId: runningJob.projectId,
@@ -58,11 +64,14 @@ export async function handler(event: FunctionEvent) {
       sha256,
       tags: runningJob.tags,
       label: runningJob.label,
-      metadata: runningJob.artifactKind === "pdf" && "template" in generated ? {
+      metadata: runningJob.artifactKind === "pdf" && runningJob.operation === "edit" && "metadata" in generated ? generated.metadata : runningJob.artifactKind === "pdf" && "template" in generated ? {
         templateId: generated.template.templateId,
+        templateRef: runningJob.templateRef,
         templateVersion: generated.template.version,
         renderer: generated.template.renderer,
-        pageCount: generated.validation.pageCount
+        requirements: generated.requirements,
+        pageCount: generated.validation.pageCount,
+        renderDataRef
       } : runningJob.operation === "edit" && runningJob.sourceArtifact ? {
         imageRole: runningJob.requirements?.image?.role,
         usageContext: runningJob.requirements?.image?.usageContext,
