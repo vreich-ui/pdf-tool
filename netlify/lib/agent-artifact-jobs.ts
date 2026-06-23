@@ -7,18 +7,10 @@ export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
 export const DEFAULT_PROJECT_ID = "dr-lurie";
 
-export type ImageRequirementSize = "1024x1024";
-export type ImageRequirementOutputFormat = "png" | "webp";
-export type ImageRequirementRole = "featured";
-export type ImageRequirementUsageContext =
-  | "article_header"
-  | "article_body"
-  | "category_page"
-  | "newsletter"
-  | "open_graph"
-  | "search_preview"
-  | "instagram_story"
-  | "ad_platform";
+export type ImageRequirementSize = string;
+export type ImageRequirementOutputFormat = "png" | "webp" | "jpeg";
+export type ImageRequirementRole = string;
+export type ImageRequirementUsageContext = string;
 
 export interface PdfTemplateRef {
   storeName?: string;
@@ -185,10 +177,10 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
           margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional()
         }).optional(),
         image: z.object({
-          size: z.literal("1024x1024").optional(),
-          outputFormat: z.enum(["png", "webp"]).optional(),
-          role: z.literal("featured").optional(),
-          usageContext: z.enum(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]).optional()
+          size: z.string().optional(),
+          outputFormat: z.enum(["png", "webp", "jpeg"]).optional(),
+          role: z.string().optional(),
+          usageContext: z.string().optional()
         }).optional()
       }).optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
@@ -268,8 +260,6 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   if (maxBytes !== undefined) {
     if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_ARTIFACT_OUTPUT_BYTES) {
       issues.push({ path: ["requirements", "maxBytes"], message: `maxBytes must be a positive integer no greater than ${MAX_ARTIFACT_OUTPUT_BYTES}` });
-    } else if (projectId === "dr-lurie" && maxBytes === 175000) {
-      normalizedMaxBytes = undefined;
     } else {
       normalizedMaxBytes = maxBytes;
     }
@@ -338,23 +328,18 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
     issues.push({ path: ["requirements", "image"], message: "image requirements must be an object" });
   }
   const imageValue = image && typeof image === "object" && !Array.isArray(image) ? image as Record<string, unknown> : {};
-  if (imageValue.size !== undefined && imageValue.size !== "1024x1024") issues.push({ path: ["requirements", "image", "size"], message: "image size must be 1024x1024" });
-  if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png" && imageValue.outputFormat !== "webp") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png or webp" });
-  if (imageValue.role !== undefined && imageValue.role !== "featured") issues.push({ path: ["requirements", "image", "role"], message: "image role must be featured" });
-  const usageContexts = new Set(["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"]);
+  if (imageValue.size !== undefined && (typeof imageValue.size !== "string" || !imageValue.size.includes("x"))) issues.push({ path: ["requirements", "image", "size"], message: "image size must be a string like 1024x1024" });
+  if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png" && imageValue.outputFormat !== "webp" && imageValue.outputFormat !== "jpeg") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png, webp, or jpeg" });
   const usageContext = imageValue.usageContext;
-  if (usageContext !== undefined && (typeof usageContext !== "string" || !usageContexts.has(usageContext))) {
-    issues.push({ path: ["requirements", "image", "usageContext"], message: "image usageContext is unsupported" });
-  }
 
   return {
     requirements: {
       ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }),
       image: {
-        size: "1024x1024",
+        size: (imageValue.size as string) || "1024x1024",
         outputFormat: (imageValue.outputFormat as ImageRequirementOutputFormat) || "png",
-        role: "featured",
-        ...(typeof usageContext === "string" && usageContexts.has(usageContext) ? { usageContext: usageContext as ImageRequirementUsageContext } : {})
+        role: (imageValue.role as string) || "featured",
+        ...(typeof usageContext === "string" ? { usageContext } : {})
       }
     },
     issues
