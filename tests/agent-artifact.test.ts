@@ -18,7 +18,7 @@ import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 
 const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFklEQVQYlWP4z8DQQAxmGFX4n67BAwAg+JWdtW1ttQAAAABJRU5ErkJggg==", "base64");
-const webpBytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x04, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
+const webpBytes = Buffer.from("UklGRmAAAABXRUJQVlA4WAoAAAAQAAAACQAACQAAQUxQSAoAAAABB1DAiAhERP8DVlA4IDAAAADQAQCdASoKAAoAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=", "base64");
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -253,12 +253,12 @@ test("structured image requirements are validated, persisted, and passed to gene
         prompt: "make image",
         filename: "hero.png",
         tags: [],
-        requirements: { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
+        requirements: { maxBytes: 50000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
       })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
-    assert.deepEqual(body.requirements, { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } });
+    assert.deepEqual(body.requirements, { maxBytes: 50000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } });
     const stored = await readArtifactJob("dr-lurie", body.jobId);
     assert.deepEqual(stored?.requirements, body.requirements);
   } finally {
@@ -274,7 +274,7 @@ test("structured image requirements are validated, persisted, and passed to gene
     filename: "hero.png",
     tags: [],
     label: undefined,
-    requirements: { maxBytes: 1000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
+    requirements: { maxBytes: 50000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } }
   });
   await executeAgentArtifactWorkflow(job, { imageClient: { images: { generate: async (input) => { captured = input; return { data: [{ b64_json: pngBytes.toString("base64") }] }; } } } });
   assert.equal(captured?.size, "1024x1024");
@@ -298,7 +298,7 @@ test("structured image requirements reject unsupported values and enforce maxByt
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["filename"]);
 
-  const tooLarge = Buffer.alloc(20).toString("base64");
+  const tooLarge = pngBytes.toString("base64");
   const job = await createArtifactJob({
     projectId: "dr-lurie",
     requestId: "req-small-max",
@@ -471,7 +471,7 @@ test("failed generation updates job as failed", async () => {
 });
 
 test("output over max bytes is rejected", async () => {
-  const tooLarge = Buffer.alloc(20).toString("base64");
+  const tooLarge = pngBytes.toString("base64");
   await assert.rejects(() => generateImageArtifactBytes({ prompt: "x", model: "test-image-model", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
 });
 
@@ -1061,7 +1061,7 @@ test("maxBytes is enforced in deterministic_transform", async () => {
   assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
 });
 
-test("Dr. Lurie republish 175KB maxBytes is stripped and defaults to system max", async () => {
+test("Dr. Lurie republish 175KB maxBytes is NOT stripped and is enforced", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
@@ -1081,7 +1081,7 @@ test("Dr. Lurie republish 175KB maxBytes is stripped and defaults to system max"
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
     const stored = await readArtifactJob("dr-lurie", body.jobId);
-    assert.equal(stored?.requirements?.maxBytes, undefined);
+    assert.equal(stored?.requirements?.maxBytes, 175000);
 
     const otherVal = await jobHandler({
       httpMethod: "POST",
@@ -1270,4 +1270,29 @@ test("PDF job requirements can be submitted via top-level or nested fields and n
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("optimization resizes and enforces maxBytes during generation", async () => {
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-optimize",
+    artifactKind: "image",
+    prompt: "x",
+    filename: "hero.webp",
+    tags: [],
+    label: undefined,
+    requirements: { maxBytes: 5000, image: { size: "100x100", outputFormat: "webp", role: "custom-role" } }
+  });
+
+  const result = await executeAgentArtifactWorkflow(job);
+
+  assert.equal(result.contentType, "image/webp");
+  assert.ok(result.bytes.length > 0);
+  assert.ok(result.bytes.length <= 5000);
+
+  const { default: sharp } = await import("sharp");
+  const metadata = await sharp(result.bytes).metadata();
+  assert.equal(metadata.width, 100);
+  assert.equal(metadata.height, 100);
+  assert.equal(metadata.format, "webp");
 });
