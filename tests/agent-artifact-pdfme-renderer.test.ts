@@ -4,8 +4,11 @@ import zlib from "node:zlib";
 import { resetMemoryBlobStores, setMemoryBlobStoreGet } from "../netlify/lib/blob-store.js";
 import { handler as createHandler } from "../netlify/functions/create-pdf-template.js";
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
+import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
+import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
 import { renderPdfmeArtifact } from "../netlify/lib/pdfme-renderer.js";
 import { resolveOperationRoute } from "../netlify/lib/agent-artifact-operations.js";
+import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import type { ArtifactJobRecord } from "../netlify/lib/agent-artifact-jobs.js";
 
 function env() {
@@ -250,4 +253,109 @@ test("operation router: store.get() error inside getPdfTemplateMeta propagates i
       return true;
     }
   );
+});
+
+// ── Worker persists executor/requiresAI/selectedModel into the stored job record ──
+
+test("worker: pdfme job stores executor=pdfme, requiresAI=false, selectedModel=undefined in job record and status endpoint", async () => {
+  // Confirms Q1: OPENAI_API_KEY is not required for pdfme PDF jobs (requiresAI=false path).
+  // Confirms Q2: executor, requiresAI, and gated selectedModel are persisted and visible via status.
+  delete process.env.OPENAI_API_KEY;
+
+  await createTemplate("worker-persist-test");
+  await publishTemplate("worker-persist-test");
+
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-worker-persist",
+    artifactKind: "pdf",
+    templateId: "worker-persist-test",
+    filename: "output.pdf",
+    tags: [],
+    label: undefined,
+  });
+
+  // selectedModel is set to the project default at creation time, before route resolution
+  assert.equal(job.selectedModel, "gpt-image-1", "selectedModel is stale at creation (pre-fix baseline)");
+  assert.equal(job.executor, undefined, "executor is absent at creation");
+  assert.equal(job.requiresAI, undefined, "requiresAI is absent at creation");
+
+  const workerRes = await workerHandler({
+    httpMethod: "POST",
+    headers: { authorization: "Bearer test-token" },
+    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+  });
+  assert.equal(workerRes.statusCode, 200, `worker failed: ${workerRes.body}`);
+
+  const workerBody = JSON.parse(workerRes.body);
+  assert.equal(workerBody.executor, "pdfme");
+  assert.equal(workerBody.requiresAI, false);
+  assert.equal(workerBody.requiresModel, false);
+  assert.equal(workerBody.selectedModel, undefined, "worker response gates selectedModel for requiresModel=false");
+
+  // Verify the stored job record (what status endpoint reads) matches — not just the inline response
+  const statusRes = await mcpStatusHandler({
+    httpMethod: "GET",
+    headers: { authorization: "Bearer test-token" },
+    queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+  });
+  assert.equal(statusRes.statusCode, 200);
+  const statusBody = JSON.parse(statusRes.body);
+  assert.equal(statusBody.executor, "pdfme", "status endpoint must return executor from stored record");
+  assert.equal(statusBody.requiresAI, false, "status endpoint must return requiresAI from stored record");
+  assert.equal(statusBody.requiresModel, false, "status endpoint must return requiresModel from stored record");
+  assert.equal(statusBody.selectedModel, undefined, "status endpoint must not expose selectedModel for non-model jobs");
+  assert.equal(statusBody.status, "complete");
+});
+
+// ── Image job still resolves OpenAI key and retains selectedModel in stored record ──
+
+test("worker: image job retains selectedModel and stores requiresAI=true in job record", async () => {
+  process.env.OPENAI_API_KEY = "test-openai-key";
+
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-worker-image-route",
+    artifactKind: "image",
+    prompt: "a test image",
+    filename: "test.png",
+    tags: [],
+    label: undefined,
+  });
+
+  assert.equal(job.selectedModel, "gpt-image-1");
+
+  // Run via worker with a fake image response (same pattern as existing image tests)
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...Array(8).fill(0)]);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (typeof url === "string" && url.includes("openai")) {
+      return new Response(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }), { status: 200 });
+    }
+    return originalFetch(url, init);
+  }) as typeof fetch;
+
+  try {
+    const workerRes = await workerHandler({
+      httpMethod: "POST",
+      headers: { authorization: "Bearer test-token" },
+      body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    });
+
+    const statusRes = await mcpStatusHandler({
+      httpMethod: "GET",
+      headers: { authorization: "Bearer test-token" },
+      queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+    });
+    const statusBody = JSON.parse(statusRes.body);
+
+    // For image jobs requiresModel=true, so selectedModel must be preserved
+    assert.equal(statusBody.requiresAI, true, "image job stores requiresAI=true");
+    assert.equal(statusBody.requiresModel, true, "image job stores requiresModel=true");
+    assert.equal(statusBody.selectedModel, "gpt-image-1", "selectedModel is preserved for requiresModel=true jobs");
+    assert.equal(statusBody.executor, "openai-image");
+    void workerRes;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

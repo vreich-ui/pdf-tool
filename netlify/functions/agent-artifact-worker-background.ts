@@ -47,6 +47,14 @@ export async function handler(event: FunctionEvent) {
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
     const route = await resolveOperationRoute(runningJob);
+    // Persist route fields immediately so the stored record reflects the actual execution path.
+    // selectedModel is cleared for non-model routes (was set at job creation from project defaults).
+    runningJob = await updateArtifactJob(runningJob, {
+      executor: route.executor,
+      requiresAI: route.requiresAI,
+      requiresModel: route.requiresModel,
+      selectedModel: route.requiresModel ? runningJob.selectedModel : undefined,
+    });
     const apiKey = route.requiresAI ? resolveProjectOpenAIKey(runningJob.projectId) : undefined;
 
     const generated = route.artifactKind === "pdf"
@@ -98,7 +106,7 @@ export async function handler(event: FunctionEvent) {
     });
     const workflowPatchStatus = "skipped_by_design";
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
-    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, artifactReference: complete.artifactReference });
+    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, artifactReference: complete.artifactReference });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });
     return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error });
