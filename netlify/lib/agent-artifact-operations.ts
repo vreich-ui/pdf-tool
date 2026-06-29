@@ -36,13 +36,9 @@ export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<Ope
       return { artifactKind: kind, operation: op, editMode, requiresAI: false, requiresModel: false, executor };
     }
     if (job.templateId) {
-      try {
-        const meta = await getPdfTemplateMeta(job.projectId, job.templateId);
-        if (meta?.renderer === "pdfme") {
-          return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "pdfme" };
-        }
-      } catch {
-        // fall through to html-chromium
+      const meta = await getPdfTemplateMeta(job.projectId, job.templateId);
+      if (meta?.renderer === "pdfme") {
+        return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "pdfme" };
       }
     }
     return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "html-chromium" };

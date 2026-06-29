@@ -196,3 +196,28 @@ test("operation router: pdfme meta (even draft) routes to pdfme executor", async
   assert.equal(route.requiresAI, false);
   assert.equal(route.requiresModel, false);
 });
+
+// ── Infrastructure error during routing propagates — does NOT silently fall through ──
+
+test("operation router: infrastructure error from getPdfTemplateMeta propagates instead of falling through to html-chromium", async () => {
+  // "unknown-project" is not in the adapter registry, so openTemplateStore() throws
+  // "Unsupported projectId: unknown-project" before any blob read happens.
+  // resolveOperationRoute must NOT swallow this and return html-chromium.
+  const job = {
+    projectId: "unknown-project",
+    artifactKind: "pdf",
+    operation: "generate",
+    templateId: "some-template",
+  } as unknown as ArtifactJobRecord;
+
+  await assert.rejects(
+    () => resolveOperationRoute(job),
+    (err: Error) => {
+      assert.ok(
+        err.message.includes("Unsupported projectId"),
+        `expected "Unsupported projectId" in error, got: ${err.message}`
+      );
+      return true;
+    }
+  );
+});
