@@ -1,10 +1,10 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
-import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput } from "../lib/pdf-template-mcp.js";
+import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template";
 
 const tools = [
   {
@@ -157,7 +157,7 @@ const tools = [
   },
   {
     name: "create_pdf_template",
-    description: "Create and store a versioned pdfme PDF template definition. Status starts as draft; use publish_pdf_template (HTTP) to make it active.",
+    description: "Create and store a versioned pdfme PDF template definition. Status starts as draft; use publish_pdf_template to make it active.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -195,6 +195,20 @@ const tools = [
       required: ["projectId"],
       properties: {
         projectId: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "publish_pdf_template",
+    description: "Publish a pdfme PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "templateId"],
+      properties: {
+        projectId: { type: "string" },
+        templateId: { type: "string" },
+        version: { type: "number", description: "Specific version to publish; omit to publish the latest version" }
       }
     }
   }
@@ -265,6 +279,11 @@ async function callTool(name: string | undefined, args: unknown, event: Function
     }
     case "list_pdf_templates": {
       const result = await listPdfTemplatesResult(args as ListPdfTemplatesInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "publish_pdf_template": {
+      const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
