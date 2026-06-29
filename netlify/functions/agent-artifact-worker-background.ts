@@ -4,6 +4,7 @@ import { sha256Hex } from "../lib/artifact-core/index.js";
 import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
 import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
 import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
+import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -44,11 +45,14 @@ export async function handler(event: FunctionEvent) {
     const adapter = getProjectAdapter(runningJob.projectId);
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
-    const generated = runningJob.artifactKind === "pdf"
+    const route = resolveOperationRoute(runningJob);
+    const apiKey = route.requiresAI ? resolveProjectOpenAIKey(runningJob.projectId) : undefined;
+
+    const generated = route.artifactKind === "pdf"
       ? (runningJob.operation === "edit"
         ? await executePdfEditJob(runningJob)
         : await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements }))
-      : await executeAgentArtifactWorkflow(runningJob, { apiKey: resolveProjectOpenAIKey(runningJob.projectId) });
+      : await executeAgentArtifactWorkflow(runningJob, { apiKey });
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
       : undefined;
@@ -91,7 +95,7 @@ export async function handler(event: FunctionEvent) {
     });
     const workflowPatchStatus = "skipped_by_design";
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
-    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: complete.selectedModel, requirements: complete.requirements, workflowPatchStatus, artifactReference: complete.artifactReference });
+    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, artifactReference: complete.artifactReference });
   } catch (error) {
     const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });
     return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error });
