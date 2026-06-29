@@ -11,6 +11,8 @@
   "dependencies": {
     "@netlify/blobs": "^9.1.2",
     "@openai/agents": "^0.1.0",
+    "@pdfme/common": "^6.1.10",
+    "@pdfme/generator": "^6.1.10",
     "openai": "^6.10.0",
     "sharp": "^0.35.2",
     "zod": "^3.25.40"

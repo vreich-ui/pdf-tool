@@ -5,6 +5,7 @@ import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project
 import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
 import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
 import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
+import { renderPdfmeArtifact } from "../lib/pdfme-renderer.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -45,12 +46,14 @@ export async function handler(event: FunctionEvent) {
     const adapter = getProjectAdapter(runningJob.projectId);
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
-    const route = resolveOperationRoute(runningJob);
+    const route = await resolveOperationRoute(runningJob);
     const apiKey = route.requiresAI ? resolveProjectOpenAIKey(runningJob.projectId) : undefined;
 
     const generated = route.artifactKind === "pdf"
       ? (runningJob.operation === "edit"
         ? await executePdfEditJob(runningJob)
+        : route.executor === "pdfme"
+        ? await renderPdfmeArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, requirements: runningJob.requirements })
         : await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements }))
       : await executeAgentArtifactWorkflow(runningJob, { apiKey });
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated

@@ -1,4 +1,5 @@
 import type { ArtifactJobRecord, ArtifactEditMode } from "./agent-artifact-jobs.js";
+import { getPdfTemplateMeta } from "./pdf-template-store.js";
 
 export type ArtifactExecutor =
   | "html-chromium"
@@ -24,15 +25,23 @@ const PDF_EDIT_EXECUTORS: Partial<Record<string, ArtifactExecutor>> = {
   template_data_patch: "html-chromium",
 };
 
-export function resolveOperationRoute(job: ArtifactJobRecord): OperationRoute {
+export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<OperationRoute> {
   const kind = job.artifactKind;
   const op = job.operation ?? "generate";
   const editMode = job.editMode;
 
   if (kind === "pdf") {
-    const executor: ArtifactExecutor =
-      op === "edit" ? (PDF_EDIT_EXECUTORS[editMode ?? ""] ?? "html-chromium") : "html-chromium";
-    return { artifactKind: kind, operation: op, editMode, requiresAI: false, requiresModel: false, executor };
+    if (op === "edit") {
+      const executor: ArtifactExecutor = PDF_EDIT_EXECUTORS[editMode ?? ""] ?? "html-chromium";
+      return { artifactKind: kind, operation: op, editMode, requiresAI: false, requiresModel: false, executor };
+    }
+    if (job.templateId) {
+      const meta = await getPdfTemplateMeta(job.projectId, job.templateId);
+      if (meta?.renderer === "pdfme") {
+        return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "pdfme" };
+      }
+    }
+    return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "html-chromium" };
   }
 
   if (kind === "image") {
