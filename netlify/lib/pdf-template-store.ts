@@ -217,7 +217,7 @@ export async function listPdfTemplates(projectId: string): Promise<PdfTemplateLi
 
 export async function getPdfTemplateMeta(projectId: string, templateId: string): Promise<PdfTemplateMeta | null> {
   const store = await openTemplateStore(projectId);
-  const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+  const meta = await store.get(metaKey(templateId), { type: "json" }) as PdfTemplateMeta | null;
   if (!meta || meta.projectId !== projectId) return null;
   return meta;
 }

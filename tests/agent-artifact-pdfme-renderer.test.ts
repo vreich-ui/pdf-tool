@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
-import { resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
+import { resetMemoryBlobStores, setMemoryBlobStoreGet } from "../netlify/lib/blob-store.js";
 import { handler as createHandler } from "../netlify/functions/create-pdf-template.js";
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
 import { renderPdfmeArtifact } from "../netlify/lib/pdfme-renderer.js";
@@ -216,6 +216,36 @@ test("operation router: infrastructure error from getPdfTemplateMeta propagates 
       assert.ok(
         err.message.includes("Unsupported projectId"),
         `expected "Unsupported projectId" in error, got: ${err.message}`
+      );
+      return true;
+    }
+  );
+});
+
+// ── store.get() failure inside getPdfTemplateMeta propagates — NOT swallowed to null ──
+
+test("operation router: store.get() error inside getPdfTemplateMeta propagates instead of returning null", async () => {
+  // Override store.get() for the pdf-templates store to simulate a blob read failure
+  // (e.g. a 503 from the blob backend, network error, or BlobsInternalError).
+  // This exercises the actual swallow point: .catch(() => null) was converting this into null,
+  // making it indistinguishable from "template not found" and silently routing to html-chromium.
+  setMemoryBlobStoreGet("pdf-templates", async () => {
+    throw new Error("Simulated blob store read failure");
+  });
+
+  const job = {
+    projectId: "dr-lurie",
+    artifactKind: "pdf",
+    operation: "generate",
+    templateId: "any-template",
+  } as unknown as ArtifactJobRecord;
+
+  await assert.rejects(
+    () => resolveOperationRoute(job),
+    (err: Error) => {
+      assert.ok(
+        err.message.includes("Simulated blob store read failure"),
+        `expected read error to propagate, got: ${err.message}`
       );
       return true;
     }
