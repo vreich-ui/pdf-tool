@@ -59,7 +59,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const job = await readArtifactJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Artifact job not found" };
   const artifactReference = job.artifactReference ?? job.artifact;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, artifactReference, artifact: artifactReference, error: job.error };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, artifactReference, artifact: artifactReference, error: job.error };
 }
 
 

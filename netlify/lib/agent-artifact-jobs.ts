@@ -447,6 +447,9 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   validationResults?: Record<string, unknown>;
   adapterVersion: string;
   selectedModel?: string;
+  executor?: string;
+  requiresAI?: boolean;
+  requiresModel?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -503,7 +506,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error" | "renderMetadata" | "validationResults">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,
