@@ -686,7 +686,7 @@ test("MCP JSON-RPC tools/list includes all artifact tools", async () => {
   const response = await mcpRpc("tools/list");
   assert.equal(response.statusCode, 200);
   const names = JSON.parse(response.body).result.tools.map((tool: { name: string }) => tool.name).sort();
-  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status"].sort());
+  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "create_pdf_template", "get_pdf_template", "list_pdf_templates"].sort());
 });
 
 

@@ -1,9 +1,10 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
+import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput } from "../lib/pdf-template-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates";
 
 const tools = [
   {
@@ -153,6 +154,49 @@ const tools = [
     name: "get_agent_artifact_by_filename",
     description: "Look up a completed artifact reference by project, request, and filename. Returns metadata only, never binary bytes.",
     inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId", "filename"], properties: { projectId: { type: "string" }, requestId: { type: "string" }, filename: { type: "string" } } }
+  },
+  {
+    name: "create_pdf_template",
+    description: "Create and store a versioned pdfme PDF template definition. Status starts as draft; use publish_pdf_template (HTTP) to make it active.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "templateJson"],
+      properties: {
+        projectId: { type: "string" },
+        templateId: { type: "string", description: "Stable identifier for this template; auto-generated if omitted" },
+        templateJson: { type: "object", additionalProperties: true, description: "pdfme template: must contain basePdf and schemas array" },
+        renderer: { type: "string", enum: ["pdfme"] },
+        label: { type: "string" },
+        tags: { type: "array", items: { type: "string" } }
+      }
+    }
+  },
+  {
+    name: "get_pdf_template",
+    description: "Retrieve a stored pdfme PDF template definition. Defaults to the latest active version; pass version to retrieve a specific version.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "templateId"],
+      properties: {
+        projectId: { type: "string" },
+        templateId: { type: "string" },
+        version: { type: "number", description: "Specific version number; omit to get the latest active version" }
+      }
+    }
+  },
+  {
+    name: "list_pdf_templates",
+    description: "List all pdfme PDF templates stored for a project, with their latest version, active version, and status.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId"],
+      properties: {
+        projectId: { type: "string" }
+      }
+    }
   }
 ] as const;
 
@@ -208,6 +252,21 @@ async function callTool(name: string | undefined, args: unknown, event: Function
       const { statusCode: _statusCode, ok, artifact, ...body } = result;
       const structured = ok ? { ...body, artifactReference: artifact } : body;
       return ok ? toolContent(structured) : { isError: true, ...toolContent(structured) };
+    }
+    case "create_pdf_template": {
+      const result = await createPdfTemplate(args as CreatePdfTemplateInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_pdf_template": {
+      const result = await getPdfTemplateRecord(args as GetPdfTemplateInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "list_pdf_templates": {
+      const result = await listPdfTemplatesResult(args as ListPdfTemplatesInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
     default:
       return undefined;
