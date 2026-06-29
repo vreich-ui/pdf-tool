@@ -347,6 +347,43 @@ test("MCP tools/list includes PDF template tools", async () => {
   assert.ok(names.includes("create_pdf_template"));
   assert.ok(names.includes("get_pdf_template"));
   assert.ok(names.includes("list_pdf_templates"));
+  assert.ok(names.includes("publish_pdf_template"));
+});
+
+test("MCP publish_pdf_template flips status to active and get_pdf_template returns published version", async () => {
+  // Create a draft
+  const createRes = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle", templateJson: validTemplate } });
+  assert.equal(createRes.statusCode, 200);
+  const created = JSON.parse(createRes.body).result.structuredContent;
+  assert.equal(created.status, "draft");
+  assert.equal(created.version, 1);
+
+  // get_pdf_template with no version should return isError (no active version yet)
+  const draftGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  assert.equal(JSON.parse(draftGetRes.body).result.isError, true);
+
+  // Publish it
+  const publishRes = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  assert.equal(publishRes.statusCode, 200);
+  const published = JSON.parse(publishRes.body).result.structuredContent;
+  assert.equal(published.projectId, "dr-lurie");
+  assert.equal(published.templateId, "mcp-publish-lifecycle");
+  assert.equal(published.version, 1);
+  assert.equal(published.status, "active");
+
+  // get_pdf_template with no version now returns the active version
+  const activeGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  assert.equal(activeGetRes.statusCode, 200);
+  const activeTemplate = JSON.parse(activeGetRes.body).result.structuredContent;
+  assert.equal(activeTemplate.status, "active");
+  assert.equal(activeTemplate.version, 1);
+  assert.equal(activeTemplate.templateId, "mcp-publish-lifecycle");
+});
+
+test("MCP publish_pdf_template returns isError for nonexistent templateId", async () => {
+  const response = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { projectId: "dr-lurie", templateId: "does-not-exist" } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(JSON.parse(response.body).result.isError, true);
 });
 
 test("MCP create_pdf_template creates draft and returns version", async () => {
