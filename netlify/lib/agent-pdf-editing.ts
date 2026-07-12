@@ -2,7 +2,7 @@ import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
 import { countPdfPages, renderProjectPdf } from "./agent-pdf-generation.js";
-import { MAX_ARTIFACT_OUTPUT_BYTES, type ArtifactJobRecord, type NormalizedArtifactJobRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
+import { MAX_PDF_OUTPUT_BYTES, type ArtifactJobRecord, type NormalizedArtifactJobRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface BlobJsonRef { storeName?: string; blobKey: string; version?: number }
 export type PdfEditMode = "template_data_patch" | "pdf_overlay" | "pdf_transform";
@@ -93,7 +93,7 @@ function validatePdfOutput(bytes: Buffer, requirements?: NormalizedArtifactJobRe
   const pdfReq = requirements?.pdf ?? requirements;
   if (pdfReq?.pageCount?.min !== undefined && pageCount < pdfReq.pageCount.min) throw new Error("Edited PDF page count is below minimum");
   if (pdfReq?.pageCount?.max !== undefined && pageCount > pdfReq.pageCount.max) throw new Error("Edited PDF page count exceeds maximum");
-  const maxBytes = requirements?.maxBytes ?? pdfReq?.maxBytes ?? MAX_ARTIFACT_OUTPUT_BYTES;
+  const maxBytes = requirements?.maxBytes ?? pdfReq?.maxBytes ?? MAX_PDF_OUTPUT_BYTES;
   if (bytes.byteLength > maxBytes) throw new Error(`Edited PDF exceeds maximum size of ${maxBytes} bytes`);
   return { pageCount, sizeBytes: bytes.byteLength };
 }

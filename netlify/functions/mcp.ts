@@ -1,10 +1,11 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
+import { createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy";
 
 const tools = [
   {
@@ -211,6 +212,69 @@ const tools = [
         version: { type: "number", description: "Specific version to publish; omit to publish the latest version" }
       }
     }
+  },
+  {
+    name: "search_images",
+    description: "Start a least-cost image sourcing job: searches the project media library first, then online providers by ascending cost tier, and banks up to five scored candidates per request. Returns job metadata and polling instructions only; never returns image bytes.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "requestId", "query"],
+      properties: {
+        projectId: { type: "string" },
+        requestId: { type: "string" },
+        query: { type: "string", description: "Search prompt describing the desired image" },
+        count: { type: "number", description: "Desired number of new candidates (1-5); defaults to the policy candidateTarget" },
+        tags: { type: "array", items: { type: "string" } },
+        label: { type: "string" },
+        policyOverrides: { type: "object", additionalProperties: true, description: "Partial image sourcing policy merged over the stored project policy for this search only" }
+      }
+    }
+  },
+  {
+    name: "get_image_search_job_status",
+    description: "Get pending/running/complete/failed status for an image search job. Completed jobs include the banked candidate metadata (artifact references, scores, licenses); never image bytes.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "jobId"], properties: { projectId: { type: "string" }, jobId: { type: "string" } } }
+  },
+  {
+    name: "get_image_search_bank",
+    description: "Read the per-request image selection bank: all candidates across searches with states, scores, licenses, and artifact references. Metadata only, never image bytes.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId"], properties: { projectId: { type: "string" }, requestId: { type: "string" } } }
+  },
+  {
+    name: "update_image_search_candidate",
+    description: "Update a banked candidate's state: selected (agent's choice), kept, pending_review, or discarded. Discarding with deleteArtifact=true also deletes the imported blob bytes; library-origin artifacts are never deleted.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "requestId", "candidateId", "state"],
+      properties: {
+        projectId: { type: "string" },
+        requestId: { type: "string" },
+        candidateId: { type: "string" },
+        state: { type: "string", enum: ["kept", "pending_review", "selected", "discarded"] },
+        reason: { type: "string" },
+        deleteArtifact: { type: "boolean" }
+      }
+    }
+  },
+  {
+    name: "get_image_search_policy",
+    description: "Read the project's effective image sourcing policy JSON (stored policy merged over defaults): candidate targets, provider tiers, license rules, scoring weights, budgets, and quotas.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string" } } }
+  },
+  {
+    name: "set_image_search_policy",
+    description: "Replace the project's stored image sourcing policy with the given partial policy (validated, merged over defaults). Candidate caps are clamped to five per request.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "policy"],
+      properties: {
+        projectId: { type: "string" },
+        policy: { type: "object", additionalProperties: true, description: "Partial ImageSourcingPolicy JSON" }
+      }
+    }
   }
 ] as const;
 
@@ -284,6 +348,36 @@ async function callTool(name: string | undefined, args: unknown, event: Function
     }
     case "publish_pdf_template": {
       const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "search_images": {
+      const result = await createImageSearchJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_image_search_job_status": {
+      const result = await getImageSearchJobStatus(args as never);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_image_search_bank": {
+      const result = await getImageSearchBank(args as never);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "update_image_search_candidate": {
+      const result = await updateImageSearchCandidate(args as never);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_image_search_policy": {
+      const result = await getImageSearchPolicy(args as never);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "set_image_search_policy": {
+      const result = await setImageSearchPolicy(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }

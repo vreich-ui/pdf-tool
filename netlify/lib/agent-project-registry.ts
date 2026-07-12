@@ -2,10 +2,16 @@ import { drLurieAdapter } from "./project-adapters/dr-lurie.js";
 import type { ProjectArtifactAdapter } from "./project-adapters/types.js";
 import type { ArtifactKind } from "./artifact-core/index.js";
 
-const adapters = new Map<string, ProjectArtifactAdapter>([[drLurieAdapter.config.projectId, drLurieAdapter]]);
+// Lazy init: the registry participates in an import cycle (registry -> adapter ->
+// artifact-core -> registry), so drLurieAdapter must not be dereferenced at module scope.
+let adapterMap: Map<string, ProjectArtifactAdapter> | undefined;
+function adapters(): Map<string, ProjectArtifactAdapter> {
+  if (!adapterMap) adapterMap = new Map([[drLurieAdapter.config.projectId, drLurieAdapter]]);
+  return adapterMap;
+}
 
-export function getProjectAdapter(projectId: string): ProjectArtifactAdapter | undefined { return adapters.get(projectId); }
-export function supportedProjectIds(): Set<string> { return new Set(adapters.keys()); }
+export function getProjectAdapter(projectId: string): ProjectArtifactAdapter | undefined { return adapters().get(projectId); }
+export function supportedProjectIds(): Set<string> { return new Set(adapters().keys()); }
 
 export function resolveProjectOpenAIKey(projectId: string): string | undefined {
   const adapter = getProjectAdapter(projectId);

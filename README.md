@@ -86,6 +86,29 @@ Existing internal endpoints remain available:
   - Internal Netlify background worker entrypoint that runs the Agent SDK workflow and saves the artifact.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 
+### Image search (least-cost sourcing)
+
+pdf-tool can populate a per-request image selection bank from the project's own media
+library first, then online providers in ascending cost order (Openverse, Pexels, Unsplash,
+Google Programmable Search), scored against an agent-editable JSON sourcing policy. Hard
+limit: five non-discarded candidates per request. Candidates are saved as ordinary artifacts
+with license/provenance metadata; the agent picks the winner (`selected`) and a specialty
+agent may `discard` the rest (default state: kept). See `docs/IMAGE_SEARCH.md` for the
+policy JSON reference, scoring algorithm, and roadmap.
+
+MCP tools: `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
+`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`.
+HTTP mirrors: `POST /.netlify/functions/create-image-search-job`,
+`GET|POST /.netlify/functions/get-image-search-job-status`,
+`GET|POST /.netlify/functions/image-search-policy`.
+
+Optional provider credentials (providers without credentials are skipped, never fail):
+
+- `PEXELS_API_KEY` (endpoint override: `PEXELS_API_URL`)
+- `UNSPLASH_ACCESS_KEY` (endpoint override: `UNSPLASH_API_URL`)
+- `GOOGLE_CSE_KEY` + `GOOGLE_CSE_CX` (endpoint override: `GOOGLE_CSE_API_URL`)
+- `OPENVERSE_API_URL` (no key required; override only)
+
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
@@ -108,7 +131,10 @@ The first configured project is:
 
 ### Output limits
 
-Generated artifact output is limited to `5_000_000` bytes before persistence. Image validation also runs inside `saveArtifactBytes()`.
+Image and binary artifact output is limited to `5_000_000` bytes before persistence. PDF
+artifacts have no product size cap; `requirements.maxBytes` may be set up to a 100 MB
+worker memory-safety backstop (`MAX_PDF_OUTPUT_BYTES`), which also applies when no
+`maxBytes` is provided. Image validation also runs inside `saveArtifactBytes()`.
 
 
 ### Multi-project adapter model

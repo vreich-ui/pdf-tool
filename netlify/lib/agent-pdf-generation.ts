@@ -1,7 +1,7 @@
 import Ajv from "ajv/dist/ajv.js";
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
-import { MAX_ARTIFACT_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
+import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface PdfTemplateRecord {
   templateId: string;
@@ -144,7 +144,7 @@ export async function renderProjectPdf(input: RenderPdfInput): Promise<RenderPdf
   const maxPages = requirements.pageCount?.max;
   if (minPages !== undefined && pageCount < minPages) throw new Error("Rendered PDF page count is below minimum");
   if (maxPages !== undefined && pageCount > maxPages) throw new Error("Rendered PDF page count exceeds maximum");
-  const maxBytes = requirements.maxBytes ?? MAX_ARTIFACT_OUTPUT_BYTES;
+  const maxBytes = requirements.maxBytes ?? MAX_PDF_OUTPUT_BYTES;
   if (bytes.byteLength > maxBytes) throw new Error(`Rendered PDF exceeds maximum size of ${maxBytes} bytes`);
   return { bytes, contentType: "application/pdf", requirements, template: { templateId: template.templateId, version: template.version, renderer: template.renderer }, validation: { pageCount, sizeBytes: bytes.byteLength } };
 }

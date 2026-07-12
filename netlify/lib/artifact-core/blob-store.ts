@@ -8,6 +8,7 @@ export interface ProjectBlobStore {
   set(key: string, value: unknown, options?: unknown): Promise<void>;
   setJSON(key: string, value: unknown, options?: unknown): Promise<void>;
   list?(options?: unknown): Promise<unknown>;
+  delete?(key: string): Promise<void>;
 }
 
 function memoryStore(name: string): ProjectBlobStore {
@@ -43,6 +44,9 @@ function memoryStore(name: string): ProjectBlobStore {
       if (override) return override(options);
       const prefix = options?.prefix ?? "";
       return { blobs: Array.from(store.keys()).filter((key) => key.startsWith(prefix)).map((key) => ({ key })) };
+    },
+    async delete(key: string) {
+      store.delete(key);
     }
   };
 }

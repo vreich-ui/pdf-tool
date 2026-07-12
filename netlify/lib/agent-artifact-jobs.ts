@@ -4,8 +4,16 @@ import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
 import { getProjectAdapter, resolveProjectModel, supportedProjectIds, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
-export const MAX_ARTIFACT_OUTPUT_BYTES = 5_000_000;
+export const MAX_IMAGE_OUTPUT_BYTES = 5_000_000;
+/** Legacy name: applies to image and binary artifacts. PDFs use MAX_PDF_OUTPUT_BYTES. */
+export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_IMAGE_OUTPUT_BYTES;
+/** PDFs have no product size limit; this is a memory-safety backstop for the worker only. */
+export const MAX_PDF_OUTPUT_BYTES = 104_857_600;
 export const DEFAULT_PROJECT_ID = "dr-lurie";
+
+export function maxOutputBytesForKind(kind: ArtifactKind): number {
+  return kind === "pdf" ? MAX_PDF_OUTPUT_BYTES : MAX_IMAGE_OUTPUT_BYTES;
+}
 
 export type ImageRequirementSize = string;
 export type ImageRequirementOutputFormat = "png" | "webp" | "jpeg";
@@ -165,7 +173,8 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       preservation: z.object({}).passthrough().optional(),
       editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
       requirements: z.object({
-        maxBytes: z.number().int().positive().max(MAX_ARTIFACT_OUTPUT_BYTES).optional(),
+        // The kind-dependent ceiling is enforced in normalizeArtifactJobRequirements.
+        maxBytes: z.number().int().positive().optional(),
         pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
         format: z.enum(["A4", "Letter"]).optional(),
         orientation: z.enum(["portrait", "landscape"]).optional(),
@@ -256,10 +265,11 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   const value = input as Record<string, unknown>;
   const maxBytes = value.maxBytes;
   const image = value.image;
+  const maxBytesCeiling = maxOutputBytesForKind(artifactKind);
   let normalizedMaxBytes: number | undefined;
   if (maxBytes !== undefined) {
-    if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_ARTIFACT_OUTPUT_BYTES) {
-      issues.push({ path: ["requirements", "maxBytes"], message: `maxBytes must be a positive integer no greater than ${MAX_ARTIFACT_OUTPUT_BYTES}` });
+    if (typeof maxBytes !== "number" || !Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > maxBytesCeiling) {
+      issues.push({ path: ["requirements", "maxBytes"], message: `maxBytes must be a positive integer no greater than ${maxBytesCeiling}` });
     } else {
       normalizedMaxBytes = maxBytes;
     }
