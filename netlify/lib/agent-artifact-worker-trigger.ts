@@ -11,12 +11,12 @@ export function artifactWorkerBaseUrl(event?: TriggerEvent): string | undefined 
   return host ? `https://${host}` : undefined;
 }
 
-export async function triggerWorker(baseUrl: string | undefined, token: string | undefined, projectId: string, jobId: string): Promise<void> {
+export async function triggerWorker(baseUrl: string | undefined, token: string | undefined, projectId: string, jobId: string, workerFunction = "agent-artifact-worker-background"): Promise<void> {
   if (!baseUrl) throw new Error("Unable to determine worker base URL");
   if (!token) throw new Error("AGENT_RUN_TOKEN is not configured for worker trigger");
   if (typeof fetch !== "function") throw new Error("fetch is unavailable for worker trigger");
 
-  const url = new URL("/.netlify/functions/agent-artifact-worker-background", baseUrl);
+  const url = new URL(`/.netlify/functions/${workerFunction}`, baseUrl);
   const response = await fetch(url, {
     method: "POST",
     headers: {

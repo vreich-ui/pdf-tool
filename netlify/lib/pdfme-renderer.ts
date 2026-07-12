@@ -1,5 +1,5 @@
 import { getPdfTemplate, getPdfTemplateMeta } from "./pdf-template-store.js";
-import { MAX_ARTIFACT_OUTPUT_BYTES } from "./agent-artifact-jobs.js";
+import { MAX_PDF_OUTPUT_BYTES } from "./agent-artifact-jobs.js";
 import type { NormalizedArtifactJobRequirements, NormalizedPdfRequirements } from "./agent-artifact-jobs.js";
 
 export interface RenderPdfmeOutput {
@@ -68,7 +68,7 @@ export async function renderPdfmeArtifact(options: {
   if (pdfReq?.pageCount?.max !== undefined && pageCount > pdfReq.pageCount.max) {
     throw new Error("Rendered PDF page count exceeds maximum");
   }
-  const maxBytes = requirements?.maxBytes ?? MAX_ARTIFACT_OUTPUT_BYTES;
+  const maxBytes = requirements?.maxBytes ?? MAX_PDF_OUTPUT_BYTES;
   if (bytes.byteLength > maxBytes) {
     throw new Error(`Rendered PDF exceeds maximum size of ${maxBytes} bytes`);
   }

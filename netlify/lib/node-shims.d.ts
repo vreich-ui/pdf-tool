@@ -4,6 +4,7 @@ declare class Response {}
 declare class Buffer extends Uint8Array {
   static from(input: string | ArrayBuffer | ArrayBufferView | number[], encoding?: string): Buffer;
   static alloc(size: number): Buffer;
+  static concat(list: Uint8Array[]): Buffer;
   static isBuffer(value: unknown): value is Buffer;
   toString(encoding?: string): string;
   equals(other: Uint8Array): boolean;

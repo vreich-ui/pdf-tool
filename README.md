@@ -86,6 +86,50 @@ Existing internal endpoints remain available:
   - Internal Netlify background worker entrypoint that runs the Agent SDK workflow and saves the artifact.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 
+### Image search (least-cost sourcing)
+
+pdf-tool can populate a per-request image selection bank from the project's own media
+library first, then online providers in ascending cost order (Openverse, Pexels, Unsplash,
+Google Programmable Search), scored against an agent-editable JSON sourcing policy. Hard
+limit: five non-discarded candidates per request. Candidates are saved as ordinary artifacts
+with license/provenance metadata; the agent picks the winner (`selected`) and a specialty
+agent may `discard` the rest (default state: kept). See `docs/IMAGE_SEARCH.md` for the
+policy JSON reference, scoring algorithm, and roadmap.
+
+MCP tools: `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
+`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`,
+`import_image_from_url`, `import_images_from_url`.
+HTTP mirrors: `POST /.netlify/functions/create-image-search-job`,
+`GET|POST /.netlify/functions/get-image-search-job-status`,
+`GET|POST /.netlify/functions/image-search-policy`,
+`POST /.netlify/functions/import-image-from-url`,
+`POST /.netlify/functions/create-image-import-job`.
+
+`import_image_from_url` swallows any valid single image reachable at an https URL: it
+downloads server-side, converts non-native formats (gif, tiff, avif, ...) to png/jpeg,
+optimizes to the 5MB image cap, saves through the project adapter (e.g. Dr. Lurie), banks
+it as a `url_import` candidate, and synchronously returns the project-native
+`ArtifactReference` plus `candidateId` — never bytes. Optional `slot` makes the artifact
+retrievable via `get_agent_artifact_by_slot`; caller-asserted `license` info is recorded
+in artifact metadata (defaults to unknown — rights clearance for direct imports is the
+caller's responsibility).
+
+`import_images_from_url` is the batch variant, run as a background job: each source URL
+may be a direct image, a **zip archive** of images, or an https **folder/index page**
+(same-host linked/embedded images are collected). Every imported image is saved and banked
+as a `url_import` candidate. Manual imports do not consume the five-slot search candidate
+cap; they are bounded separately by `quotas.maxUrlImportsPerBatch` (default 20) and
+`quotas.maxUrlImportsPerRequest` (default 50). Imported artifacts are ordinary image
+artifacts: agents can run further manipulations on them through `create_agent_artifact_job`
+edit operations (deterministic transforms, masked AI edits, variations).
+
+Optional provider credentials (providers without credentials are skipped, never fail):
+
+- `PEXELS_API_KEY` (endpoint override: `PEXELS_API_URL`)
+- `UNSPLASH_ACCESS_KEY` (endpoint override: `UNSPLASH_API_URL`)
+- `GOOGLE_CSE_KEY` + `GOOGLE_CSE_CX` (endpoint override: `GOOGLE_CSE_API_URL`)
+- `OPENVERSE_API_URL` (no key required; override only)
+
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
@@ -108,7 +152,10 @@ The first configured project is:
 
 ### Output limits
 
-Generated artifact output is limited to `5_000_000` bytes before persistence. Image validation also runs inside `saveArtifactBytes()`.
+Image and binary artifact output is limited to `5_000_000` bytes before persistence. PDF
+artifacts have no product size cap; `requirements.maxBytes` may be set up to a 100 MB
+worker memory-safety backstop (`MAX_PDF_OUTPUT_BYTES`), which also applies when no
+`maxBytes` is provided. Image validation also runs inside `saveArtifactBytes()`.
 
 
 ### Multi-project adapter model
