@@ -97,10 +97,20 @@ agent may `discard` the rest (default state: kept). See `docs/IMAGE_SEARCH.md` f
 policy JSON reference, scoring algorithm, and roadmap.
 
 MCP tools: `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
-`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`.
+`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`,
+`import_image_from_url`.
 HTTP mirrors: `POST /.netlify/functions/create-image-search-job`,
 `GET|POST /.netlify/functions/get-image-search-job-status`,
-`GET|POST /.netlify/functions/image-search-policy`.
+`GET|POST /.netlify/functions/image-search-policy`,
+`POST /.netlify/functions/import-image-from-url`.
+
+`import_image_from_url` swallows any valid image reachable at an https URL: it downloads
+server-side, converts non-native formats (gif, tiff, avif, ...) to png/jpeg, optimizes to
+the 5MB image cap, saves through the project adapter (e.g. Dr. Lurie), and synchronously
+returns the project-native `ArtifactReference` for publishing — never bytes. Optional
+`slot` makes the artifact retrievable via `get_agent_artifact_by_slot`; caller-asserted
+`license` info is recorded in artifact metadata (defaults to unknown — rights clearance
+for direct imports is the caller's responsibility).
 
 Optional provider credentials (providers without credentials are skipped, never fail):
 

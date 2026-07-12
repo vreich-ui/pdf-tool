@@ -1,8 +1,9 @@
-import { safeError } from "./agent-artifact-jobs.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { isSafeOptionalPathSegment, safeError, MAX_IMAGE_OUTPUT_BYTES } from "./agent-artifact-jobs.js";
+import { getProjectAdapter, supportedProjectIds } from "./agent-project-registry.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { createImageSearchJobRecord, readImageSearchJob, updateImageSearchJob, validateImageSearchJobRequest } from "./image-search/jobs.js";
 import { readImageSearchBank, updateImageSearchCandidateState, type UpdateCandidateInput } from "./image-search/orchestrator.js";
+import { importImageArtifactFromUrl, type ImportImageFromUrlInput } from "./image-search/import.js";
 import { loadProjectImageSourcingPolicy, saveProjectImageSourcingPolicy, validateImageSourcingPolicyPatch } from "./image-search/policy.js";
 
 export const IMAGE_SEARCH_WORKER_FUNCTION = "image-search-worker-background";
@@ -62,6 +63,38 @@ export async function updateImageSearchCandidate(input: UpdateCandidateInput) {
   } catch (error) {
     const message = safeError(error);
     return { ok: false as const, statusCode: message.includes("not found") || message.includes("No image search bank") ? 404 : 500, error: message };
+  }
+}
+
+export async function importImageFromUrl(input: unknown) {
+  const value = input && typeof input === "object" && !Array.isArray(input) ? input as Partial<ImportImageFromUrlInput> : undefined;
+  if (!value) return { ok: false as const, statusCode: 400, error: "Expected JSON object" };
+  const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
+  const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
+  const url = typeof value.url === "string" ? value.url.trim() : "";
+  if (!projectId || !requestId || !url) return { ok: false as const, statusCode: 400, error: "projectId, requestId and url are required" };
+  if (!supportedProjectIds().has(projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${projectId}` };
+  if (!url.startsWith("https://")) return { ok: false as const, statusCode: 400, error: "url must use https" };
+  if (value.slot && !isSafeOptionalPathSegment(value.slot)) return { ok: false as const, statusCode: 400, error: "slot must be a safe path segment" };
+  if (value.maxBytes !== undefined && !(Number.isInteger(value.maxBytes) && typeof value.maxBytes === "number" && value.maxBytes > 0 && value.maxBytes <= MAX_IMAGE_OUTPUT_BYTES)) {
+    return { ok: false as const, statusCode: 400, error: `maxBytes must be a positive integer no greater than ${MAX_IMAGE_OUTPUT_BYTES}` };
+  }
+  try {
+    const artifactReference = await importImageArtifactFromUrl({
+      projectId,
+      requestId,
+      url,
+      filename: typeof value.filename === "string" ? value.filename : undefined,
+      slot: typeof value.slot === "string" ? value.slot : undefined,
+      tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : undefined,
+      label: typeof value.label === "string" ? value.label : undefined,
+      license: value.license,
+      maxBytes: value.maxBytes
+    });
+    return { ok: true as const, statusCode: 200, projectId, requestId, artifactReference };
+  } catch (error) {
+    const message = safeError(error);
+    return { ok: false as const, statusCode: message.includes("https") || message.includes("decodable") || message.includes("import limit") || message.includes("not allowed") || message.includes("IP literal") ? 400 : 502, error: message };
   }
 }
 

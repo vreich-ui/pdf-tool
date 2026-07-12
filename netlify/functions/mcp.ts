@@ -1,11 +1,11 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
-import { createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
+import { createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url";
 
 const tools = [
   {
@@ -259,6 +259,37 @@ const tools = [
     }
   },
   {
+    name: "import_image_from_url",
+    description: "Import any valid image from an https URL into the project artifact Blob store and return its ArtifactReference for publishing. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg; images are optimized to fit the 5MB image cap. Synchronous; never returns image bytes. The caller is responsible for rights clearance of directly imported URLs.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "requestId", "url"],
+      properties: {
+        projectId: { type: "string" },
+        requestId: { type: "string" },
+        url: { type: "string", description: "https URL of the image to import" },
+        filename: { type: "string", description: "Optional target filename; derived from the URL if omitted" },
+        slot: { type: "string", description: "Optional safe slot so the artifact is retrievable via get_agent_artifact_by_slot" },
+        tags: { type: "array", items: { type: "string" } },
+        label: { type: "string" },
+        license: {
+          type: "object",
+          additionalProperties: false,
+          description: "Caller-asserted license recorded in artifact metadata; defaults to unknown",
+          properties: {
+            class: { type: "string", enum: ["public-domain", "permissive", "paid", "unknown"] },
+            name: { type: "string" },
+            url: { type: "string" },
+            attribution: { type: "string" },
+            commercialUse: { type: ["boolean", "string"] }
+          }
+        },
+        maxBytes: { type: "number", description: "Optional byte cap for the stored image (max 5000000)" }
+      }
+    }
+  },
+  {
     name: "get_image_search_policy",
     description: "Read the project's effective image sourcing policy JSON (stored policy merged over defaults): candidate targets, provider tiers, license rules, scoring weights, budgets, and quotas.",
     inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string" } } }
@@ -368,6 +399,11 @@ async function callTool(name: string | undefined, args: unknown, event: Function
     }
     case "update_image_search_candidate": {
       const result = await updateImageSearchCandidate(args as never);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "import_image_from_url": {
+      const result = await importImageFromUrl(args);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }

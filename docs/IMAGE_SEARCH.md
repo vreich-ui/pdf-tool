@@ -121,12 +121,26 @@ Quotas enforced per request: max 5 non-discarded candidates (hard), `maxSearches
 (policy), `maxResultsPerProvider` (policy), `maxImportBytes` per image (policy, ≤ 20 MB;
 oversized originals are re-compressed down by sharp).
 
+## Direct URL import
+
+`import_image_from_url` (MCP) / `POST /.netlify/functions/import-image-from-url` (HTTP) is
+the synchronous "swallow this image" path: given any https URL, pdf-tool downloads the bytes
+server-side, converts anything sharp can decode into a natively supported format (alpha →
+png, opaque → jpeg; png/jpeg/webp pass through unchanged), optimizes to the 5 MB image cap,
+saves through the project adapter, and returns the `ArtifactReference` immediately so the
+agent can publish with it. Provenance (`metadata.import`: source URL, caller-asserted
+license, import time) is recorded on the artifact. Optional `slot`/`tags`/`label` integrate
+with the existing lookup indexes. Unlike search-sourced candidates, URL imports bypass the
+sourcing policy and selection bank — the agent has already chosen the image, so rights
+clearance is the caller's responsibility and the license defaults to `unknown`.
+
 ## MCP tools
 
 `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
-`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy` —
-all metadata-only, all behind `AGENT_RUN_TOKEN`. HTTP mirrors:
-`create-image-search-job`, `get-image-search-job-status`, `image-search-policy`.
+`update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`,
+`import_image_from_url` — all metadata-only, all behind `AGENT_RUN_TOKEN`. HTTP mirrors:
+`create-image-search-job`, `get-image-search-job-status`, `image-search-policy`,
+`import-image-from-url`.
 
 ## Size limits (changed in this branch)
 

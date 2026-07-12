@@ -4,7 +4,8 @@ import { getProjectAdapter } from "../agent-project-registry.js";
 import { sha256Hex } from "../artifact-core/index.js";
 import { optimizeImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
-import { imageSearchProviders, imageSearchTestFixtures } from "./providers.js";
+import { imageSearchProviders } from "./providers.js";
+import { fetchImportBytes, sniffImageFormat } from "./import.js";
 import { loadProjectImageSourcingPolicy, mergeImageSourcingPolicy, IMAGE_SEARCH_STORE_NAME } from "./policy.js";
 import { scoreSearchResult } from "./scoring.js";
 import { newImageSearchRunSummary, type ImageSearchJobRecord, type ImageSearchJobResultSummary } from "./jobs.js";
@@ -52,36 +53,6 @@ function resultDedupeKeys(result: ImageSearchResult): string[] {
   if (result.existingArtifact?.sha256) keys.push(`sha:${result.existingArtifact.sha256}`);
   if (result.imageUrl) keys.push(`url:${result.imageUrl}`);
   return keys;
-}
-
-function assertSafeImportUrl(raw: string): URL {
-  const url = new URL(raw);
-  if (url.protocol !== "https:") throw new Error(`import URL must use https: ${raw}`);
-  const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) throw new Error("import URL host is not allowed");
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) throw new Error("import URL must use a DNS hostname, not an IP literal");
-  return url;
-}
-
-function sniffImageFormat(bytes: Buffer): "png" | "jpeg" | "webp" | undefined {
-  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "png";
-  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "jpeg";
-  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "webp";
-  return undefined;
-}
-
-async function fetchImportBytes(imageUrl: string, maxImportBytes: number, fetchImpl: typeof fetch): Promise<Buffer> {
-  const fixtureBytes = imageSearchTestFixtures()?.bytes?.[imageUrl];
-  if (fixtureBytes !== undefined) return Buffer.from(fixtureBytes, "base64");
-  assertSafeImportUrl(imageUrl);
-  const response = await fetchImpl(imageUrl);
-  if (!response.ok) throw new Error(`image download failed with status ${response.status}`);
-  const declaredLength = Number(response.headers?.get?.("content-length") ?? 0);
-  // Allow oversized originals up to 4x the cap: optimization re-compresses them down below.
-  if (declaredLength > maxImportBytes * 4) throw new Error(`image download exceeds import limit (${declaredLength} bytes)`);
-  const arrayBuffer = await response.arrayBuffer();
-  if (arrayBuffer.byteLength > maxImportBytes * 4) throw new Error(`image download exceeds import limit (${arrayBuffer.byteLength} bytes)`);
-  return Buffer.from(arrayBuffer);
 }
 
 interface ScoredResult {

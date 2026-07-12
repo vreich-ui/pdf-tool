@@ -11,7 +11,9 @@ import { readImageSearchBank, updateImageSearchCandidateState } from "../netlify
 import { handler as imageSearchWorkerHandler } from "../netlify/functions/image-search-worker-background.js";
 import { handler as imageSearchStatusHandler } from "../netlify/functions/get-image-search-job-status.js";
 import { handler as policyHandler } from "../netlify/functions/image-search-policy.js";
+import { handler as importFromUrlHandler } from "../netlify/functions/import-image-from-url.js";
 import { handler as mcpHandler } from "../netlify/functions/mcp.js";
+import { getAgentArtifactBySlot } from "../netlify/lib/agent-artifact-mcp.js";
 import type { ImageSearchResult } from "../netlify/lib/image-search/types.js";
 
 const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFklEQVQYlWP4z8DQQAxmGFX4n67BAwAg+JWdtW1ttQAAAABJRU5ErkJggg==", "base64");
@@ -295,6 +297,92 @@ test("MCP tools/call dispatches image search tools", async () => {
   const searchResult = JSON.parse(searchCall.body).result;
   assert.equal(searchResult.isError, true);
   assert.equal(searchResult.structuredContent.status, "failed");
+});
+
+// ── Direct URL import ──
+
+test("import from URL: saves the image to the project blob store and returns its reference", async () => {
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/media/hero-shot.png": pngBytes.toString("base64") } });
+
+  const response = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({
+      projectId: "dr-lurie",
+      requestId: "req-url-import",
+      url: "https://cdn.example.org/media/hero-shot.png",
+      slot: "hero",
+      tags: ["article-42"],
+      label: "Hero image",
+      license: { class: "permissive", name: "publisher-supplied", commercialUse: true }
+    })
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const body = JSON.parse(response.body);
+  assert.ok(body.artifactReference?.blobKey);
+  assert.equal(body.artifactReference.contentType, "image/png");
+  assert.equal(body.artifactReference.originalFilename, "hero-shot.png");
+  assert.ok(body.artifactReference.tags.includes("url-import"));
+  assert.ok(body.artifactReference.tags.includes("article-42"));
+  assert.equal(body.artifactReference.metadata.import.sourceUrl, "https://cdn.example.org/media/hero-shot.png");
+  assert.equal(body.artifactReference.metadata.import.license.class, "permissive");
+  assert.ok(!response.body.includes(pngBytes.toString("base64")), "response must not contain image bytes");
+
+  const artifactStore = await projectBlobStore("artifacts", {});
+  const saved = await artifactStore.get(body.artifactReference.blobKey);
+  assert.ok(Buffer.isBuffer(saved) && saved.equals(pngBytes), "original png bytes must be persisted unchanged");
+
+  const bySlot = await getAgentArtifactBySlot({ projectId: "dr-lurie", requestId: "req-url-import", slot: "hero" });
+  assert.ok(bySlot.ok && bySlot.artifact?.sha256 === body.artifactReference.sha256, "artifact must be retrievable by slot");
+});
+
+test("import from URL: converts non-native formats and rejects invalid input", async () => {
+  // Classic 1x1 transparent GIF: not a natively supported format, has alpha -> converted to PNG.
+  const gifBytes = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({
+    bytes: {
+      "https://cdn.example.org/spacer.gif": gifBytes.toString("base64"),
+      "https://cdn.example.org/not-an-image.bin": Buffer.from("definitely not an image").toString("base64")
+    }
+  });
+
+  const converted = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-gif", url: "https://cdn.example.org/spacer.gif" })
+  });
+  assert.equal(converted.statusCode, 200, converted.body);
+  const convertedBody = JSON.parse(converted.body);
+  assert.equal(convertedBody.artifactReference.contentType, "image/png");
+  assert.ok(convertedBody.artifactReference.blobKey.endsWith(".png"));
+
+  const notImage = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-bad", url: "https://cdn.example.org/not-an-image.bin" })
+  });
+  assert.equal(notImage.statusCode, 400);
+  assert.ok(JSON.parse(notImage.body).error.includes("decodable"));
+
+  const insecure = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-http", url: "http://cdn.example.org/a.png" })
+  });
+  assert.equal(insecure.statusCode, 400);
+});
+
+test("MCP tools/call dispatches import_image_from_url", async () => {
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/mcp.png": pngBytes.toString("base64") } });
+  const call = await mcpHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "import_image_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-import", url: "https://cdn.example.org/mcp.png" } } })
+  });
+  assert.equal(call.statusCode, 200);
+  const result = JSON.parse(call.body).result;
+  assert.ok(!result.isError, call.body);
+  assert.ok(result.structuredContent.artifactReference.sha256);
 });
 
 // ── PDF size-limit change ──
