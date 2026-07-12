@@ -73,12 +73,14 @@ export interface RunImageSearchOptions {
 export async function runImageSearch(job: ImageSearchJobRecord, options: RunImageSearchOptions = {}): Promise<ImageSearchJobResultSummary> {
   const adapter = getProjectAdapter(job.projectId);
   if (!adapter) throw new Error(`Unsupported projectId: ${job.projectId}`);
+  const query = job.query;
+  if (!query) throw new Error("Image search jobs require query");
   const fetchImpl = options.fetchImpl ?? fetch;
 
   const projectPolicy = await loadProjectImageSourcingPolicy(job.projectId);
   const policy: ImageSourcingPolicy = mergeImageSourcingPolicy(projectPolicy, job.policyOverrides);
 
-  const run = newImageSearchRunSummary(job.jobId, job.query);
+  const run = newImageSearchRunSummary(job.jobId, query);
   const diagnostics: string[] = [];
   const addDiagnostic = (message: string) => {
     if (diagnostics.length < MAX_DIAGNOSTICS) diagnostics.push(message);
@@ -92,11 +94,15 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
     updatedAt: new Date().toISOString()
   };
 
-  if (bank.searches.length >= policy.quotas.maxSearchesPerRequest) {
+  // Quotas and the candidate cap apply to search-sourced entries only; manual url imports
+  // are bounded separately by quotas.maxUrlImportsPerRequest.
+  const searchRuns = bank.searches.filter((entry) => (entry.kind ?? "search") === "search");
+  if (searchRuns.length >= policy.quotas.maxSearchesPerRequest) {
     throw new Error(`Search quota exhausted for request ${job.requestId} (${policy.quotas.maxSearchesPerRequest} searches)`);
   }
 
-  const capacity = policy.maxCandidatesPerRequest - activeCandidates(bank).length;
+  const searchCandidates = activeCandidates(bank).filter((candidate) => (candidate.sourcedBy ?? "search") === "search");
+  const capacity = policy.maxCandidatesPerRequest - searchCandidates.length;
   const target = Math.min(job.count ?? policy.candidateTarget, Math.max(capacity, 0));
 
   if (target <= 0) {
@@ -133,7 +139,7 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
     const tierProviders = enabled.filter((entry) => entry.provider.costTier === tier);
     const settled = await Promise.allSettled(tierProviders.map(async ({ provider, maxResults }) => {
       run.providersQueried.push(provider.id);
-      return { providerId: provider.id, results: await provider.search({ projectId: job.projectId, query: job.query, maxResults, policy, fetchImpl }) };
+      return { providerId: provider.id, results: await provider.search({ projectId: job.projectId, query, maxResults, policy, fetchImpl }) };
     }));
     for (const outcome of settled) {
       if (outcome.status === "rejected") {
@@ -179,6 +185,7 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
         state: policy.retention.defaultState,
         provider: result.provider,
         origin: "library",
+        sourcedBy: "search",
         score: entry.score,
         scoreBreakdown: entry.breakdown,
         license: result.license,
@@ -213,7 +220,7 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
           metadata: {
             search: {
               searchId: run.searchId,
-              query: job.query,
+              query,
               provider: result.provider,
               providerResultId: result.providerResultId,
               sourceUrl: result.imageUrl,
@@ -230,6 +237,7 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
           state: policy.retention.defaultState,
           provider: result.provider,
           origin: "imported",
+          sourcedBy: "search",
           score: entry.score,
           scoreBreakdown: entry.breakdown,
           license: result.license,

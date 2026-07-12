@@ -4,6 +4,7 @@ import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { createImageSearchJobRecord, readImageSearchJob, updateImageSearchJob, validateImageSearchJobRequest } from "./image-search/jobs.js";
 import { readImageSearchBank, updateImageSearchCandidateState, type UpdateCandidateInput } from "./image-search/orchestrator.js";
 import { importImageArtifactFromUrl, type ImportImageFromUrlInput } from "./image-search/import.js";
+import { bankSingleUrlImport } from "./image-search/url-import.js";
 import { loadProjectImageSourcingPolicy, saveProjectImageSourcingPolicy, validateImageSourcingPolicyPatch } from "./image-search/policy.js";
 
 export const IMAGE_SEARCH_WORKER_FUNCTION = "image-search-worker-background";
@@ -91,11 +92,37 @@ export async function importImageFromUrl(input: unknown) {
       license: value.license,
       maxBytes: value.maxBytes
     });
-    return { ok: true as const, statusCode: 200, projectId, requestId, artifactReference };
+    const banked = await bankSingleUrlImport({ projectId, requestId, sourceUrl: url, artifactReference, license: value.license, label: typeof value.label === "string" ? value.label : undefined });
+    return { ok: true as const, statusCode: 200, projectId, requestId, artifactReference, candidateId: banked.candidateId, ...(banked.warning ? { warning: banked.warning } : {}) };
   } catch (error) {
     const message = safeError(error);
-    return { ok: false as const, statusCode: message.includes("https") || message.includes("decodable") || message.includes("import limit") || message.includes("not allowed") || message.includes("IP literal") ? 400 : 502, error: message };
+    return { ok: false as const, statusCode: message.includes("https") || message.includes("decodable") || message.includes("import limit") || message.includes("not allowed") || message.includes("IP literal") || message.includes("import_images_from_url") ? 400 : 502, error: message };
   }
+}
+
+/** Batch import: direct image URLs, zip archives, and folder/index pages; runs as a
+ * background job and banks every imported image as a url_import candidate. */
+export async function createImageImportJob(input: unknown, options: { baseUrl?: string; token?: string } = {}) {
+  const value = input && typeof input === "object" && !Array.isArray(input) ? { ...(input as Record<string, unknown>), kind: "url_import" } : input;
+  const parsed = validateImageSearchJobRequest(value);
+  if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid image import input", issues: parsed.error.issues };
+  const job = await createImageSearchJobRecord(parsed.data);
+  try {
+    await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId, IMAGE_SEARCH_WORKER_FUNCTION);
+  } catch (error) {
+    const failed = await updateImageSearchJob(job, { status: "failed", error: safeError(error) });
+    return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
+  }
+  return {
+    ok: true as const,
+    statusCode: 202,
+    jobId: job.jobId,
+    status: job.status,
+    projectId: job.projectId,
+    requestId: job.requestId,
+    urls: job.urls,
+    polling: imageSearchPollingInstructions(job.projectId, job.jobId)
+  };
 }
 
 export async function getImageSearchPolicy(input: GetImageSearchPolicyInput) {

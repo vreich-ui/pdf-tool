@@ -1,6 +1,7 @@
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { readImageSearchJob, updateImageSearchJob } from "../lib/image-search/jobs.js";
 import { runImageSearch } from "../lib/image-search/orchestrator.js";
+import { runUrlImportBatch } from "../lib/image-search/url-import.js";
 
 export const config = { name: "image-search-worker-background" };
 
@@ -26,7 +27,7 @@ export async function handler(event: FunctionEvent) {
   let runningJob = job;
   try {
     runningJob = await updateImageSearchJob(job, { status: "running", error: undefined });
-    const result = await runImageSearch(runningJob);
+    const result = runningJob.kind === "url_import" ? await runUrlImportBatch(runningJob) : await runImageSearch(runningJob);
     const complete = await updateImageSearchJob(runningJob, { status: "complete", result, error: undefined });
     return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, status: complete.status, result: complete.result });
   } catch (error) {

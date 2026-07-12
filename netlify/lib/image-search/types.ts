@@ -81,6 +81,10 @@ export interface ImageSourcingPolicy {
     maxResultsPerProvider: number;
     /** Per-image import ceiling in bytes (images are optimized down to fit). */
     maxImportBytes: number;
+    /** Images imported per url-import batch (after zip/folder expansion). */
+    maxUrlImportsPerBatch: number;
+    /** Non-discarded url-import candidates allowed per requestId. */
+    maxUrlImportsPerRequest: number;
   };
 }
 
@@ -99,6 +103,8 @@ export interface ImageSearchCandidate {
   stateReason?: string;
   provider: string;
   origin: "library" | "imported";
+  /** How the candidate entered the bank; absent means "search" (pre-existing records). */
+  sourcedBy?: "search" | "url_import";
   score: number;
   scoreBreakdown: ImageSearchScoreBreakdown;
   license: ImageLicenseInfo;
@@ -122,6 +128,8 @@ export interface ImageSearchRunSummary {
   createdAt: string;
   providersQueried: string[];
   diagnostics: string[];
+  /** Absent means "search" (pre-existing records). */
+  kind?: "search" | "url_import";
 }
 
 /** Per-request selection bank persisted in the project's blob store (place of truth). */

@@ -27,7 +27,7 @@ export const DEFAULT_IMAGE_SOURCING_POLICY: ImageSourcingPolicy = {
   ],
   budget: { maxPaidImports: 0 },
   retention: { defaultState: "kept" },
-  quotas: { maxSearchesPerRequest: 4, maxResultsPerProvider: 10, maxImportBytes: 5_000_000 }
+  quotas: { maxSearchesPerRequest: 4, maxResultsPerProvider: 10, maxImportBytes: 5_000_000, maxUrlImportsPerBatch: 20, maxUrlImportsPerRequest: 50 }
 };
 
 export interface PolicyValidationIssue {
@@ -127,6 +127,8 @@ export function validateImageSourcingPolicyPatch(input: unknown): PolicyValidati
       if (quotas.maxSearchesPerRequest !== undefined && !(Number.isInteger(quotas.maxSearchesPerRequest) && numberIn(quotas.maxSearchesPerRequest, 1, 20))) issues.push({ path: ["quotas", "maxSearchesPerRequest"], message: "quotas.maxSearchesPerRequest must be an integer between 1 and 20" });
       if (quotas.maxResultsPerProvider !== undefined && !(Number.isInteger(quotas.maxResultsPerProvider) && numberIn(quotas.maxResultsPerProvider, 1, 50))) issues.push({ path: ["quotas", "maxResultsPerProvider"], message: "quotas.maxResultsPerProvider must be an integer between 1 and 50" });
       if (quotas.maxImportBytes !== undefined && !(Number.isInteger(quotas.maxImportBytes) && numberIn(quotas.maxImportBytes, 1024, 20_000_000))) issues.push({ path: ["quotas", "maxImportBytes"], message: "quotas.maxImportBytes must be an integer between 1024 and 20000000" });
+      if (quotas.maxUrlImportsPerBatch !== undefined && !(Number.isInteger(quotas.maxUrlImportsPerBatch) && numberIn(quotas.maxUrlImportsPerBatch, 1, 100))) issues.push({ path: ["quotas", "maxUrlImportsPerBatch"], message: "quotas.maxUrlImportsPerBatch must be an integer between 1 and 100" });
+      if (quotas.maxUrlImportsPerRequest !== undefined && !(Number.isInteger(quotas.maxUrlImportsPerRequest) && numberIn(quotas.maxUrlImportsPerRequest, 1, 500))) issues.push({ path: ["quotas", "maxUrlImportsPerRequest"], message: "quotas.maxUrlImportsPerRequest must be an integer between 1 and 500" });
     }
   }
 

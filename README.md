@@ -98,19 +98,30 @@ policy JSON reference, scoring algorithm, and roadmap.
 
 MCP tools: `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
 `update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`,
-`import_image_from_url`.
+`import_image_from_url`, `import_images_from_url`.
 HTTP mirrors: `POST /.netlify/functions/create-image-search-job`,
 `GET|POST /.netlify/functions/get-image-search-job-status`,
 `GET|POST /.netlify/functions/image-search-policy`,
-`POST /.netlify/functions/import-image-from-url`.
+`POST /.netlify/functions/import-image-from-url`,
+`POST /.netlify/functions/create-image-import-job`.
 
-`import_image_from_url` swallows any valid image reachable at an https URL: it downloads
-server-side, converts non-native formats (gif, tiff, avif, ...) to png/jpeg, optimizes to
-the 5MB image cap, saves through the project adapter (e.g. Dr. Lurie), and synchronously
-returns the project-native `ArtifactReference` for publishing — never bytes. Optional
-`slot` makes the artifact retrievable via `get_agent_artifact_by_slot`; caller-asserted
-`license` info is recorded in artifact metadata (defaults to unknown — rights clearance
-for direct imports is the caller's responsibility).
+`import_image_from_url` swallows any valid single image reachable at an https URL: it
+downloads server-side, converts non-native formats (gif, tiff, avif, ...) to png/jpeg,
+optimizes to the 5MB image cap, saves through the project adapter (e.g. Dr. Lurie), banks
+it as a `url_import` candidate, and synchronously returns the project-native
+`ArtifactReference` plus `candidateId` — never bytes. Optional `slot` makes the artifact
+retrievable via `get_agent_artifact_by_slot`; caller-asserted `license` info is recorded
+in artifact metadata (defaults to unknown — rights clearance for direct imports is the
+caller's responsibility).
+
+`import_images_from_url` is the batch variant, run as a background job: each source URL
+may be a direct image, a **zip archive** of images, or an https **folder/index page**
+(same-host linked/embedded images are collected). Every imported image is saved and banked
+as a `url_import` candidate. Manual imports do not consume the five-slot search candidate
+cap; they are bounded separately by `quotas.maxUrlImportsPerBatch` (default 20) and
+`quotas.maxUrlImportsPerRequest` (default 50). Imported artifacts are ordinary image
+artifacts: agents can run further manipulations on them through `create_agent_artifact_job`
+edit operations (deterministic transforms, masked AI edits, variations).
 
 Optional provider credentials (providers without credentials are skipped, never fail):
 

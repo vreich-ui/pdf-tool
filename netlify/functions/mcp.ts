@@ -1,11 +1,11 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
-import { createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
+import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
 const tools = [
   {
@@ -260,7 +260,7 @@ const tools = [
   },
   {
     name: "import_image_from_url",
-    description: "Import any valid image from an https URL into the project artifact Blob store and return its ArtifactReference for publishing. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg; images are optimized to fit the 5MB image cap. Synchronous; never returns image bytes. The caller is responsible for rights clearance of directly imported URLs.",
+    description: "Import a single image from an https URL into the project artifact Blob store, bank it as a url_import candidate, and synchronously return its ArtifactReference plus candidateId. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg. For zip archives, folder pages, or multiple URLs use import_images_from_url. Never returns image bytes; rights clearance for direct imports is the caller's responsibility.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -286,6 +286,35 @@ const tools = [
           }
         },
         maxBytes: { type: "number", description: "Optional byte cap for the stored image (max 5000000)" }
+      }
+    }
+  },
+  {
+    name: "import_images_from_url",
+    description: "Start a batch url-import job: each source URL may be a direct image, a zip archive of images, or an https folder/index page (same-host images are collected). Every imported image is saved to the project artifact Blob store and banked as a url_import candidate; bounded by policy quotas (default 20 per batch, 50 per request). Returns job metadata and polling instructions; results include ArtifactReferences, never bytes.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "requestId", "urls"],
+      properties: {
+        projectId: { type: "string" },
+        requestId: { type: "string" },
+        urls: { type: "array", items: { type: "string" }, description: "https URLs: direct images, zip archives, or folder/index pages (max 50)" },
+        tags: { type: "array", items: { type: "string" } },
+        label: { type: "string" },
+        license: {
+          type: "object",
+          additionalProperties: false,
+          description: "Caller-asserted license applied to all imported images; defaults to unknown",
+          properties: {
+            class: { type: "string", enum: ["public-domain", "permissive", "paid", "unknown"] },
+            name: { type: "string" },
+            url: { type: "string" },
+            attribution: { type: "string" },
+            commercialUse: { type: ["boolean", "string"] }
+          }
+        },
+        policyOverrides: { type: "object", additionalProperties: true, description: "Partial image sourcing policy (e.g. quotas.maxUrlImportsPerBatch) merged for this job only" }
       }
     }
   },
@@ -404,6 +433,11 @@ async function callTool(name: string | undefined, args: unknown, event: Function
     }
     case "import_image_from_url": {
       const result = await importImageFromUrl(args);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "import_images_from_url": {
+      const result = await createImageImportJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }

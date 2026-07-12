@@ -63,6 +63,12 @@ async function runSearchJob(input: { requestId: string; query: string; count?: n
   return { job, response, body: JSON.parse(response.body) };
 }
 
+async function runImportJob(input: { requestId: string; urls: string[]; policyOverrides?: unknown; tags?: string[]; label?: string }) {
+  const job = await createImageSearchJobRecord({ projectId: "dr-lurie", kind: "url_import", ...input });
+  const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  return { job, response, body: JSON.parse(response.body) };
+}
+
 async function seedLibraryImage(requestId: string, tags: string[]): Promise<string> {
   const sha256 = sha256Hex(pngBytes);
   await drLurieAdapter.saveArtifactBytes({
@@ -320,6 +326,11 @@ test("import from URL: saves the image to the project blob store and returns its
   assert.equal(response.statusCode, 200, response.body);
   const body = JSON.parse(response.body);
   assert.ok(body.artifactReference?.blobKey);
+  assert.ok(body.candidateId, "single import must also bank a candidate");
+  const bankAfterImport = await readImageSearchBank("dr-lurie", "req-url-import");
+  assert.equal(bankAfterImport?.candidates[0]?.candidateId, body.candidateId);
+  assert.equal(bankAfterImport?.candidates[0]?.sourcedBy, "url_import");
+  assert.equal(bankAfterImport?.candidates[0]?.state, "kept");
   assert.equal(body.artifactReference.contentType, "image/png");
   assert.equal(body.artifactReference.originalFilename, "hero-shot.png");
   assert.ok(body.artifactReference.tags.includes("url-import"));
@@ -383,6 +394,109 @@ test("MCP tools/call dispatches import_image_from_url", async () => {
   const result = JSON.parse(call.body).result;
   assert.ok(!result.isError, call.body);
   assert.ok(result.structuredContent.artifactReference.sha256);
+});
+
+// ── Batch URL import: zip archives, folder pages, quotas ──
+
+function pngVariant(seed: number): Buffer {
+  // Valid PNG magic with distinct trailing bytes: unique sha256 per variant, and the
+  // png -> png import path never re-decodes, so trailing bytes are harmless in tests.
+  return Buffer.concat([pngBytes, Buffer.from([seed])]);
+}
+
+test("batch import: zip archive expands into banked url_import candidates", async () => {
+  const { zipSync } = await import("fflate");
+  const zipBytes = Buffer.from(zipSync({
+    "photos/one.png": new Uint8Array(pngVariant(1)),
+    "photos/two.png": new Uint8Array(pngVariant(2)),
+    "notes.txt": new Uint8Array(Buffer.from("not an image")),
+    "__MACOSX/ignored.png": new Uint8Array(pngVariant(3))
+  }));
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/bundle.zip": zipBytes.toString("base64") } });
+
+  const { body } = await runImportJob({ requestId: "req-zip", urls: ["https://cdn.example.org/bundle.zip"], tags: ["campaign-7"] });
+  assert.equal(body.status, "complete", JSON.stringify(body));
+  assert.equal(body.result.newCandidates, 2);
+  assert.ok(body.result.diagnostics.some((line: string) => line.includes("notes.txt")), "non-image entry must be diagnosed");
+
+  const bank = await readImageSearchBank("dr-lurie", "req-zip");
+  assert.equal(bank?.candidates.length, 2);
+  for (const candidate of bank!.candidates) {
+    assert.equal(candidate.sourcedBy, "url_import");
+    assert.equal(candidate.provider, "url-import");
+    assert.ok(candidate.sourceUrl?.includes("bundle.zip#photos/"));
+    assert.ok(candidate.artifactReference?.tags.includes("url-import"));
+    assert.ok(candidate.artifactReference?.tags.includes("campaign-7"));
+  }
+  const filenames = bank!.candidates.map((candidate) => candidate.artifactReference?.originalFilename).sort();
+  assert.deepEqual(filenames, ["one.png", "two.png"]);
+});
+
+test("batch import: folder page collects same-host images only", async () => {
+  const html = `<html><body>
+    <img src="/media/a.png">
+    <a href="https://cdn.example.org/media/b.png">same host</a>
+    <a href="https://elsewhere.example.net/media/c.png">offsite</a>
+  </body></html>`;
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: {
+    "https://cdn.example.org/gallery/": Buffer.from(html).toString("base64"),
+    "https://cdn.example.org/media/a.png": pngVariant(4).toString("base64"),
+    "https://cdn.example.org/media/b.png": pngVariant(5).toString("base64"),
+    "https://elsewhere.example.net/media/c.png": pngVariant(6).toString("base64")
+  } });
+
+  const { body } = await runImportJob({ requestId: "req-folder", urls: ["https://cdn.example.org/gallery/"] });
+  assert.equal(body.status, "complete", JSON.stringify(body));
+  assert.equal(body.result.newCandidates, 2, "offsite image must not be imported");
+  const bank = await readImageSearchBank("dr-lurie", "req-folder");
+  const sources = bank!.candidates.map((candidate) => candidate.sourceUrl).sort();
+  assert.deepEqual(sources, ["https://cdn.example.org/media/a.png", "https://cdn.example.org/media/b.png"]);
+});
+
+test("batch import: bounded by maxUrlImportsPerBatch and separate from the search candidate cap", async () => {
+  openverseFixture(10);
+  const search = await runSearchJob({ requestId: "req-mixed", query: "mountain lake", count: 5 });
+  assert.equal(search.body.result.newCandidates, 5, "search bank must be full");
+
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: {
+    "https://cdn.example.org/m1.png": pngVariant(7).toString("base64"),
+    "https://cdn.example.org/m2.png": pngVariant(8).toString("base64"),
+    "https://cdn.example.org/m3.png": pngVariant(9).toString("base64")
+  } });
+  const imported = await runImportJob({
+    requestId: "req-mixed",
+    urls: ["https://cdn.example.org/m1.png", "https://cdn.example.org/m2.png", "https://cdn.example.org/m3.png"],
+    policyOverrides: { quotas: { maxUrlImportsPerBatch: 2 } }
+  });
+  assert.equal(imported.body.status, "complete", JSON.stringify(imported.body));
+  assert.equal(imported.body.result.newCandidates, 2, "manual imports proceed even when the search bank is full, bounded by their own quota");
+  assert.ok(imported.body.result.diagnostics.some((line: string) => line.includes("batch limit")));
+
+  const bank = await readImageSearchBank("dr-lurie", "req-mixed");
+  assert.equal(bank?.candidates.length, 7);
+  assert.equal(bank?.candidates.filter((candidate) => (candidate.sourcedBy ?? "search") === "search").length, 5);
+  assert.equal(bank?.candidates.filter((candidate) => candidate.sourcedBy === "url_import").length, 2);
+});
+
+test("MCP tools/call dispatches import_images_from_url", async () => {
+  // No reachable worker base URL: the job fails cleanly, proving dispatch and validation.
+  const call = await mcpHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "import_images_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["https://cdn.example.org/x.png"] } } })
+  });
+  const result = JSON.parse(call.body).result;
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.status, "failed");
+
+  const invalid = await mcpHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "import_images_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["http://insecure.example.org/x.png"] } } })
+  });
+  const invalidResult = JSON.parse(invalid.body).result;
+  assert.equal(invalidResult.isError, true);
+  assert.ok(JSON.stringify(invalidResult.structuredContent.issues).includes("https"));
 });
 
 // ── PDF size-limit change ──

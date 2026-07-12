@@ -123,24 +123,46 @@ oversized originals are re-compressed down by sharp).
 
 ## Direct URL import
 
-`import_image_from_url` (MCP) / `POST /.netlify/functions/import-image-from-url` (HTTP) is
-the synchronous "swallow this image" path: given any https URL, pdf-tool downloads the bytes
-server-side, converts anything sharp can decode into a natively supported format (alpha →
-png, opaque → jpeg; png/jpeg/webp pass through unchanged), optimizes to the 5 MB image cap,
-saves through the project adapter, and returns the `ArtifactReference` immediately so the
-agent can publish with it. Provenance (`metadata.import`: source URL, caller-asserted
-license, import time) is recorded on the artifact. Optional `slot`/`tags`/`label` integrate
-with the existing lookup indexes. Unlike search-sourced candidates, URL imports bypass the
-sourcing policy and selection bank — the agent has already chosen the image, so rights
-clearance is the caller's responsibility and the license defaults to `unknown`.
+Two paths, both of which save artifacts **and** bank candidates:
+
+- **Single, synchronous** — `import_image_from_url` (MCP) / `POST
+  /.netlify/functions/import-image-from-url` (HTTP): given an https URL to a single image,
+  pdf-tool downloads the bytes server-side, converts anything sharp can decode into a
+  natively supported format (alpha → png, opaque → jpeg; png/jpeg/webp pass through
+  unchanged), optimizes to the 5 MB image cap, saves through the project adapter, banks the
+  image as a `url_import` candidate, and returns the `ArtifactReference` + `candidateId`
+  immediately so the agent can publish with it. Zip/folder URLs are rejected with a pointer
+  to the batch tool. If banking fails or the url-import quota is reached, the artifact is
+  still saved and a `warning` is returned instead of an error.
+- **Batch, background job** — `import_images_from_url` (MCP) / `POST
+  /.netlify/functions/create-image-import-job` (HTTP): accepts up to 50 source URLs, each of
+  which may be a **direct image**, a **zip archive** (image entries extracted; junk and
+  `__MACOSX` entries skipped with diagnostics), or an https **folder/index page** (same-host
+  `<img src>` and image links collected — same-host only, so a hub page cannot fan imports
+  out across arbitrary third-party hosts). Runs on the same background worker and status
+  endpoint as search jobs (`kind: "url_import"`).
+
+Provenance (`metadata.import`: source URL, zip entry name, caller-asserted license, import
+time) is recorded on every artifact. Manual imports are marked `sourcedBy: "url_import"` in
+the bank and are **exempt from the five-slot search candidate cap** — they are bounded
+separately by `quotas.maxUrlImportsPerBatch` (default 20 per batch) and
+`quotas.maxUrlImportsPerRequest` (default 50 per request). Dedupe applies across the whole
+bank: the same source URL or identical bytes are not banked twice. Manual imports carry a
+fixed score of 1.0 with `stateReason: "manual url import"` — they are agent-chosen, not
+competitively scored — and the license defaults to `unknown` (rights clearance for direct
+imports is the caller's responsibility).
+
+Imported artifacts are ordinary image artifacts: agents can chain further manipulations via
+`create_agent_artifact_job` edit operations (deterministic sharp transforms, masked AI
+edits, variations) using the returned reference and its sha256 lock.
 
 ## MCP tools
 
 `search_images`, `get_image_search_job_status`, `get_image_search_bank`,
 `update_image_search_candidate`, `get_image_search_policy`, `set_image_search_policy`,
-`import_image_from_url` — all metadata-only, all behind `AGENT_RUN_TOKEN`. HTTP mirrors:
-`create-image-search-job`, `get-image-search-job-status`, `image-search-policy`,
-`import-image-from-url`.
+`import_image_from_url`, `import_images_from_url` — all metadata-only, all behind
+`AGENT_RUN_TOKEN`. HTTP mirrors: `create-image-search-job`, `get-image-search-job-status`,
+`image-search-policy`, `import-image-from-url`, `create-image-import-job`.
 
 ## Size limits (changed in this branch)
 
