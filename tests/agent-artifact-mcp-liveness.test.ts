@@ -31,3 +31,28 @@ test("MCP liveness: plain GET (no ?health=1) is unchanged — still 405 with All
   assert.equal(response.statusCode, 405);
   assert.equal(response.headers.allow, "POST, DELETE, OPTIONS");
 });
+
+// ── Observability: instance age, cold-start flag, and remaining execution budget are
+// logged per request so cold-start frequency and budget exhaustion are measurable ──
+
+test("MCP request logging includes instance age, cold-start flag, and remaining budget", async () => {
+  process.env.AGENT_RUN_TOKEN = "test-token";
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => { lines.push(line); };
+  try {
+    await mcpHandler(
+      { httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) },
+      { getRemainingTimeInMillis: () => 8_000 }
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  const entry = lines.map((line) => { try { return JSON.parse(line); } catch { return undefined; } }).find((parsed) => parsed?.event === "mcp_request");
+  assert.ok(entry, "expected a logged mcp_request entry");
+  assert.equal(entry.method, "tools/list");
+  assert.equal(typeof entry.instanceAgeMs, "number");
+  assert.equal(typeof entry.instanceInvocations, "number");
+  assert.equal(typeof entry.coldStart, "boolean");
+  assert.equal(entry.remainingBudgetMs, 6_000); // 8000ms platform clock minus the 2s safety margin
+});

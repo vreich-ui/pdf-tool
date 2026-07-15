@@ -641,6 +641,18 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
   if (!request || typeof request !== "object") return rpcError(null, -32700, "Parse error", undefined, 400);
   if (!isAuthorizedMcpRequest(event)) return unauthorizedResponse(event, request.id);
 
+  // Observability: cold-start frequency and remaining execution budget are otherwise
+  // invisible from outside the function; log them per request so both are measurable.
+  const budgetMs = remainingBudgetMs(context, requestStartedAt);
+  console.log(JSON.stringify({
+    event: "mcp_request",
+    method: request.method,
+    instanceAgeMs: instance.instanceAgeMs,
+    instanceInvocations: instance.instanceInvocations,
+    coldStart: instance.isColdStart,
+    remainingBudgetMs: budgetMs
+  }));
+
   if (request.method === "initialize") {
     const params = request.params ?? {};
     const protocolVersion = negotiateMcpProtocolVersion(params.protocolVersion);
@@ -678,7 +690,6 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
   if (request.method === "tools/call") {
     const params = request.params ?? {};
     try {
-      const budgetMs = remainingBudgetMs(context, requestStartedAt);
       const result = await callTool(typeof params.name === "string" ? params.name : undefined, params.arguments ?? {}, event, { budgetMs });
       if (!result) return rpcError(request.id, -32602, "Unknown tool", { tool: params.name });
       return rpcResult(request.id, result);
