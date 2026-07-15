@@ -167,6 +167,14 @@ Optional provider credentials (providers without credentials are skipped, never 
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
 - `PDF_TOOL_SITE_ID`: Netlify site ID for pdf-tool job-state Blob storage when running outside same-site Blob context.
 - `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
+  - These back the pdf-tool job store, MCP sessions, and image-search banks. When the
+    functions run on the pdf-tool site itself, leave both **unset** so the built-in
+    same-site Blobs context is used. Only set them (to a valid pair for the target site)
+    when the store lives on a different site. A set-but-invalid value causes Netlify Blobs
+    to return `401` (surfaced as a `BlobsInternalError` 502 on the first write, e.g. MCP
+    `initialize`). MCP `initialize` degrades to a stateless session in that case, but
+    artifact/search jobs still require a working store — fix the credentials to restore full
+    function.
 - `CLIENT_SITE_ID`: adapter-provided target-project site ID for artifact Blob storage when running outside same-site Blob context.
 - `CLIENT_BLOBS_TOKEN`: adapter-provided target-project Blob token for artifact Blob storage when running outside same-site Blob context.
 - pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.

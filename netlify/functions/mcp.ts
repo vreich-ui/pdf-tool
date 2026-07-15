@@ -437,7 +437,12 @@ async function checkSession(event: FunctionEvent, request: JsonRpcRequest): Prom
     // 404 tells Streamable-HTTP clients the session expired: start a new one via initialize.
     return { ok: false, response: rpcError(request.id, -32001, "Session not found or expired; re-initialize", undefined, 404) };
   }
-  await touchMcpSession(session);
+  // Best-effort idle-timer refresh; a transient store failure must not fail the request.
+  try {
+    await touchMcpSession(session);
+  } catch (error) {
+    console.error("MCP session refresh failed; proceeding:", error instanceof Error ? error.message : error);
+  }
   return { ok: true, session };
 }
 
@@ -559,13 +564,22 @@ export async function handler(event: FunctionEvent) {
     const params = request.params ?? {};
     const protocolVersion = negotiateMcpProtocolVersion(params.protocolVersion);
     const clientInfo = params.clientInfo && typeof params.clientInfo === "object" ? params.clientInfo as { name?: string; version?: string } : undefined;
-    const session = await createMcpSession(protocolVersion, clientInfo);
+    // Session persistence is an enhancement, not a hard dependency: if the session store is
+    // unavailable (e.g. Blobs misconfigured), degrade to a stateless session rather than
+    // failing the whole connection with a 502. The endpoint already supports sessionless use.
+    let sessionHeaders: Record<string, string> = {};
+    try {
+      const session = await createMcpSession(protocolVersion, clientInfo);
+      sessionHeaders = { "mcp-session-id": session.sessionId };
+    } catch (error) {
+      console.error("MCP session creation failed; continuing statelessly:", error instanceof Error ? error.message : error);
+    }
     return rpcResult(request.id, {
       protocolVersion,
       serverInfo: { name: "pdf-tool-agent-artifacts", version: "0.2.0" },
       capabilities: { tools: {} },
       instructions: SERVER_INSTRUCTIONS
-    }, 200, { "mcp-session-id": session.sessionId });
+    }, 200, sessionHeaders);
   }
 
   const sessionCheck = await checkSession(event, request);

@@ -2,6 +2,7 @@ const memoryStores = new Map<string, Map<string, unknown>>();
 const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }> = [];
 const memoryListOverrides = new Map<string, ProjectBlobStore["list"]>();
 const memoryGetOverrides = new Map<string, ProjectBlobStore["get"]>();
+const memorySetOverrides = new Map<string, (key: string, value: unknown) => Promise<void>>();
 
 export interface ProjectBlobStore {
   get(key: string, options?: { type?: "json" | "arrayBuffer" }): Promise<unknown>;
@@ -34,9 +35,13 @@ function memoryStore(name: string): ProjectBlobStore {
       return value;
     },
     async set(key: string, value: unknown) {
+      const override = memorySetOverrides.get(name);
+      if (override) return override(key, value);
       store.set(key, value);
     },
     async setJSON(key: string, value: unknown) {
+      const override = memorySetOverrides.get(name);
+      if (override) return override(key, value);
       store.set(key, value);
     },
     async list(options?: { prefix?: string }) {
@@ -55,11 +60,17 @@ export function resetMemoryBlobStores(): void {
   memoryStores.clear();
   memoryListOverrides.clear();
   memoryGetOverrides.clear();
+  memorySetOverrides.clear();
   projectBlobStoreCalls.length = 0;
 }
 
 export function setMemoryBlobStoreList(name: string, list: ProjectBlobStore["list"]): void {
   memoryListOverrides.set(name, list);
+}
+
+/** Test hook: force set/setJSON on a named store to fail, simulating a Blobs 401/outage. */
+export function setMemoryBlobStoreSet(name: string, set: (key: string, value: unknown) => Promise<void>): void {
+  memorySetOverrides.set(name, set);
 }
 
 export function setMemoryBlobStoreGet(name: string, get: ProjectBlobStore["get"]): void {
