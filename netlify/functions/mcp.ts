@@ -5,6 +5,7 @@ import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-
 import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
+import { recordInvocation } from "../lib/instance-metrics.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -603,7 +604,22 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
 }
 
 export async function handler(event: FunctionEvent) {
+  const instance = recordInvocation();
+
   if (event.httpMethod === "OPTIONS") return emptyResponse(204);
+
+  // Cheap, unauthenticated liveness probe: a target for an external uptime monitor and for
+  // the scheduled warm-ping (see netlify.toml) that keeps this function's container warm on
+  // a platform with no native min-instances/provisioned-concurrency setting. Deliberately
+  // does no Blobs/session work so it stays fast even on a cold container.
+  if (event.httpMethod === "GET" && event.queryStringParameters?.health === "1") {
+    return mcpJsonResponse(200, {
+      ok: true,
+      server: "pdf-tool-agent-artifacts",
+      instance_age_ms: instance.instanceAgeMs,
+      instance_invocations: instance.instanceInvocations
+    });
+  }
 
   if (event.httpMethod === "DELETE") {
     if (!isAuthorizedMcpRequest(event)) return unauthorizedResponse(event, null);
