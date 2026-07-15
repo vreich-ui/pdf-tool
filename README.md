@@ -98,11 +98,14 @@ independent auth paths, each rotatable on its own:
    consent screen (`/authorize`). Enter `MCP_OAUTH_PASSWORD` to approve; Claude receives an
    access token and connects. No headers or URL keys required.
 
-The flow is Authorization Code + PKCE (S256 mandatory); access tokens are self-verifying
-HMAC tokens (no per-call storage lookup), authorization codes are single-use with a 10-minute
-TTL, and issuance is gated by the owner password so only the operator can approve a connector.
-Optionally restrict callback hosts with `MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` (comma-separated;
-default allows any https host).
+The flow is Authorization Code + PKCE (S256 mandatory). Both access tokens **and
+authorization codes** are self-verifying signed envelopes (HMAC) — the entire connect flow
+issues and validates them without a storage round-trip, so it works even if Netlify Blobs is
+misconfigured or down. Codes have a 5-minute TTL; single-use is enforced best-effort against
+storage when reachable and degrades to PKCE-only protection otherwise (an intercepted code is
+useless without the client's `code_verifier`). Issuance is gated by the owner password so only
+the operator can approve a connector. Optionally restrict callback hosts with
+`MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` (comma-separated; default allows any https host).
 
 **2. Claude Code (bearer header)**
 
@@ -121,6 +124,15 @@ discovery.
   - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
   - Completed job status returns the project-native `artifactReference` exactly as the existing status facade returns it.
   - pdf-tool MCP never mutates Dr. Lurie workflow JSON; Dr. Lurie MCP/agents remain responsible for workflow JSON updates after receiving an `ArtifactReference`.
+
+#### Blob store health check
+
+- `GET|POST /.netlify/functions/health` (alias `/health`)
+  - Probes the pdf-tool job Blob store (write/read/delete round-trip) and reports `ok`,
+    the credential `mode` (`same-site` vs `manual`), and, on failure, the store error and
+    targeted advice. Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
+  - Use this to confirm Blobs works for artifact jobs, MCP sessions, and OAuth single-use
+    tracking — e.g. `curl -H "Authorization: Bearer $AGENT_RUN_TOKEN" https://pdf-x.netlify.app/health`.
 
 Existing internal endpoints remain available:
 

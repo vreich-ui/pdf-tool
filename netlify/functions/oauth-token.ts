@@ -1,4 +1,4 @@
-import { consumeAuthorizationCode, issueTokenPair, OAUTH_SCOPE, verifyPkceS256, verifyRefreshToken } from "../lib/mcp-oauth.js";
+import { redeemAuthorizationCode, issueTokenPair, OAUTH_SCOPE, verifyPkceS256, verifyRefreshToken } from "../lib/mcp-oauth.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 
@@ -27,7 +27,7 @@ export async function handler(event: FunctionEvent) {
     const clientId = params.get("client_id");
     if (!code || !codeVerifier) return json(400, { error: "invalid_request", error_description: "code and code_verifier are required" });
 
-    const record = await consumeAuthorizationCode(code);
+    const record = await redeemAuthorizationCode(code);
     if (!record) return json(400, { error: "invalid_grant", error_description: "authorization code is invalid, expired, or already used" });
     if (redirectUri && redirectUri !== record.redirectUri) return json(400, { error: "invalid_grant", error_description: "redirect_uri mismatch" });
     if (clientId && clientId !== record.clientId) return json(400, { error: "invalid_grant", error_description: "client_id mismatch" });

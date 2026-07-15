@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
-import { verifyMcpAccessToken } from "../netlify/lib/mcp-oauth.js";
+import { resetMemoryBlobStores, setMemoryBlobStoreSet } from "../netlify/lib/blob-store.js";
+import { MCP_OAUTH_STORE, verifyMcpAccessToken } from "../netlify/lib/mcp-oauth.js";
 import { handler as prmHandler } from "../netlify/functions/oauth-protected-resource.js";
 import { handler as asmHandler } from "../netlify/functions/oauth-authorization-server.js";
 import { handler as registerHandler } from "../netlify/functions/oauth-register.js";
@@ -183,6 +183,22 @@ test("OAuth authorization codes are single-use", async () => {
   const replay = await exchange();
   assert.equal(replay.statusCode, 400);
   assert.equal(JSON.parse(replay.body).error, "invalid_grant");
+});
+
+test("OAuth flow completes even when the Blob store is unavailable (stateless codes)", async () => {
+  // Simulate a Blobs 401 on every write to the OAuth store: authorize and token must still work.
+  setMemoryBlobStoreSet(MCP_OAUTH_STORE, async () => { throw new Error("Netlify Blobs has generated an internal error (401 status code)"); });
+  const { verifier, challenge } = pkcePair();
+  const clientId = await registerClient();
+
+  const form = new URLSearchParams({ ...authorizeQuery(clientId, challenge), owner_secret: "owner-secret" }).toString();
+  const approved = await authorizeHandler({ httpMethod: "POST", headers: HOST_HEADERS, queryStringParameters: null, body: form });
+  assert.equal(approved.statusCode, 302, "authorize must issue a code without touching storage");
+  const code = new URL(approved.headers.location).searchParams.get("code")!;
+
+  const tokenRes = await tokenHandler({ httpMethod: "POST", headers: HOST_HEADERS, body: new URLSearchParams({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: REDIRECT_URI }).toString() });
+  assert.equal(tokenRes.statusCode, 200, tokenRes.body);
+  assert.ok(verifyMcpAccessToken(JSON.parse(tokenRes.body).access_token));
 });
 
 test("OAuth authorize requires PKCE S256 and a valid redirect_uri", async () => {

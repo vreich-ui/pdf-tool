@@ -16,7 +16,7 @@ import { getHeader } from "./agent-artifact-jobs.js";
 
 export const MCP_OAUTH_STORE = "mcp-oauth";
 export const OAUTH_SCOPE = "mcp";
-const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
+const AUTH_CODE_TTL_S = 5 * 60;
 const ACCESS_TOKEN_TTL_S = 60 * 60;
 const REFRESH_TOKEN_TTL_S = 90 * 24 * 60 * 60;
 
@@ -71,14 +71,14 @@ interface TokenPayload {
   jti: string;
 }
 
-function signToken(payload: TokenPayload): string {
+/** Signs an arbitrary payload as a self-verifying HMAC envelope: v1.<payload>.<sig>. */
+function signEnvelope(payload: Record<string, unknown>): string {
   const body = b64urlEncode(JSON.stringify(payload));
   const sig = createHmac("sha256", signingSecret()).update(`v1.${body}`).digest("base64url");
   return `v1.${body}.${sig}`;
 }
 
-/** nowSeconds is injectable so token expiry is testable without a real clock. */
-function verifyToken(token: string, expectedType: "access" | "refresh", nowSeconds: number): TokenPayload | null {
+function verifyEnvelope(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 3 || parts[0] !== "v1") return null;
   const [, body, sig] = parts;
@@ -86,12 +86,21 @@ function verifyToken(token: string, expectedType: "access" | "refresh", nowSecon
   const sigBuffer = Buffer.from(sig);
   const expectedBuffer = Buffer.from(expected);
   if (sigBuffer.length !== expectedBuffer.length || !timingSafeEqual(sigBuffer, expectedBuffer)) return null;
-  let payload: TokenPayload;
   try {
-    payload = JSON.parse(b64urlDecode(body).toString("utf8")) as TokenPayload;
+    return JSON.parse(b64urlDecode(body).toString("utf8")) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+function signToken(payload: TokenPayload): string {
+  return signEnvelope(payload as unknown as Record<string, unknown>);
+}
+
+/** nowSeconds is injectable so token expiry is testable without a real clock. */
+function verifyToken(token: string, expectedType: "access" | "refresh", nowSeconds: number): TokenPayload | null {
+  const payload = verifyEnvelope(token) as TokenPayload | null;
+  if (!payload) return null;
   if (payload.typ !== expectedType) return null;
   if (typeof payload.exp !== "number" || payload.exp <= nowSeconds) return null;
   return payload;
@@ -158,31 +167,54 @@ export async function registerClient(input: { redirectUris: string[]; clientName
   return record;
 }
 
-interface AuthorizationCodeRecord {
-  code: string;
+export interface AuthorizationCodePayload {
+  typ: "code";
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
   scope: string;
-  expiresAt: number;
+  iat: number;
+  exp: number;
+  jti: string;
 }
 
-export async function createAuthorizationCode(input: { clientId: string; redirectUri: string; codeChallenge: string; scope: string }): Promise<string> {
-  const code = b64urlEncode(randomBytes(32));
-  const record: AuthorizationCodeRecord = { code, ...input, expiresAt: Date.now() + AUTH_CODE_TTL_MS };
-  await (await store()).setJSON(`codes/${code}.json`, record);
-  return code;
+/**
+ * Authorization codes are self-contained signed envelopes, not stored records, so issuing
+ * one never depends on Blobs. Security rests on the short TTL and mandatory PKCE (an
+ * intercepted code is useless without the client's code_verifier). Single-use is enforced
+ * best-effort against storage when it is reachable, and degrades to PKCE-only otherwise.
+ */
+export function issueAuthorizationCode(
+  input: { clientId: string; redirectUri: string; codeChallenge: string; scope: string },
+  iatSeconds = Math.floor(Date.now() / 1000)
+): string {
+  return signEnvelope({ typ: "code", ...input, iat: iatSeconds, exp: iatSeconds + AUTH_CODE_TTL_S, jti: randomUUID() });
 }
 
-/** Reads and deletes an authorization code (single-use). Returns null if missing/expired. */
-export async function consumeAuthorizationCode(code: string): Promise<Omit<AuthorizationCodeRecord, "code"> | null> {
-  if (!/^[A-Za-z0-9_-]{16,}$/.test(code)) return null;
-  const s = await store();
-  const record = await s.get(`codes/${code}.json`, { type: "json" }).catch(() => null) as AuthorizationCodeRecord | null;
-  if (!record) return null;
-  await s.delete?.(`codes/${code}.json`);
-  if (record.expiresAt < Date.now()) return null;
-  return record;
+/** Best-effort single-use: false = already redeemed (only detectable when storage is up). */
+async function markAuthorizationCodeUsed(jti: string): Promise<boolean> {
+  try {
+    const s = await store();
+    const key = `used-codes/${jti}.json`;
+    const existing = await s.get(key, { type: "json" }).catch(() => null);
+    if (existing) return false;
+    await s.setJSON(key, { usedAt: new Date().toISOString() });
+    return true;
+  } catch {
+    // Storage unavailable: fall back to PKCE-only protection rather than blocking the flow.
+    return true;
+  }
+}
+
+/** Verifies a signed authorization code (signature + type + expiry), then applies best-effort
+ * single-use. Returns null when invalid, expired, or already redeemed. */
+export async function redeemAuthorizationCode(code: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<AuthorizationCodePayload | null> {
+  const payload = verifyEnvelope(code) as AuthorizationCodePayload | null;
+  if (!payload || payload.typ !== "code") return null;
+  if (typeof payload.exp !== "number" || payload.exp <= nowSeconds) return null;
+  if (!payload.clientId || !payload.redirectUri || !payload.codeChallenge || !payload.jti) return null;
+  if (!(await markAuthorizationCodeUsed(payload.jti))) return null;
+  return payload;
 }
 
 // ── Redirect-URI policy ──
