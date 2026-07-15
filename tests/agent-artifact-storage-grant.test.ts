@@ -88,6 +88,30 @@ test("blob openers use grant credentials and the grant jobs store within runWith
   assert.equal(artifactsCall?.token, SECRET_TOKEN);
 });
 
+// Every non-job blob opener (pdf-template-store, agent-image-editing, agent-pdf-editing,
+// image-search policy/orchestrator) resolves CLIENT_SITE_ID/CLIENT_BLOBS_TOKEN itself and
+// passes them as explicit options, the same shape reproduced here. Before this fix, a
+// present (possibly stale/revoked) env credential silently shadowed a valid grant — this is
+// the exact live incident: list_pdf_templates 401ing on a stale CLIENT_BLOBS_TOKEN even
+// though the caller supplied a fresh grant.
+test("projectBlobStore: an active grant wins over a static env-derived credential passed as explicit options", async () => {
+  const parsed = parseStorageGrant(grant());
+  assert.ok(parsed.ok);
+  await runWithStorageGrant(parsed.grant, async () => {
+    await projectBlobStore("artifacts", { siteID: process.env.CLIENT_SITE_ID, token: process.env.CLIENT_BLOBS_TOKEN });
+  });
+  const call = projectBlobStoreCallLog().find((c) => c.name === "artifacts");
+  assert.equal(call?.siteID, "client-site-123", "the grant's siteID must win over the env-derived option");
+  assert.equal(call?.token, SECRET_TOKEN, "the grant's token must win over the env-derived option");
+});
+
+test("projectBlobStore: explicit options are still used when no grant is active (migration fallback intact)", async () => {
+  await projectBlobStore("artifacts", { siteID: process.env.CLIENT_SITE_ID, token: process.env.CLIENT_BLOBS_TOKEN });
+  const call = projectBlobStoreCallLog().find((c) => c.name === "artifacts");
+  assert.equal(call?.siteID, "dr-site");
+  assert.equal(call?.token, "dr-token");
+});
+
 // ── End-to-end: grant routes the job record to the client store, token never persisted ──
 
 async function createJob(withGrant: boolean) {

@@ -90,12 +90,18 @@ export interface ProjectBlobStoreOptions {
 }
 
 export async function projectBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  // A per-request storage grant supplies credentials when the caller passes none, so
-  // pdf-tool needs no credentials of its own. Explicit options (env fallback) win during
-  // migration; once env creds are removed the grant is the only source.
+  // An active per-request storage grant is the caller's authoritative, short-lived
+  // credential for its own store, so it wins over a static env-var fallback
+  // (CLIENT_SITE_ID/CLIENT_BLOBS_TOKEN etc.) whenever one is present — not just when the
+  // caller passes no options at all. Static env vars are migration-era scaffolding that
+  // often lingers configured (and can go stale/revoked) long after callers start passing
+  // grants; if they kept winning unconditionally, a perfectly valid grant would be silently
+  // shadowed by a broken legacy credential (jobRecordBlobStore already special-cased this
+  // for job records — this generalizes the same precedence to every other blob opener:
+  // artifacts, templates, image-search bank/policy).
   const grant = currentStorageGrant();
-  const siteID = options.siteID ?? grant?.siteID;
-  const token = options.token ?? grant?.token;
+  const siteID = grant?.siteID ?? options.siteID;
+  const token = grant?.token ?? options.token;
   projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID, token });
   if (process.env.AGENT_ARTIFACT_MEMORY_BLOBS === "1") {
     return memoryStore(name);
