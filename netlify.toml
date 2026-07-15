@@ -2,6 +2,11 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+# Keeps the mcp function warm on a platform with no min-instances/provisioned-concurrency
+# setting: pings its unauthenticated liveness route (GET /mcp?health=1) every 5 minutes.
+[functions."warm-ping-scheduled"]
+  schedule = "*/5 * * * *"
+
 [[redirects]]
   from = "/mcp/*"
   to = "/.netlify/functions/mcp/:splat"

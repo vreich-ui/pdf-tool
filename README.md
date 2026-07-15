@@ -243,12 +243,24 @@ argument:
 - `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
   - These back the pdf-tool job store, MCP sessions, and image-search banks. When the
     functions run on the pdf-tool site itself, leave both **unset** so the built-in
-    same-site Blobs context is used. Only set them (to a valid pair for the target site)
-    when the store lives on a different site. A set-but-invalid value causes Netlify Blobs
-    to return `401` (surfaced as a `BlobsInternalError` 502 on the first write, e.g. MCP
-    `initialize`). MCP `initialize` degrades to a stateless session in that case, but
-    artifact/search jobs still require a working store — fix the credentials to restore full
-    function.
+    same-site Blobs context (a platform-issued, auto-rotating identity — no token to expire
+    or leak) is used. Only set them (to a valid pair for the target site) when the store
+    genuinely lives on a different site (e.g. a deploy preview sharing the production job
+    store).
+  - **Rotation / incident recovery:** a revoked or stale token here previously surfaced as a
+    hard `401` (`BlobsInternalError`, 502 on the first write) with no recovery until an
+    operator fixed the credential. Every job-store operation now retries once via the
+    built-in same-site identity when it sees a `401`/`403`, so a bad token degrades to
+    "using the pdf-tool site's own store" instead of an outage — this matches the health.ts
+    diagnostic's own long-standing advice ("unset both to use the built-in same-site Blobs
+    context"), just automated per-call. Note the fallback lands on pdf-tool's *own* site's
+    store, not the originally-configured target site, so if `PDF_TOOL_SITE_ID` pointed at a
+    shared/foreign store the retry silently uses a different (empty) one instead — fine for
+    transient job records, but rotate the token promptly rather than relying on the fallback
+    long-term. To rotate: mint a new Blobs token for the target site in the Netlify UI,
+    update `PDF_TOOL_BLOBS_TOKEN`, redeploy, then confirm with `GET /health` (`blobStore.ok:
+    true`, `mode: "manual"`). If the target site's store is no longer needed, just unset both
+    vars instead of rotating.
 - `CLIENT_SITE_ID`: adapter-provided target-project site ID for artifact Blob storage when running outside same-site Blob context.
 - `CLIENT_BLOBS_TOKEN`: adapter-provided target-project Blob token for artifact Blob storage when running outside same-site Blob context.
 - pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.

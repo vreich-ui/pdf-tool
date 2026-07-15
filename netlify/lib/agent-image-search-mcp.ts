@@ -72,7 +72,12 @@ export async function updateImageSearchCandidate(input: UpdateCandidateInput) {
   }
 }
 
-export async function importImageFromUrl(input: unknown) {
+// Below this, there isn't enough time left to even attempt a download-and-convert round
+// trip; fail fast with an actionable message rather than starting a fetch that's certain to
+// be aborted mid-flight.
+const MIN_USABLE_IMPORT_BUDGET_MS = 1000;
+
+export async function importImageFromUrl(input: unknown, options: { budgetMs?: number } = {}) {
   const value = input && typeof input === "object" && !Array.isArray(input) ? input as Partial<ImportImageFromUrlInput> : undefined;
   if (!value) return { ok: false as const, statusCode: 400, error: "Expected JSON object" };
   const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
@@ -85,6 +90,14 @@ export async function importImageFromUrl(input: unknown) {
   if (value.maxBytes !== undefined && !(Number.isInteger(value.maxBytes) && typeof value.maxBytes === "number" && value.maxBytes > 0 && value.maxBytes <= MAX_IMAGE_OUTPUT_BYTES)) {
     return { ok: false as const, statusCode: 400, error: `maxBytes must be a positive integer no greater than ${MAX_IMAGE_OUTPUT_BYTES}` };
   }
+  if (options.budgetMs !== undefined && options.budgetMs < MIN_USABLE_IMPORT_BUDGET_MS) {
+    return {
+      ok: false as const,
+      statusCode: 503,
+      error: `Not enough execution time remaining (${options.budgetMs}ms) to download and convert the image before this call's serverless execution limit; retry, or use import_images_from_url which runs as a background job with polling.`,
+      retryable: true
+    };
+  }
   try {
     const artifactReference = await importImageArtifactFromUrl({
       projectId,
@@ -96,11 +109,21 @@ export async function importImageFromUrl(input: unknown) {
       label: typeof value.label === "string" ? value.label : undefined,
       license: value.license,
       maxBytes: value.maxBytes
-    });
+    }, { timeoutMs: options.budgetMs });
     const banked = await bankSingleUrlImport({ projectId, requestId, sourceUrl: url, artifactReference, license: value.license, label: typeof value.label === "string" ? value.label : undefined });
     return { ok: true as const, statusCode: 200, projectId, requestId, artifactReference, candidateId: banked.candidateId, ...(banked.warning ? { warning: banked.warning } : {}) };
   } catch (error) {
     const message = safeError(error);
+    if (/timed out/i.test(message)) {
+      // Bounded to the execution budget by design (see fetchImportBytes): the call must
+      // return cleanly here, never run past the platform's limit and drop the connection.
+      return {
+        ok: false as const,
+        statusCode: 503,
+        error: `${message}; retry, or use import_images_from_url which runs as a background job with polling.`,
+        retryable: true
+      };
+    }
     return { ok: false as const, statusCode: message.includes("https") || message.includes("decodable") || message.includes("import limit") || message.includes("not allowed") || message.includes("IP literal") || message.includes("import_images_from_url") ? 400 : 502, error: message };
   }
 }

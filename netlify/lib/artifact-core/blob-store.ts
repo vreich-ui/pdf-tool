@@ -114,14 +114,50 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
   return getProjectStore(name);
 }
 
+function isAuthRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(401|403)\b/.test(message);
+}
+
+/**
+ * Wraps a manually-credentialed store so a 401/403 on any operation (a stale or revoked
+ * static token — the exact incident this guards: health.ts's diagnostic exists because of
+ * it) retries once via the platform's own auto-rotating identity instead of failing
+ * outright. The fallback store is created lazily and reused across retried operations.
+ */
+function withAuthFallback(primary: ProjectBlobStore, fallbackFactory: () => Promise<ProjectBlobStore>): ProjectBlobStore {
+  let fallback: Promise<ProjectBlobStore> | undefined;
+  function resolveFallback(): Promise<ProjectBlobStore> {
+    if (!fallback) fallback = fallbackFactory();
+    return fallback;
+  }
+  async function withRetry<T>(op: (store: ProjectBlobStore) => Promise<T>): Promise<T> {
+    try {
+      return await op(primary);
+    } catch (error) {
+      if (!isAuthRejection(error)) throw error;
+      console.error("Manual Blobs credentials rejected (401/403); retrying via the same-site platform identity:", error instanceof Error ? error.message : error);
+      return op(await resolveFallback());
+    }
+  }
+  return {
+    get: (key, options) => withRetry((store) => store.get(key, options)),
+    set: (key, value, options) => withRetry((store) => store.set(key, value, options)),
+    setJSON: (key, value, options) => withRetry((store) => store.setJSON(key, value, options)),
+    ...(primary.list ? { list: (options?: unknown) => withRetry((store) => store.list!(options)) } : {}),
+    ...(primary.delete ? { delete: (key: string) => withRetry((store) => store.delete!(key)) } : {})
+  };
+}
+
 export async function jobBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
   // Manual credentials are for reaching the store from outside its own site. Use them only
   // when BOTH are set; otherwise fall back to the built-in same-site context. A lone
   // PDF_TOOL_SITE_ID (token unset/cleared) must not force a broken, unauthenticated request.
   const siteID = process.env.PDF_TOOL_SITE_ID;
   const token = process.env.PDF_TOOL_BLOBS_TOKEN;
-  const manualCredentials = siteID && token ? { siteID, token } : {};
-  return projectBlobStore(name, { ...options, ...manualCredentials });
+  if (!siteID || !token) return projectBlobStore(name, options);
+  const manual = await projectBlobStore(name, { ...options, siteID, token });
+  return withAuthFallback(manual, () => projectBlobStore(name, options));
 }
 
 /**

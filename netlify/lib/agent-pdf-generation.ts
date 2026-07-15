@@ -1,4 +1,3 @@
-import Ajv from "ajv/dist/ajv.js";
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
 import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
@@ -95,8 +94,11 @@ function renderHtml(template: PdfTemplateRecord, data: unknown): string {
   return `<!doctype html><html><head><meta charset="utf-8"><style>${template.css ?? ""}</style></head><body>${html}</body></html>`;
 }
 
-function validateData(schema: Record<string, unknown> | boolean | undefined, data: unknown): void {
+async function validateData(schema: Record<string, unknown> | boolean | undefined, data: unknown): Promise<void> {
   if (schema === undefined) return;
+  // Deferred off the module's top-level import so a cold start of the worker doesn't pay to
+  // parse/init ajv unless this specific job actually has a dataSchema to validate against.
+  const { default: Ajv } = await import("ajv/dist/ajv.js");
   const AjvCtor = ((Ajv as unknown as { default?: unknown }).default ?? Ajv) as new (options: { allErrors: boolean; strict: boolean }) => { compile: (schema: unknown) => ((data: unknown) => boolean) & { errors?: unknown[] } ; errorsText: (errors?: unknown[]) => string };
   const ajv = new AjvCtor({ allErrors: true, strict: false });
   const validate = ajv.compile(schema);
@@ -134,7 +136,7 @@ export function countPdfPages(bytes: Buffer): number {
 
 export async function renderProjectPdf(input: RenderPdfInput): Promise<RenderPdfOutput> {
   const template = await readProjectPdfTemplate(input.projectId, input.templateId, input.templateRef);
-  validateData(template.dataSchema, input.data ?? {});
+  await validateData(template.dataSchema, input.data ?? {});
   const requirements = mergeRequirements(template.defaultRequirements, input.requirements);
   const html = renderHtml(template, input.data ?? {});
   const bytes = buildDeterministicPdf(html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
