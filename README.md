@@ -61,13 +61,41 @@ Artifact destinations are explicit metadata contracts containing `projectId`, `r
 
 `create_agent_artifact_job` accepts structured job fields rather than requiring agents to hide requirements in prompts. Image jobs support `requirements.image` (`size`, `outputFormat`, `role`, `usageContext`) and `requirements.maxBytes`. Image edit jobs set `operation: "edit"`, lock a `sourceArtifact` by `expectedSha256`, choose an `editMode`, and can supply `maskRef` plus `editInstructions`. Template PDF jobs use `artifactKind: "pdf"` with `templateId` or `templateRef`, structured `data`, optional `assets.images`, and both nested `requirements.pdf` and top-level `requirements` fields for `pageCount`, `format`, `orientation`, and `margins`. PDF templates remain project-owned assets in the configured project template Blob store; pdf-tool renders/saves artifacts and never mutates workflow JSON.
 
-#### MCP endpoint for ChatGPT Agents
+#### MCP endpoint (ChatGPT Agents, Claude, MCP Inspector)
 
 - `POST https://pdf-x.netlify.app/mcp`
   - Friendly alias for `/.netlify/functions/mcp`; both routes continue to work.
-  - Lightweight JSON-RPC MCP facade for ChatGPT Agents.
-  - Requires `Authorization: Bearer AGENT_RUN_TOKEN` for `initialize`, `tools/list`, and `tools/call`.
-  - Supports `initialize`, `tools/list`, and `tools/call`, plus tolerant lifecycle handling for `notifications/initialized` and `ping`.
+  - Session-aware Streamable-HTTP JSON-RPC MCP endpoint.
+  - Requires `Authorization: Bearer AGENT_RUN_TOKEN` for `initialize`, `tools/list`, and `tools/call` — or the URL connector key described below.
+  - Supports `initialize`, `tools/list`, and `tools/call`, plus tolerant lifecycle handling for `notifications/*` and `ping`.
+
+##### Session control
+
+- `initialize` issues an `Mcp-Session-Id` response header and persists the session (client info, negotiated protocol version) in the pdf-tool Blob store. Send the header on every subsequent request.
+- Supported protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18` (the client's requested version is echoed when supported; otherwise the latest is offered).
+- Requests carrying an unknown or expired session id get HTTP 404 (`-32001`), the Streamable-HTTP signal to re-initialize. Sessions expire after `MCP_SESSION_TTL_SECONDS` (default 86400) of inactivity and are refreshed on every request.
+- HTTP `DELETE` with the `Mcp-Session-Id` header ends the session (204).
+- Sessionless requests remain accepted for backward compatibility; set `MCP_REQUIRE_SESSION=1` to enforce sessions strictly (400 without a session id, except `initialize`).
+- `OPTIONS`/CORS are handled (with `Mcp-Session-Id` exposed) so browser-based clients like MCP Inspector connect cleanly; `GET` returns 405 with an `Allow` header (no standalone SSE stream is offered).
+
+##### Connecting Claude as a connector
+
+claude.ai custom connectors cannot send custom headers, so the endpoint also accepts a
+revocable **URL connector key**, separate from `AGENT_RUN_TOKEN`:
+
+1. Set `MCP_CONNECTOR_KEY` in the Netlify site env (any strong random string).
+2. In claude.ai → Settings → Connectors → *Add custom connector*, use the URL
+   `https://pdf-x.netlify.app/mcp/<MCP_CONNECTOR_KEY>`.
+3. Claude Code instead supports headers directly:
+   `claude mcp add --transport http pdf-tool https://pdf-x.netlify.app/mcp --header "Authorization: Bearer <AGENT_RUN_TOKEN>"`.
+4. The Claude API MCP connector takes `url: https://pdf-x.netlify.app/mcp` plus
+   `authorization_token: <AGENT_RUN_TOKEN>`.
+
+The `/mcp/<key>` path maps to `?key=` via redirect; the key is compared in constant time,
+only authorizes the MCP JSON-RPC surface, is inert unless `MCP_CONNECTOR_KEY` is set, and
+can be rotated without touching `AGENT_RUN_TOKEN`. OAuth 2.1 with dynamic client
+registration is the eventual upgrade path and is tracked in `docs/IMAGE_SEARCH.md`'s
+roadmap notes.
   - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, and `get_agent_artifact_by_filename`.
   - Tool calls dispatch to the existing shared artifact facade logic in `netlify/lib/agent-artifact-mcp.ts`; artifact generation, OpenAI usage, Blob storage, and project-native `ArtifactReference` shapes are unchanged.
   - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
@@ -133,6 +161,9 @@ Optional provider credentials (providers without credentials are skipped, never 
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
+- `MCP_CONNECTOR_KEY` (optional): URL connector key enabling `https://.../mcp/<key>` access for clients that cannot send headers (claude.ai custom connectors). Unset = URL-key auth disabled.
+- `MCP_SESSION_TTL_SECONDS` (optional, default 86400): idle expiry for MCP sessions.
+- `MCP_REQUIRE_SESSION` (optional): set to `1` to reject sessionless MCP requests.
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
 - `PDF_TOOL_SITE_ID`: Netlify site ID for pdf-tool job-state Blob storage when running outside same-site Blob context.
 - `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
