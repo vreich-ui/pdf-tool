@@ -95,15 +95,24 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
   const { getStore } = await import("@netlify/blobs");
   const getProjectStore = getStore as unknown as (input: string | { name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }) => ProjectBlobStore;
   if (options.consistency || options.siteID || options.token) {
-    return getProjectStore({ name, consistency: options.consistency, siteID: options.siteID, token: options.token });
+    // Only include siteID/token when actually present. Passing a partial manual credential
+    // (e.g. siteID with no token) makes @netlify/blobs authenticate manually and 401 instead
+    // of falling back to the deployed site's built-in Blobs context.
+    return getProjectStore({
+      name,
+      ...(options.consistency ? { consistency: options.consistency } : {}),
+      ...(options.siteID && options.token ? { siteID: options.siteID, token: options.token } : {})
+    });
   }
   return getProjectStore(name);
 }
 
 export async function jobBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  return projectBlobStore(name, {
-    ...options,
-    siteID: process.env.PDF_TOOL_SITE_ID,
-    token: process.env.PDF_TOOL_BLOBS_TOKEN
-  });
+  // Manual credentials are for reaching the store from outside its own site. Use them only
+  // when BOTH are set; otherwise fall back to the built-in same-site context. A lone
+  // PDF_TOOL_SITE_ID (token unset/cleared) must not force a broken, unauthenticated request.
+  const siteID = process.env.PDF_TOOL_SITE_ID;
+  const token = process.env.PDF_TOOL_BLOBS_TOKEN;
+  const manualCredentials = siteID && token ? { siteID, token } : {};
+  return projectBlobStore(name, { ...options, ...manualCredentials });
 }

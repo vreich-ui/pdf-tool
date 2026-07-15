@@ -125,12 +125,19 @@ export async function handler(event: FunctionEvent) {
       // Re-render the consent page with an error rather than leaking via redirect.
       return htmlResponse(401, consentPage(params).replace("<form", "<p style=\"color:#b00020;font-weight:600\">Incorrect authorization key.</p><form"));
     }
-    const code = await createAuthorizationCode({
-      clientId: params.clientId!,
-      redirectUri: params.redirectUri!,
-      codeChallenge: params.codeChallenge!,
-      scope: params.scope || OAUTH_SCOPE
-    });
+    let code: string;
+    try {
+      code = await createAuthorizationCode({
+        clientId: params.clientId!,
+        redirectUri: params.redirectUri!,
+        codeChallenge: params.codeChallenge!,
+        scope: params.scope || OAUTH_SCOPE
+      });
+    } catch {
+      // Authorization codes must persist (they are the security mechanism), so this cannot
+      // degrade. Surface a clear diagnosis instead of an unhandled 500 crash.
+      return htmlResponse(503, "<h1>Storage unavailable</h1><p>The authorization code could not be saved because the pdf-tool Blob store rejected the write (commonly a Netlify Blobs 401). On the pdf-tool site, unset <code>PDF_TOOL_SITE_ID</code> and <code>PDF_TOOL_BLOBS_TOKEN</code> to use the built-in same-site context, or set both to a valid pair, then redeploy and retry.</p>");
+    }
     const url = new URL(params.redirectUri!);
     url.searchParams.set("code", code);
     if (params.state) url.searchParams.set("state", params.state);
