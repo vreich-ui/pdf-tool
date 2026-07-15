@@ -160,6 +160,34 @@ test("MCP connector key in URL authorizes requests without an Authorization head
   assert.equal(keyDisabled.response.statusCode, 401, "URL key must be inert when MCP_CONNECTOR_KEY is unset");
 });
 
+test("MCP connector key is accepted as a path suffix in every routing shape", async () => {
+  process.env.MCP_CONNECTOR_KEY = "connector-secret";
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+  // Rewritten function path (the /mcp/* redirect target).
+  const viaFunctionPath = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/.netlify/functions/mcp/connector-secret", body });
+  assert.equal(viaFunctionPath.statusCode, 200, viaFunctionPath.body);
+
+  // Original alias path, as some routing layers present it.
+  const viaAliasPath = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/mcp/connector-secret", body });
+  assert.equal(viaAliasPath.statusCode, 200);
+
+  // rawUrl fallback and trailing slash tolerance.
+  const viaRawUrl = await mcpHandler({ httpMethod: "POST", headers: {}, rawUrl: "https://pdf-x.netlify.app/mcp/connector-secret/", body });
+  assert.equal(viaRawUrl.statusCode, 200);
+
+  // URL-encoded keys are decoded before comparison.
+  const viaEncoded = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/mcp/connector%2Dsecret", body });
+  assert.equal(viaEncoded.statusCode, 200);
+
+  const wrong = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/mcp/not-the-key", body });
+  assert.equal(wrong.statusCode, 401);
+
+  // The bare endpoint path must never be mistaken for a key.
+  const bare = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/.netlify/functions/mcp", body });
+  assert.equal(bare.statusCode, 401);
+});
+
 // ── Transport hygiene: OPTIONS preflight, GET, unknown notifications ──
 
 test("MCP transport: OPTIONS preflight, GET 405 with Allow, tolerant notifications", async () => {
