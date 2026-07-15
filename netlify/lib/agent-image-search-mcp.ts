@@ -21,7 +21,12 @@ export function imageSearchPollingInstructions(projectId: string, jobId: string)
 export async function createImageSearchJob(input: unknown, options: { baseUrl?: string; token?: string } = {}) {
   const parsed = validateImageSearchJobRequest(input);
   if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid image search input", issues: parsed.error.issues };
-  const job = await createImageSearchJobRecord(parsed.data);
+  let job: Awaited<ReturnType<typeof createImageSearchJobRecord>>;
+  try {
+    job = await createImageSearchJobRecord(parsed.data);
+  } catch (error) {
+    return { ok: false as const, statusCode: 503, error: `Image search job store unavailable: ${safeError(error)}` };
+  }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId, IMAGE_SEARCH_WORKER_FUNCTION);
   } catch (error) {
@@ -106,7 +111,12 @@ export async function createImageImportJob(input: unknown, options: { baseUrl?: 
   const value = input && typeof input === "object" && !Array.isArray(input) ? { ...(input as Record<string, unknown>), kind: "url_import" } : input;
   const parsed = validateImageSearchJobRequest(value);
   if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid image import input", issues: parsed.error.issues };
-  const job = await createImageSearchJobRecord(parsed.data);
+  let job: Awaited<ReturnType<typeof createImageSearchJobRecord>>;
+  try {
+    job = await createImageSearchJobRecord(parsed.data);
+  } catch (error) {
+    return { ok: false as const, statusCode: 503, error: `Image import job store unavailable: ${safeError(error)}` };
+  }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId, IMAGE_SEARCH_WORKER_FUNCTION);
   } catch (error) {

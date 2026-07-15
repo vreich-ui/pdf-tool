@@ -1,7 +1,7 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
-import { getHeader, isAuthorized, parseJsonBody } from "../lib/agent-artifact-jobs.js";
+import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 
@@ -614,9 +614,15 @@ export async function handler(event: FunctionEvent) {
   if (request.method === "tools/list") return rpcResult(request.id, { tools });
   if (request.method === "tools/call") {
     const params = request.params ?? {};
-    const result = await callTool(typeof params.name === "string" ? params.name : undefined, params.arguments ?? {}, event);
-    if (!result) return rpcError(request.id, -32602, "Unknown tool", { tool: params.name });
-    return rpcResult(request.id, result);
+    try {
+      const result = await callTool(typeof params.name === "string" ? params.name : undefined, params.arguments ?? {}, event);
+      if (!result) return rpcError(request.id, -32602, "Unknown tool", { tool: params.name });
+      return rpcResult(request.id, result);
+    } catch (error) {
+      // A tool implementation throwing (e.g. a Blobs outage on a write) must surface as a
+      // tool error result, never crash the function into an origin 5xx / gateway 502.
+      return rpcResult(request.id, { isError: true, ...toolContent({ error: safeError(error) }) });
+    }
   }
   return rpcError(request.id, -32601, "Method not found", { method: request.method });
 }
