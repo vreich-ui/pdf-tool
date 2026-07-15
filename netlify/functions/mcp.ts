@@ -4,7 +4,7 @@ import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImag
 import { getHeader, isAuthorized, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 
-type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null };
+type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
 type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
@@ -378,12 +378,42 @@ function hasRequestId(request: JsonRpcRequest): boolean {
   return Object.prototype.hasOwnProperty.call(request, "id");
 }
 
-/** Bearer token (Authorization header) or the URL connector key (`/mcp/<key>` redirect →
- * `?key=`), for clients like claude.ai custom connectors that cannot send custom headers.
- * The connector key is a separate secret from AGENT_RUN_TOKEN so it can be rotated alone. */
+const CONNECTOR_KEY_PATH_PATTERN = /^\/(?:\.netlify\/functions\/)?mcp\/(.+?)\/?$/;
+
+/** The connector key may arrive as a `?key=` query param or as a path suffix — the
+ * `/mcp/<key>` alias rewrites to `/.netlify/functions/mcp/<key>`, and depending on the
+ * routing layer the function may see either the rewritten or the original path. */
+export function connectorKeyFromEvent(event: FunctionEvent): string | undefined {
+  const queryKey = event.queryStringParameters?.key;
+  if (queryKey) return queryKey;
+  for (const candidate of [event.path, event.rawUrl ? safePathname(event.rawUrl) : undefined]) {
+    const match = candidate?.match(CONNECTOR_KEY_PATH_PATTERN);
+    if (match) {
+      try {
+        return decodeURIComponent(match[1]);
+      } catch {
+        return match[1];
+      }
+    }
+  }
+  return undefined;
+}
+
+function safePathname(rawUrl: string): string | undefined {
+  try {
+    return new URL(rawUrl).pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Bearer token (Authorization header) or the URL connector key, for clients like
+ * claude.ai custom connectors that cannot send custom headers. The connector key is a
+ * separate secret from AGENT_RUN_TOKEN so it can be rotated alone, and is inert unless
+ * MCP_CONNECTOR_KEY is configured. */
 function isAuthorizedMcpRequest(event: FunctionEvent): boolean {
   if (isAuthorized(getHeader(event.headers, "authorization"))) return true;
-  const connectorKey = event.queryStringParameters?.key;
+  const connectorKey = connectorKeyFromEvent(event);
   if (connectorKey && process.env.MCP_CONNECTOR_KEY) {
     return isAuthorized(`Bearer ${connectorKey}`, process.env.MCP_CONNECTOR_KEY);
   }
