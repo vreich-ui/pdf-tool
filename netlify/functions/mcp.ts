@@ -3,6 +3,7 @@ import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publis
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
+import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -407,17 +408,34 @@ function safePathname(rawUrl: string): string | undefined {
   }
 }
 
-/** Bearer token (Authorization header) or the URL connector key, for clients like
- * claude.ai custom connectors that cannot send custom headers. The connector key is a
- * separate secret from AGENT_RUN_TOKEN so it can be rotated alone, and is inert unless
- * MCP_CONNECTOR_KEY is configured. */
+function bearerToken(event: FunctionEvent): string | undefined {
+  const header = getHeader(event.headers, "authorization");
+  return header?.startsWith("Bearer ") ? header.slice("Bearer ".length) : undefined;
+}
+
+/** Accepts, in order: the AGENT_RUN_TOKEN bearer (backends), an OAuth 2.1 access token
+ * issued by our /token endpoint (claude.ai connectors, MCP Inspector), or the URL connector
+ * key (clients that can only put a secret in the URL). Each is an independent, rotatable
+ * path so no single credential is load-bearing for every client type. */
 function isAuthorizedMcpRequest(event: FunctionEvent): boolean {
-  if (isAuthorized(getHeader(event.headers, "authorization"))) return true;
+  const header = getHeader(event.headers, "authorization");
+  if (isAuthorized(header)) return true;
+  const token = bearerToken(event);
+  if (token && verifyMcpAccessToken(token)) return true;
   const connectorKey = connectorKeyFromEvent(event);
   if (connectorKey && process.env.MCP_CONNECTOR_KEY) {
     return isAuthorized(`Bearer ${connectorKey}`, process.env.MCP_CONNECTOR_KEY);
   }
   return false;
+}
+
+/** Per the MCP auth spec, a 401 points clients at the resource metadata so they can
+ * discover the authorization server and start the OAuth flow. */
+function unauthorizedResponse(event: FunctionEvent, id: JsonRpcRequest["id"]) {
+  const resourceMetadataUrl = `${publicBaseUrl(event.headers)}/.well-known/oauth-protected-resource`;
+  const response = rpcError(id, -32001, "Unauthorized", undefined, 401);
+  response.headers["www-authenticate"] = `Bearer resource_metadata="${resourceMetadataUrl}"`;
+  return response;
 }
 
 const SERVER_INSTRUCTIONS = "Session-aware Netlify Streamable-HTTP MCP endpoint for server-side artifact generation (images, PDFs, templates, image search/import). On initialize the server issues an Mcp-Session-Id header; send it on every subsequent request and send an HTTP DELETE with it to end the session. All tool results are metadata-only ArtifactReferences; binary bytes never travel through MCP.";
@@ -543,7 +561,7 @@ export async function handler(event: FunctionEvent) {
   if (event.httpMethod === "OPTIONS") return emptyResponse(204);
 
   if (event.httpMethod === "DELETE") {
-    if (!isAuthorizedMcpRequest(event)) return rpcError(null, -32001, "Unauthorized", undefined, 401);
+    if (!isAuthorizedMcpRequest(event)) return unauthorizedResponse(event, null);
     const sessionId = getHeader(event.headers, "mcp-session-id");
     if (!sessionId) return rpcError(null, -32000, "Mcp-Session-Id header is required to end a session", undefined, 400);
     const deleted = await deleteMcpSession(sessionId);
@@ -558,7 +576,7 @@ export async function handler(event: FunctionEvent) {
 
   const request = parseJsonBody<JsonRpcRequest>(event.body);
   if (!request || typeof request !== "object") return rpcError(null, -32700, "Parse error", undefined, 400);
-  if (!isAuthorizedMcpRequest(event)) return rpcError(request.id, -32001, "Unauthorized", undefined, 401);
+  if (!isAuthorizedMcpRequest(event)) return unauthorizedResponse(event, request.id);
 
   if (request.method === "initialize") {
     const params = request.params ?? {};

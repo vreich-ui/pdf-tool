@@ -80,22 +80,42 @@ Artifact destinations are explicit metadata contracts containing `projectId`, `r
 
 ##### Connecting Claude as a connector
 
-claude.ai custom connectors cannot send custom headers, so the endpoint also accepts a
-revocable **URL connector key**, separate from `AGENT_RUN_TOKEN`:
+The claude.ai custom-connector UI uses **OAuth 2.1** (it can't send custom headers), so the
+endpoint implements the OAuth server surface the MCP spec defines — metadata discovery,
+dynamic client registration, Authorization Code + PKCE, and token issuance. There are three
+independent auth paths, each rotatable on its own:
 
-1. Set `MCP_CONNECTOR_KEY` in the Netlify site env (any strong random string).
-2. In claude.ai → Settings → Connectors → *Add custom connector*, use the URL
-   `https://pdf-x.netlify.app/mcp/<MCP_CONNECTOR_KEY>`.
-3. Claude Code instead supports headers directly:
-   `claude mcp add --transport http pdf-tool https://pdf-x.netlify.app/mcp --header "Authorization: Bearer <AGENT_RUN_TOKEN>"`.
-4. The Claude API MCP connector takes `url: https://pdf-x.netlify.app/mcp` plus
-   `authorization_token: <AGENT_RUN_TOKEN>`.
+**1. claude.ai custom connector (OAuth) — recommended for the web/desktop app**
 
-The `/mcp/<key>` path maps to `?key=` via redirect; the key is compared in constant time,
-only authorizes the MCP JSON-RPC surface, is inert unless `MCP_CONNECTOR_KEY` is set, and
-can be rotated without touching `AGENT_RUN_TOKEN`. OAuth 2.1 with dynamic client
-registration is the eventual upgrade path and is tracked in `docs/IMAGE_SEARCH.md`'s
-roadmap notes.
+1. Set `MCP_OAUTH_PASSWORD` in the Netlify site env (a strong random string — this is the
+   key you'll type once on the consent screen to approve the connection). If unset, the
+   endpoint falls back to `MCP_CONNECTOR_KEY`; if neither is set, OAuth authorization is
+   disabled.
+2. In claude.ai → Settings → Connectors → *Add custom connector*, enter the plain endpoint
+   URL `https://pdf-x.netlify.app/mcp`.
+3. Claude discovers the OAuth server (`/.well-known/oauth-protected-resource` →
+   `/.well-known/oauth-authorization-server`), registers itself (`/register`), and opens the
+   consent screen (`/authorize`). Enter `MCP_OAUTH_PASSWORD` to approve; Claude receives an
+   access token and connects. No headers or URL keys required.
+
+The flow is Authorization Code + PKCE (S256 mandatory); access tokens are self-verifying
+HMAC tokens (no per-call storage lookup), authorization codes are single-use with a 10-minute
+TTL, and issuance is gated by the owner password so only the operator can approve a connector.
+Optionally restrict callback hosts with `MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` (comma-separated;
+default allows any https host).
+
+**2. Claude Code (bearer header)**
+
+`claude mcp add --transport http pdf-tool https://pdf-x.netlify.app/mcp --header "Authorization: Bearer <AGENT_RUN_TOKEN>"`.
+
+**3. Claude API MCP connector** — `url: https://pdf-x.netlify.app/mcp` plus
+`authorization_token: <AGENT_RUN_TOKEN>`.
+
+A fourth path — the revocable **URL connector key** `https://pdf-x.netlify.app/mcp/<MCP_CONNECTOR_KEY>`
+(set `MCP_CONNECTOR_KEY`, compared in constant time, inert when unset) — remains for clients
+that can only put a secret in the URL. An unauthenticated MCP request returns 401 with a
+`WWW-Authenticate: Bearer resource_metadata="…"` header so OAuth-capable clients auto-start
+discovery.
   - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, and `get_agent_artifact_by_filename`.
   - Tool calls dispatch to the existing shared artifact facade logic in `netlify/lib/agent-artifact-mcp.ts`; artifact generation, OpenAI usage, Blob storage, and project-native `ArtifactReference` shapes are unchanged.
   - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
@@ -161,7 +181,11 @@ Optional provider credentials (providers without credentials are skipped, never 
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
-- `MCP_CONNECTOR_KEY` (optional): URL connector key enabling `https://.../mcp/<key>` access for clients that cannot send headers (claude.ai custom connectors). Unset = URL-key auth disabled.
+- `MCP_OAUTH_PASSWORD` (optional): owner secret typed on the OAuth consent screen to approve a claude.ai connector. Falls back to `MCP_CONNECTOR_KEY`; if neither is set, OAuth authorization is disabled.
+- `MCP_CONNECTOR_KEY` (optional): URL connector key enabling `https://.../mcp/<key>` access for clients that put a secret in the URL; also a fallback owner secret for the OAuth consent screen. Unset = URL-key auth disabled.
+- `MCP_OAUTH_SIGNING_SECRET` (optional): HMAC secret for signing OAuth access/refresh tokens. Defaults to `AGENT_RUN_TOKEN` (rotating that invalidates issued tokens).
+- `MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` (optional): comma-separated allowlist of OAuth callback hosts. Default allows any https host.
+- `MCP_PUBLIC_URL` (optional): canonical public base URL used in OAuth metadata/endpoints. Defaults to `URL`/`DEPLOY_PRIME_URL`, then the request Host header.
 - `MCP_SESSION_TTL_SECONDS` (optional, default 86400): idle expiry for MCP sessions.
 - `MCP_REQUIRE_SESSION` (optional): set to `1` to reject sessionless MCP requests.
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.

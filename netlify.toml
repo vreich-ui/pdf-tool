@@ -12,3 +12,30 @@
   to = "/.netlify/functions/mcp"
   status = 200
 
+# OAuth 2.1 authorization server for MCP clients (claude.ai connectors, MCP Inspector).
+# Metadata paths accept an optional resource suffix (e.g. .../oauth-authorization-server/mcp).
+[[redirects]]
+  from = "/.well-known/oauth-authorization-server*"
+  to = "/.netlify/functions/oauth-authorization-server"
+  status = 200
+
+[[redirects]]
+  from = "/.well-known/oauth-protected-resource*"
+  to = "/.netlify/functions/oauth-protected-resource"
+  status = 200
+
+[[redirects]]
+  from = "/authorize"
+  to = "/.netlify/functions/oauth-authorize"
+  status = 200
+
+[[redirects]]
+  from = "/token"
+  to = "/.netlify/functions/oauth-token"
+  status = 200
+
+[[redirects]]
+  from = "/register"
+  to = "/.netlify/functions/oauth-register"
+  status = 200
+

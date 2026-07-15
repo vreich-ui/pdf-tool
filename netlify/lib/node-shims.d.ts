@@ -16,7 +16,9 @@ declare module "node:fs/promises" {
 }
 declare module "node:crypto" {
   export function createHash(algorithm: string): { update(input: string | Uint8Array): { digest(encoding: "hex"): string } };
+  export function createHmac(algorithm: string, key: string | Uint8Array): { update(input: string | Uint8Array): { digest(encoding: "hex" | "base64" | "base64url"): string } };
   export function randomUUID(): string;
+  export function randomBytes(size: number): Buffer;
   export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean;
 }
 declare module "@netlify/blobs" {
