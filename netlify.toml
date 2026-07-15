@@ -3,6 +3,11 @@
   node_bundler = "esbuild"
 
 [[redirects]]
+  from = "/mcp/*"
+  to = "/.netlify/functions/mcp?key=:splat"
+  status = 200
+
+[[redirects]]
   from = "/mcp"
   to = "/.netlify/functions/mcp"
   status = 200

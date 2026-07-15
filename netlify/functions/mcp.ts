@@ -1,9 +1,10 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
-import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
+import { getHeader, isAuthorized, parseJsonBody } from "../lib/agent-artifact-jobs.js";
+import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 
-type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
+type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
 type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
@@ -347,20 +348,67 @@ function requestBaseUrl(event: FunctionEvent): string | undefined {
   return host ? `https://${host}` : undefined;
 }
 
-function rpcResult(id: JsonRpcRequest["id"], result: unknown) {
-  return jsonResponse(200, { jsonrpc: "2.0", id: id ?? null, result });
+// CORS enables browser-based MCP clients (e.g. MCP Inspector); auth is still enforced.
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "POST, DELETE, OPTIONS",
+  "access-control-allow-headers": "content-type, authorization, mcp-session-id, mcp-protocol-version",
+  "access-control-expose-headers": "mcp-session-id"
+} as const;
+
+function mcpJsonResponse(statusCode: number, body: unknown, extraHeaders: Record<string, string> = {}) {
+  const headers: Record<string, string> = { "content-type": "application/json", ...CORS_HEADERS, ...extraHeaders };
+  return { statusCode, headers, body: JSON.stringify(body) };
+}
+
+function rpcResult(id: JsonRpcRequest["id"], result: unknown, statusCode = 200, extraHeaders: Record<string, string> = {}) {
+  return mcpJsonResponse(statusCode, { jsonrpc: "2.0", id: id ?? null, result }, extraHeaders);
 }
 
 function rpcError(id: JsonRpcRequest["id"], code: number, message: string, data?: unknown, statusCode = 200) {
-  return jsonResponse(statusCode, { jsonrpc: "2.0", id: id ?? null, error: { code, message, ...(data === undefined ? {} : { data }) } });
+  return mcpJsonResponse(statusCode, { jsonrpc: "2.0", id: id ?? null, error: { code, message, ...(data === undefined ? {} : { data }) } });
 }
 
-function emptyResponse(statusCode = 204) {
-  return { statusCode, headers: { "content-type": "application/json" }, body: "" };
+function emptyResponse(statusCode = 204, extraHeaders: Record<string, string> = {}) {
+  const headers: Record<string, string> = { "content-type": "application/json", ...CORS_HEADERS, ...extraHeaders };
+  return { statusCode, headers, body: "" };
 }
 
 function hasRequestId(request: JsonRpcRequest): boolean {
   return Object.prototype.hasOwnProperty.call(request, "id");
+}
+
+/** Bearer token (Authorization header) or the URL connector key (`/mcp/<key>` redirect →
+ * `?key=`), for clients like claude.ai custom connectors that cannot send custom headers.
+ * The connector key is a separate secret from AGENT_RUN_TOKEN so it can be rotated alone. */
+function isAuthorizedMcpRequest(event: FunctionEvent): boolean {
+  if (isAuthorized(getHeader(event.headers, "authorization"))) return true;
+  const connectorKey = event.queryStringParameters?.key;
+  if (connectorKey && process.env.MCP_CONNECTOR_KEY) {
+    return isAuthorized(`Bearer ${connectorKey}`, process.env.MCP_CONNECTOR_KEY);
+  }
+  return false;
+}
+
+const SERVER_INSTRUCTIONS = "Session-aware Netlify Streamable-HTTP MCP endpoint for server-side artifact generation (images, PDFs, templates, image search/import). On initialize the server issues an Mcp-Session-Id header; send it on every subsequent request and send an HTTP DELETE with it to end the session. All tool results are metadata-only ArtifactReferences; binary bytes never travel through MCP.";
+
+type SessionCheck = { ok: true; session?: McpSessionRecord } | { ok: false; response: ReturnType<typeof rpcError> };
+
+async function checkSession(event: FunctionEvent, request: JsonRpcRequest): Promise<SessionCheck> {
+  const sessionId = getHeader(event.headers, "mcp-session-id");
+  if (!sessionId) {
+    if (process.env.MCP_REQUIRE_SESSION === "1") {
+      return { ok: false, response: rpcError(request.id, -32000, "Mcp-Session-Id header is required; call initialize first", undefined, 400) };
+    }
+    return { ok: true };
+  }
+  const session = await readMcpSession(sessionId);
+  if (!session) {
+    // 404 tells Streamable-HTTP clients the session expired: start a new one via initialize.
+    return { ok: false, response: rpcError(request.id, -32001, "Session not found or expired; re-initialize", undefined, 404) };
+  }
+  await touchMcpSession(session);
+  return { ok: true, session };
 }
 
 function toolContent(structuredContent: unknown) {
@@ -457,18 +505,50 @@ async function callTool(name: string | undefined, args: unknown, event: Function
 }
 
 export async function handler(event: FunctionEvent) {
-  if (event.httpMethod !== "POST") return rpcError(null, -32600, "MCP endpoint requires POST", undefined, 405);
+  if (event.httpMethod === "OPTIONS") return emptyResponse(204);
+
+  if (event.httpMethod === "DELETE") {
+    if (!isAuthorizedMcpRequest(event)) return rpcError(null, -32001, "Unauthorized", undefined, 401);
+    const sessionId = getHeader(event.headers, "mcp-session-id");
+    if (!sessionId) return rpcError(null, -32000, "Mcp-Session-Id header is required to end a session", undefined, 400);
+    const deleted = await deleteMcpSession(sessionId);
+    if (!deleted) return rpcError(null, -32001, "Session not found or expired", undefined, 404);
+    return emptyResponse(204);
+  }
+
+  if (event.httpMethod !== "POST") {
+    // No standalone SSE stream is offered; per Streamable-HTTP, GET gets 405 + Allow.
+    return mcpJsonResponse(405, { jsonrpc: "2.0", id: null, error: { code: -32600, message: "MCP endpoint requires POST" } }, { allow: "POST, DELETE, OPTIONS" });
+  }
+
   const request = parseJsonBody<JsonRpcRequest>(event.body);
   if (!request || typeof request !== "object") return rpcError(null, -32700, "Parse error", undefined, 400);
-  if (!isAuthorized(getHeader(event.headers, "authorization"))) return rpcError(request.id, -32001, "Unauthorized", undefined, 401);
+  if (!isAuthorizedMcpRequest(event)) return rpcError(request.id, -32001, "Unauthorized", undefined, 401);
 
   if (request.method === "initialize") {
-    return rpcResult(request.id, { protocolVersion: "2024-11-05", serverInfo: { name: "pdf-tool-agent-artifacts", version: "0.1.0" }, capabilities: { tools: {} } });
+    const params = request.params ?? {};
+    const protocolVersion = negotiateMcpProtocolVersion(params.protocolVersion);
+    const clientInfo = params.clientInfo && typeof params.clientInfo === "object" ? params.clientInfo as { name?: string; version?: string } : undefined;
+    const session = await createMcpSession(protocolVersion, clientInfo);
+    return rpcResult(request.id, {
+      protocolVersion,
+      serverInfo: { name: "pdf-tool-agent-artifacts", version: "0.2.0" },
+      capabilities: { tools: {} },
+      instructions: SERVER_INSTRUCTIONS
+    }, 200, { "mcp-session-id": session.sessionId });
   }
+
+  const sessionCheck = await checkSession(event, request);
+  if (!sessionCheck.ok) return sessionCheck.response;
+
+  if (request.method === "ping") return rpcResult(request.id, {});
   if (request.method === "notifications/initialized") {
     return hasRequestId(request) ? rpcResult(request.id, {}) : emptyResponse();
   }
-  if (request.method === "ping") return rpcResult(request.id, {});
+  if (typeof request.method === "string" && request.method.startsWith("notifications/") && !hasRequestId(request)) {
+    // Tolerate unknown notifications (cancelled, progress, ...) instead of erroring.
+    return emptyResponse();
+  }
   if (request.method === "tools/list") return rpcResult(request.id, { tools });
   if (request.method === "tools/call") {
     const params = request.params ?? {};
