@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { jobBlobStore } from "../blob-store.js";
+import { jobRecordBlobStore } from "../blob-store.js";
 import { AGENT_ARTIFACT_JOB_STORE, type ArtifactJobStatus } from "../agent-artifact-jobs.js";
 import { supportedProjectIds } from "../agent-project-registry.js";
 import { HARD_MAX_CANDIDATES_PER_REQUEST, validateImageSourcingPolicyPatch } from "./policy.js";
@@ -108,12 +108,12 @@ export async function createImageSearchJobRecord(input: ImageSearchJobRequest): 
 }
 
 export async function readImageSearchJob(projectId: string, jobId: string): Promise<ImageSearchJobRecord | null> {
-  const store = await jobBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
   return await store.get(imageSearchJobBlobKey(projectId, jobId), { type: "json" }).catch(() => null) as ImageSearchJobRecord | null;
 }
 
 export async function writeImageSearchJob(job: ImageSearchJobRecord): Promise<void> {
-  const store = await jobBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
   await store.setJSON(imageSearchJobBlobKey(job.projectId, job.jobId), job);
 }
 

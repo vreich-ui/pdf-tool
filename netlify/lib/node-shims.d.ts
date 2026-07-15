@@ -14,6 +14,12 @@ declare class Buffer extends Uint8Array {
 declare module "node:fs/promises" {
   export function readFile(path: string, encoding: "utf8"): Promise<string>;
 }
+declare module "node:async_hooks" {
+  export class AsyncLocalStorage<T> {
+    run<R>(store: T, callback: () => R): R;
+    getStore(): T | undefined;
+  }
+}
 declare module "node:crypto" {
   export function createHash(algorithm: string): { update(input: string | Uint8Array): { digest(encoding: "hex"): string } };
   export function createHmac(algorithm: string, key: string | Uint8Array): { update(input: string | Uint8Array): { digest(encoding: "hex" | "base64" | "base64url"): string } };

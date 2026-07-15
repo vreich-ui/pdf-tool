@@ -44,7 +44,14 @@ export function artifactJobPollingInstructions(projectId: string, jobId: string)
 export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
   const parsed = await validateArtifactJobRequest({ ...input, tags: input.tags ?? [] });
   if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid artifact job input", issues: parsed.error.issues };
-  const job = await createArtifactJob(parsed.data);
+  let job: Awaited<ReturnType<typeof createArtifactJob>>;
+  try {
+    // Persisting the pending job record needs the pdf-tool job store; a Blobs failure here
+    // must return a clean error, not throw out of the handler into a 5xx/gateway 502.
+    job = await createArtifactJob(parsed.data);
+  } catch (error) {
+    return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
+  }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);
   } catch (error) {

@@ -1,5 +1,6 @@
 import { validateArtifactJobRequest, createArtifactJob, getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError, updateArtifactJob } from "../lib/agent-artifact-jobs.js";
 import { artifactWorkerBaseUrl, triggerWorker } from "../lib/agent-artifact-worker-trigger.js";
+import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
 
 type FunctionEvent = {
   httpMethod: string;
@@ -24,13 +25,17 @@ export async function handler(event: FunctionEvent) {
   if (!parsed.success) {
     return jsonResponse(400, { error: "Invalid artifact job input", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
   }
+  const grant = extractStorageGrantFromBody(event.body);
+  if (grant.error) return jsonResponse(400, { error: grant.error });
 
-  const job = await createArtifactJob(parsed.data);
-  try {
-    await triggerWorker(artifactWorkerBaseUrl(event), process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);
-  } catch (error) {
-    const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
-    return jsonResponse(502, { jobId: failed.jobId, status: failed.status, error: failed.error });
-  }
-  return jsonResponse(202, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, adapterVersion: job.adapterVersion, workflowPatchStatus: "skipped_by_design" });
+  return runWithStorageGrant(grant.grant, async () => {
+    const job = await createArtifactJob(parsed.data);
+    try {
+      await triggerWorker(artifactWorkerBaseUrl(event), process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);
+    } catch (error) {
+      const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
+      return jsonResponse(502, { jobId: failed.jobId, status: failed.status, error: failed.error });
+    }
+    return jsonResponse(202, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, adapterVersion: job.adapterVersion, workflowPatchStatus: "skipped_by_design" });
+  });
 }

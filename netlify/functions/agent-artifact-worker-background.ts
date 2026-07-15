@@ -6,6 +6,7 @@ import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
 import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
 import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfmeArtifact } from "../lib/pdfme-renderer.js";
+import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -15,8 +16,8 @@ type FunctionEvent = {
   body?: string | null;
 };
 
-function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string } {
-  return parseJsonBody<{ projectId?: string; jobId?: string }>(event.body) ?? {};
+function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string; storage?: unknown } {
+  return parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown }>(event.body) ?? {};
 }
 
 export async function handler(event: FunctionEvent) {
@@ -27,11 +28,17 @@ export async function handler(event: FunctionEvent) {
     return jsonResponse(401, { error: "Unauthorized" });
   }
 
-  const { projectId, jobId } = parseWorkerInput(event);
+  const { projectId, jobId, storage } = parseWorkerInput(event);
   if (!projectId || !jobId) {
     return jsonResponse(400, { error: "projectId and jobId are required" });
   }
 
+  const extracted = extractStorageGrant({ storage });
+  if (extracted.error) return jsonResponse(400, { error: extracted.error });
+  return runWithStorageGrant(extracted.grant, () => runWorker(projectId, jobId));
+}
+
+async function runWorker(projectId: string, jobId: string) {
   const job = await readArtifactJob(projectId, jobId);
   if (!job) {
     return jsonResponse(404, { error: "Artifact job not found" });

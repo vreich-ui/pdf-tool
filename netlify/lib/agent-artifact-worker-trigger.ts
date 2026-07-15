@@ -1,4 +1,5 @@
 import { getHeader } from "./agent-artifact-jobs.js";
+import { currentStorageGrant } from "./storage-grant.js";
 
 type TriggerEvent = { headers?: Record<string, string | undefined> };
 
@@ -17,13 +18,17 @@ export async function triggerWorker(baseUrl: string | undefined, token: string |
   if (typeof fetch !== "function") throw new Error("fetch is unavailable for worker trigger");
 
   const url = new URL(`/.netlify/functions/${workerFunction}`, baseUrl);
+  // Forward the active storage grant so the background worker writes the artifact into the
+  // client's Blob store under the same credentials. Server-to-self over https; the grant
+  // (with token) travels only in this body and the worker's local scope.
+  const grant = currentStorageGrant();
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "authorization": `Bearer ${token}`,
       "content-type": "application/json"
     },
-    body: JSON.stringify({ projectId, jobId })
+    body: JSON.stringify({ projectId, jobId, ...(grant ? { storage: grant } : {}) })
   });
 
   if (response && typeof response === "object" && "ok" in response && response.ok === false) {

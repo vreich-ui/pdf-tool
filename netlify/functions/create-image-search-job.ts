@@ -1,3 +1,4 @@
+import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
 import { createImageSearchJob } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
@@ -17,7 +18,9 @@ export async function handler(event: FunctionEvent) {
   if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
   const body = parseJsonBody<unknown>(event.body);
   if (!body) return jsonResponse(400, { error: "Invalid JSON body" });
-  const result = await createImageSearchJob(body, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+  const __grant = extractStorageGrantFromBody(event.body);
+  if (__grant.error) return jsonResponse(400, { error: __grant.error });
+  const result = await runWithStorageGrant(__grant.grant, () => createImageSearchJob(body, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN }));
   const { statusCode, ok: _ok, ...responseBody } = result;
   return jsonResponse(statusCode, responseBody);
 }

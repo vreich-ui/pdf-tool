@@ -204,6 +204,23 @@ test("MCP initialize degrades to a stateless session when the session store fail
   assert.ok(Array.isArray(listed.body.result.tools));
 });
 
+// ── Robustness: a tool write failure returns a clean tool error, never a 5xx crash ──
+
+test("MCP tools/call returns a tool error (not a crash) when the job store write fails", async () => {
+  // Force the pdf-tool job store to reject writes, simulating a Netlify Blobs 401.
+  setMemoryBlobStoreSet("agent-artifact-jobs", async () => { throw new Error("Netlify Blobs has generated an internal error (401 status code)"); });
+
+  const response = await mcpHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_agent_artifact_job", arguments: { projectId: "dr-lurie", requestId: "req-store-down", artifactKind: "image", prompt: "x", filename: "x.png" } } })
+  });
+  assert.equal(response.statusCode, 200, "must return a JSON-RPC response, not an origin 5xx");
+  const result = JSON.parse(response.body).result;
+  assert.equal(result.isError, true);
+  assert.match(result.structuredContent.error, /job store unavailable/i);
+});
+
 // ── Transport hygiene: OPTIONS preflight, GET, unknown notifications ──
 
 test("MCP transport: OPTIONS preflight, GET 405 with Allow, tolerant notifications", async () => {
