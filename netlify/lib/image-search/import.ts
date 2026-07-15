@@ -8,6 +8,13 @@ import type { ImageLicenseInfo } from "./types.js";
 
 export type SupportedImageFormat = "png" | "jpeg" | "webp";
 
+// Every fetch in the import pipeline used to have no timeout at all: a hung remote host
+// would stall the calling function (sync tool call or background worker) until the
+// platform's own execution limit killed it. Give every fetch a sane upper bound by default;
+// callers with an actual execution-budget figure (e.g. the synchronous import_image_from_url
+// tool) pass a tighter one explicitly.
+export const DEFAULT_IMPORT_FETCH_TIMEOUT_MS = Number(process.env.IMAGE_IMPORT_FETCH_TIMEOUT_MS) > 0 ? Number(process.env.IMAGE_IMPORT_FETCH_TIMEOUT_MS) : 20_000;
+
 export function assertSafeImportUrl(raw: string): URL {
   const url = new URL(raw);
   if (url.protocol !== "https:") throw new Error(`import URL must use https: ${raw}`);
@@ -33,11 +40,19 @@ export function isHtmlBytes(bytes: Buffer): boolean {
   return head.startsWith("<!doctype") || head.startsWith("<html") || head.includes("<html") || head.startsWith("<head") || head.startsWith("<body");
 }
 
-export async function fetchImportBytes(imageUrl: string, maxImportBytes: number, fetchImpl: typeof fetch): Promise<Buffer> {
+export async function fetchImportBytes(imageUrl: string, maxImportBytes: number, fetchImpl: typeof fetch, timeoutMs = DEFAULT_IMPORT_FETCH_TIMEOUT_MS): Promise<Buffer> {
   const fixtureBytes = imageSearchTestFixtures()?.bytes?.[imageUrl];
   if (fixtureBytes !== undefined) return Buffer.from(fixtureBytes, "base64");
   assertSafeImportUrl(imageUrl);
-  const response = await fetchImpl(imageUrl);
+  let response: Awaited<ReturnType<typeof fetch>>;
+  try {
+    response = await fetchImpl(imageUrl, { signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Error(`image download timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  }
   if (!response.ok) throw new Error(`image download failed with status ${response.status}`);
   const declaredLength = Number(response.headers?.get?.("content-length") ?? 0);
   // Allow oversized originals up to 4x the cap: optimization re-compresses them down below.
@@ -173,6 +188,9 @@ export interface ImportImageFromUrlInput {
 
 export interface ImportImageFromUrlOptions {
   fetchImpl?: typeof fetch;
+  /** Caps the download fetch; pass the caller's remaining execution budget so a slow host
+   * can't run the call past the platform's execution limit. Defaults to DEFAULT_IMPORT_FETCH_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 function filenameFromUrl(urlOrPath: string, format: SupportedImageFormat): string {
@@ -229,7 +247,7 @@ export async function saveImportedImageArtifact(input: SaveImportedImageInput, r
 export async function importImageArtifactFromUrl(input: ImportImageFromUrlInput, options: ImportImageFromUrlOptions = {}): Promise<ArtifactReference> {
   const maxBytes = Math.min(input.maxBytes ?? MAX_IMAGE_OUTPUT_BYTES, MAX_IMAGE_OUTPUT_BYTES);
   const fetchImpl = options.fetchImpl ?? fetch;
-  const rawBytes = await fetchImportBytes(input.url, maxBytes, fetchImpl);
+  const rawBytes = await fetchImportBytes(input.url, maxBytes, fetchImpl, options.timeoutMs);
   if (isZipBytes(rawBytes) || isHtmlBytes(rawBytes)) {
     throw new Error("URL is a zip archive or folder page; use import_images_from_url for batch imports");
   }

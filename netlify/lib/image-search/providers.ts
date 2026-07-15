@@ -29,9 +29,26 @@ function fixtureResults(provider: ImageSearchProvider, ctx: ImageSearchProviderC
   } as ImageSearchResult));
 }
 
+// Provider search calls run inside the background image-search worker; unbounded before this,
+// a hung provider host could stall the whole job until the platform killed the function mid-run.
+// Read fresh (not cached at module load) so it stays overridable per-process in tests.
+function providerFetchTimeoutMs(): number {
+  const raw = Number(process.env.IMAGE_SEARCH_PROVIDER_TIMEOUT_MS);
+  return raw > 0 ? raw : 20_000;
+}
+
 async function fetchProviderJson(ctx: ImageSearchProviderContext, url: string, headers: Record<string, string> = {}): Promise<unknown> {
   const fetchImpl = ctx.fetchImpl ?? fetch;
-  const response = await fetchImpl(url, { headers });
+  const timeoutMs = providerFetchTimeoutMs();
+  let response: Awaited<ReturnType<typeof fetch>>;
+  try {
+    response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+      throw new Error(`provider request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  }
   if (!response.ok) throw new Error(`provider request failed with status ${response.status}`);
   return await response.json();
 }

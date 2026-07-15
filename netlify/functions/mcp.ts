@@ -6,6 +6,7 @@ import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMc
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
+import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -291,7 +292,7 @@ const baseTools = [
   },
   {
     name: "import_image_from_url",
-    description: "Import a single image from an https URL into the project artifact Blob store, bank it as a url_import candidate, and synchronously return its ArtifactReference plus candidateId. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg. For zip archives, folder pages, or multiple URLs use import_images_from_url. Never returns image bytes; rights clearance for direct imports is the caller's responsibility.",
+    description: "Import a single image from an https URL into the project artifact Blob store, bank it as a url_import candidate, and synchronously return its ArtifactReference plus candidateId. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg. For zip archives, folder pages, or multiple URLs use import_images_from_url. Never returns image bytes; rights clearance for direct imports is the caller's responsibility. The download/convert is bounded to this call's remaining serverless execution budget: if it can't finish in time, this returns a structured error (never a dropped connection) — retry the call, or use import_images_from_url, which runs as a background job with its own polling.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -506,15 +507,15 @@ function toolContent(structuredContent: unknown) {
   return { content: [{ type: "text", text: JSON.stringify(structuredContent) }], structuredContent };
 }
 
-async function callTool(name: string | undefined, args: unknown, event: FunctionEvent) {
+async function callTool(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {
   // A per-request storage grant (the `storage` argument) supplies the client's Blob
   // credentials; run the whole tool within it so every downstream store call picks it up.
   const extracted = extractStorageGrant(args);
   if (extracted.error) return { isError: true, ...toolContent({ error: extracted.error }) };
-  return runWithStorageGrant(extracted.grant, () => callToolInner(name, args, event));
+  return runWithStorageGrant(extracted.grant, () => callToolInner(name, args, event, ctx));
 }
 
-async function callToolInner(name: string | undefined, args: unknown, event: FunctionEvent) {
+async function callToolInner(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {
   switch (name as ToolName) {
     case "create_agent_artifact_job": {
       const result = await createAgentArtifactJob(args as CreateAgentArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
@@ -579,7 +580,7 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
     case "import_image_from_url": {
-      const result = await importImageFromUrl(args);
+      const result = await importImageFromUrl(args, { budgetMs: ctx.budgetMs });
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
@@ -603,7 +604,8 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
   }
 }
 
-export async function handler(event: FunctionEvent) {
+export async function handler(event: FunctionEvent, context?: NetlifyFunctionContext) {
+  const requestStartedAt = Date.now();
   const instance = recordInvocation();
 
   if (event.httpMethod === "OPTIONS") return emptyResponse(204);
@@ -676,7 +678,8 @@ export async function handler(event: FunctionEvent) {
   if (request.method === "tools/call") {
     const params = request.params ?? {};
     try {
-      const result = await callTool(typeof params.name === "string" ? params.name : undefined, params.arguments ?? {}, event);
+      const budgetMs = remainingBudgetMs(context, requestStartedAt);
+      const result = await callTool(typeof params.name === "string" ? params.name : undefined, params.arguments ?? {}, event, { budgetMs });
       if (!result) return rpcError(request.id, -32602, "Unknown tool", { tool: params.name });
       return rpcResult(request.id, result);
     } catch (error) {
