@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { jobBlobStore, resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
+import { jobBlobStore, resetMemoryBlobStores, setMemoryBlobStoreSet } from "../netlify/lib/blob-store.js";
 import { MCP_SESSION_STORE, createMcpSession, readMcpSession } from "../netlify/lib/mcp-session.js";
 import { handler as mcpHandler } from "../netlify/functions/mcp.js";
 
@@ -186,6 +186,22 @@ test("MCP connector key is accepted as a path suffix in every routing shape", as
   // The bare endpoint path must never be mistaken for a key.
   const bare = await mcpHandler({ httpMethod: "POST", headers: {}, path: "/.netlify/functions/mcp", body });
   assert.equal(bare.statusCode, 401);
+});
+
+// ── Robustness: session store unavailable (e.g. Blobs 401) must not break connect ──
+
+test("MCP initialize degrades to a stateless session when the session store fails", async () => {
+  setMemoryBlobStoreSet(MCP_SESSION_STORE, async () => { throw new Error("Netlify Blobs has generated an internal error (401 status code)"); });
+
+  const { response, body } = await rpc("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "curl" } });
+  assert.equal(response.statusCode, 200, "initialize must not 502 when session persistence fails");
+  assert.equal(response.headers["mcp-session-id"], undefined, "no session id is issued in stateless fallback");
+  assert.equal(body.result.protocolVersion, "2025-06-18");
+
+  // The connector can still operate statelessly.
+  const listed = await rpc("tools/list");
+  assert.equal(listed.response.statusCode, 200);
+  assert.ok(Array.isArray(listed.body.result.tools));
 });
 
 // ── Transport hygiene: OPTIONS preflight, GET, unknown notifications ──
