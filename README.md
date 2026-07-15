@@ -190,6 +190,44 @@ Optional provider credentials (providers without credentials are skipped, never 
 - `GOOGLE_CSE_KEY` + `GOOGLE_CSE_CX` (endpoint override: `GOOGLE_CSE_API_URL`)
 - `OPENVERSE_API_URL` (no key required; override only)
 
+### Storage model: per-request grants (pdf-tool holds no credentials)
+
+pdf-tool is stateless compute. Instead of carrying its own Blob credentials, it accepts a
+short-lived **storage grant** on every storage-touching tool call and uses it to read/write
+the client's Netlify Blob stores — including its own job records. Agents fetch a grant from
+the client (e.g. Dr-Lurie's `get_pdf_tool_storage_grant`) and forward it as the `storage`
+argument:
+
+```json
+{
+  "storage": {
+    "grantType": "netlify-pat",
+    "projectId": "dr-lurie",
+    "siteId": "<client netlify site id>",
+    "token": "<client blobs token>",
+    "expiresAt": "<ISO, ~1h out>",
+    "stores": {
+      "artifacts": "artifacts", "artifactIndex": "artifact-index",
+      "templates": "pdf-templates", "imageSearch": "image-search",
+      "renderData": "pdf-render-data", "jobs": "pdf-tool-jobs"
+    }
+  }
+}
+```
+
+- The `storage` grant is advertised on every tool's input schema. The parser is tolerant
+  (`siteId`/`siteID`, missing `stores` keys fall back to canonical names) and rejects an
+  expired grant or a grant missing `siteId`/`token` with a precise error.
+- The token is treated as radioactive: it travels only in the request (tool args → the
+  background worker's POST body → worker local scope), is **never** written into a job
+  record, and is never logged or echoed.
+- Job records move to the client's `jobs` store (`pdf-tool-jobs`) under the grant, so
+  `get_*_job_status` must also carry the grant to read them back.
+- **Migration fallback:** a call with no `storage` grant falls back to the env credentials
+  below. Once all agents pass grants, delete `CLIENT_*` (and `PDF_TOOL_*`) and pdf-tool
+  needs no Blob credentials at all. MCP sessions and OAuth remain stateless/degrading and
+  never require a grant.
+
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.

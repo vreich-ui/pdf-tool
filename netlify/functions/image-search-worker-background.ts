@@ -2,6 +2,7 @@ import { getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError } from 
 import { readImageSearchJob, updateImageSearchJob } from "../lib/image-search/jobs.js";
 import { runImageSearch } from "../lib/image-search/orchestrator.js";
 import { runUrlImportBatch } from "../lib/image-search/url-import.js";
+import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 
 export const config = { name: "image-search-worker-background" };
 
@@ -15,9 +16,15 @@ export async function handler(event: FunctionEvent) {
   if (event.httpMethod !== "POST") return jsonResponse(405, { error: "Method not allowed" });
   if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
 
-  const { projectId, jobId } = parseJsonBody<{ projectId?: string; jobId?: string }>(event.body) ?? {};
+  const { projectId, jobId, storage } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown }>(event.body) ?? {};
   if (!projectId || !jobId) return jsonResponse(400, { error: "projectId and jobId are required" });
 
+  const extracted = extractStorageGrant({ storage });
+  if (extracted.error) return jsonResponse(400, { error: extracted.error });
+  return runWithStorageGrant(extracted.grant, () => runImageSearchWorker(projectId, jobId));
+}
+
+async function runImageSearchWorker(projectId: string, jobId: string) {
   const job = await readImageSearchJob(projectId, jobId);
   if (!job) return jsonResponse(404, { error: "Image search job not found" });
   if (job.status === "complete" || job.status === "running") {

@@ -4,12 +4,40 @@ import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImag
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
+import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
 type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
-const tools = [
+// Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
+// to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds none.
+const STORAGE_GRANT_SCHEMA = {
+  type: "object",
+  additionalProperties: true,
+  description: "Client storage grant: the Netlify siteId + Blobs token pdf-tool uses to read/write the client's Blob stores for this request. Fetch a fresh grant per request (short-lived).",
+  properties: {
+    grantType: { type: "string" },
+    projectId: { type: "string" },
+    siteId: { type: "string" },
+    token: { type: "string" },
+    expiresAt: { type: "string" },
+    stores: {
+      type: "object",
+      additionalProperties: true,
+      properties: {
+        artifacts: { type: "string" },
+        artifactIndex: { type: "string" },
+        templates: { type: "string" },
+        imageSearch: { type: "string" },
+        renderData: { type: "string" },
+        jobs: { type: "string" }
+      }
+    }
+  }
+} as const;
+
+const baseTools = [
   {
     name: "create_agent_artifact_job",
     description: "Create a server-side artifact generation job. Returns metadata and polling instructions only; never returns image/PDF bytes.",
@@ -340,6 +368,15 @@ const tools = [
   }
 ] as const;
 
+// Advertise the storage grant on every tool without repeating it in 16 literals.
+const tools = baseTools.map((tool) => ({
+  ...tool,
+  inputSchema: {
+    ...tool.inputSchema,
+    properties: { ...(tool.inputSchema as { properties?: Record<string, unknown> }).properties, storage: STORAGE_GRANT_SCHEMA }
+  }
+}));
+
 function requestBaseUrl(event: FunctionEvent): string | undefined {
   if (process.env.DEPLOY_PRIME_URL) return process.env.DEPLOY_PRIME_URL;
   if (process.env.URL) return process.env.URL;
@@ -469,6 +506,14 @@ function toolContent(structuredContent: unknown) {
 }
 
 async function callTool(name: string | undefined, args: unknown, event: FunctionEvent) {
+  // A per-request storage grant (the `storage` argument) supplies the client's Blob
+  // credentials; run the whole tool within it so every downstream store call picks it up.
+  const extracted = extractStorageGrant(args);
+  if (extracted.error) return { isError: true, ...toolContent({ error: extracted.error }) };
+  return runWithStorageGrant(extracted.grant, () => callToolInner(name, args, event));
+}
+
+async function callToolInner(name: string | undefined, args: unknown, event: FunctionEvent) {
   switch (name as ToolName) {
     case "create_agent_artifact_job": {
       const result = await createAgentArtifactJob(args as CreateAgentArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });

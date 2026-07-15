@@ -1,3 +1,4 @@
+import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
 import { getAgentArtifactByFilename } from "../lib/agent-artifact-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
@@ -11,7 +12,9 @@ function input(event: FunctionEvent): { projectId?: string; requestId?: string; 
 export async function handler(event: FunctionEvent) {
   if (!["GET", "POST"].includes(event.httpMethod)) return jsonResponse(405, { error: "Method not allowed" });
   if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
-  const result = await getAgentArtifactByFilename(input(event) as { projectId: string; requestId: string; filename: string });
+  const __grant = extractStorageGrantFromBody(event.body);
+  if (__grant.error) return jsonResponse(400, { error: __grant.error });
+  const result = await runWithStorageGrant(__grant.grant, () => getAgentArtifactByFilename(input(event) as { projectId: string; requestId: string; filename: string }));
   const { statusCode, ok: _ok, ...responseBody } = result;
   return jsonResponse(statusCode, responseBody);
 }

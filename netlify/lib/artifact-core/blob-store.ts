@@ -1,5 +1,7 @@
 const memoryStores = new Map<string, Map<string, unknown>>();
 const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }> = [];
+import { currentStorageGrant } from "../storage-grant.js";
+
 const memoryListOverrides = new Map<string, ProjectBlobStore["list"]>();
 const memoryGetOverrides = new Map<string, ProjectBlobStore["get"]>();
 const memorySetOverrides = new Map<string, (key: string, value: unknown) => Promise<void>>();
@@ -88,20 +90,25 @@ export interface ProjectBlobStoreOptions {
 }
 
 export async function projectBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID: options.siteID, token: options.token });
+  // A per-request storage grant supplies credentials when the caller passes none, so
+  // pdf-tool needs no credentials of its own. Explicit options (env fallback) win during
+  // migration; once env creds are removed the grant is the only source.
+  const grant = currentStorageGrant();
+  const siteID = options.siteID ?? grant?.siteID;
+  const token = options.token ?? grant?.token;
+  projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID, token });
   if (process.env.AGENT_ARTIFACT_MEMORY_BLOBS === "1") {
     return memoryStore(name);
   }
   const { getStore } = await import("@netlify/blobs");
   const getProjectStore = getStore as unknown as (input: string | { name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }) => ProjectBlobStore;
-  if (options.consistency || options.siteID || options.token) {
-    // Only include siteID/token when actually present. Passing a partial manual credential
-    // (e.g. siteID with no token) makes @netlify/blobs authenticate manually and 401 instead
-    // of falling back to the deployed site's built-in Blobs context.
+  if (options.consistency || siteID || token) {
+    // Only include siteID/token when both present. A partial manual credential makes
+    // @netlify/blobs authenticate manually and 401 instead of falling back to same-site.
     return getProjectStore({
       name,
       ...(options.consistency ? { consistency: options.consistency } : {}),
-      ...(options.siteID && options.token ? { siteID: options.siteID, token: options.token } : {})
+      ...(siteID && token ? { siteID, token } : {})
     });
   }
   return getProjectStore(name);
@@ -115,4 +122,18 @@ export async function jobBlobStore(name: string, options: ProjectBlobStoreOption
   const token = process.env.PDF_TOOL_BLOBS_TOKEN;
   const manualCredentials = siteID && token ? { siteID, token } : {};
   return projectBlobStore(name, { ...options, ...manualCredentials });
+}
+
+/**
+ * Store for artifact/image-search job records. Under a storage grant, records live in the
+ * client's jobs store (grant.stores.jobs) so pdf-tool keeps no state of its own; without a
+ * grant it falls back to the pdf-tool job store (env/same-site). Session and OAuth state do
+ * NOT use this — they intentionally stay on pdf-tool's own store and degrade gracefully.
+ */
+export async function jobRecordBlobStore(fallbackName: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
+  const grant = currentStorageGrant();
+  if (grant) {
+    return projectBlobStore(grant.stores.jobs, { ...options, siteID: grant.siteID, token: grant.token });
+  }
+  return jobBlobStore(fallbackName, options);
 }
