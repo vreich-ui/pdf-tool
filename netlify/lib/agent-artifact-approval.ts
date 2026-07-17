@@ -24,20 +24,27 @@ export const RESUME_ENDPOINT = "/.netlify/functions/resume-agent-artifact-job";
 export const RESUME_TOOL = "resume_agent_artifact_job";
 const RESUME_TOKEN_VERSION = "v1";
 const RESUME_TOKEN_TYPE = "artifact-resume";
-const RESUME_TOKEN_TTL_S = 24 * 60 * 60;
+// Operator approval is human-in-the-loop and can legitimately take days (a weekend, a holiday),
+// so the resume token is long-lived; get_agent_artifact_job_status also re-mints a fresh token
+// on every poll (refreshedBlockedState) so a still-blocked job never becomes unresumable.
+const RESUME_TOKEN_TTL_S = 30 * 24 * 60 * 60;
 const DEFAULT_RETRY_AFTER_MS = 15_000;
 
 // ── Operator-approval secret (the human gate) ──
 
-/** The secret an operator supplies to approve a blocked job. Shares the OAuth owner secret so
- * one human credential governs both "approve this connector" and "approve this artifact". */
+/** The secret an operator supplies to approve a blocked job. It intentionally shares
+ * MCP_OAUTH_PASSWORD (the OAuth consent-screen owner password) so one human credential governs
+ * both "approve this connector" and "approve this artifact". It must NOT fall back to
+ * MCP_CONNECTOR_KEY: that key is the URL credential a connector-key MCP client presents to
+ * authenticate, so a caller already holds it and could self-approve its own blocked job,
+ * defeating the human gate. */
 export function approvalOperatorSecret(): string | undefined {
-  return process.env.ARTIFACT_APPROVAL_SECRET || process.env.MCP_OAUTH_PASSWORD || process.env.MCP_CONNECTOR_KEY || undefined;
+  return process.env.ARTIFACT_APPROVAL_SECRET || process.env.MCP_OAUTH_PASSWORD || undefined;
 }
 
 export function verifyOperatorApproval(provided: string | undefined): boolean {
   const secret = approvalOperatorSecret();
-  if (!secret || !provided) return false;
+  if (!secret || typeof provided !== "string" || !provided) return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(secret);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -167,6 +174,15 @@ export function buildBlockedState(job: Pick<ArtifactJobRecord, "projectId" | "re
   };
 }
 
+/** Re-mints the resume token in a persisted blocked state so a long-blocked job stays
+ * resumable however late the operator approves. Called on every status read; nothing is
+ * persisted (the token is stateless), so the stored record is untouched. */
+export function refreshedBlockedState(blocked: BlockedArtifactState): BlockedArtifactState {
+  const resumeToken = signResumeToken({ projectId: blocked.projectId, jobId: blocked.jobId, requestId: blocked.requestId });
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  return { ...blocked, resume: { ...blocked.resume, input: { ...blocked.resume.input, resumeToken }, expiresAtISO: new Date((nowSeconds + RESUME_TOKEN_TTL_S) * 1000).toISOString() } };
+}
+
 // ── Resume ──
 
 export interface ResumeArtifactJobInput {
@@ -216,12 +232,15 @@ export async function resumeArtifactJob(input: ResumeArtifactJobInput, options: 
     return { ok: false, statusCode: 409, error: `Job is not blocked (status: ${job.status})` };
   }
 
+  const originalBlocked = job.blocked;
   const approvedJob = await updateArtifactJob(job, { status: "pending", blocked: undefined, error: undefined });
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, approvedJob.projectId, approvedJob.jobId);
   } catch (error) {
-    const failed = await updateArtifactJob(approvedJob, { status: "failed", error: safeError(error) });
-    return { ok: false, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
+    // A transient worker-trigger failure must not consume the operator's one approval: revert
+    // the job to blocked (with its original resume metadata) so the operator can simply retry.
+    const reverted = await updateArtifactJob(approvedJob, { status: "blocked", blocked: originalBlocked, error: safeError(error) });
+    return { ok: false, statusCode: 502, jobId: reverted.jobId, status: reverted.status, projectId: reverted.projectId, requestId: reverted.requestId, error: `Worker trigger failed; job remains blocked — retry resume: ${safeError(error)}` };
   }
   return {
     ok: true,

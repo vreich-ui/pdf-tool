@@ -34,10 +34,14 @@ export async function handler(event: FunctionEvent) {
     // Operator-approval gate: hold the job in a resumable blocked state instead of running it.
     const requirement = evaluateApprovalRequirement(parsed.data);
     if (requirement.required) {
-      const jobId = randomUUID();
-      const blocked = buildBlockedState({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, jobId, slot: parsed.data.slot }, requirement);
-      const blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId });
-      return jsonResponse(202, { projectId: blockedJob.projectId, requestId: blockedJob.requestId, jobId: blockedJob.jobId, artifactKind: blockedJob.artifactKind, status: blockedJob.status, slot: blockedJob.slot, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, requirements: blockedJob.requirements, adapterVersion: blockedJob.adapterVersion, workflowPatchStatus: "skipped_by_design", blocked });
+      try {
+        const jobId = randomUUID();
+        const blocked = buildBlockedState({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, jobId, slot: parsed.data.slot }, requirement);
+        const blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId });
+        return jsonResponse(202, { projectId: blockedJob.projectId, requestId: blockedJob.requestId, jobId: blockedJob.jobId, artifactKind: blockedJob.artifactKind, status: blockedJob.status, slot: blockedJob.slot, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, requirements: blockedJob.requirements, adapterVersion: blockedJob.adapterVersion, workflowPatchStatus: "skipped_by_design", blocked });
+      } catch (error) {
+        return jsonResponse(503, { error: `Artifact job store unavailable: ${safeError(error)}` });
+      }
     }
     const job = await createArtifactJob(parsed.data);
     try {
