@@ -38,7 +38,7 @@ Direct integrations can call these HTTP endpoints instead of moving binary paylo
 
 - `POST /.netlify/functions/create-agent-artifact-job`
   - MCP-facing `create_agent_artifact_job` endpoint.
-  - Accepts `projectId`, `requestId`, `artifactKind`, `prompt`, `filename`, optional safe `slot`, `tags`, `label`, `agentName`, `model`, `templateId`, `templateRef`, `data`, `assets`, and `requirements`.
+  - Accepts `projectId`, `requestId`, `artifactKind`, `prompt`, `filename`, optional safe `slot`, `tags`, `label`, `agentName`, `model`, `templateId`, `templateRef`, `data`, `assets`, `requirements`, and optional `requireApproval` / `approvalAction` (see "Operator approval" below).
   - Creates a job, triggers the Netlify Agent SDK worker, and returns only job metadata plus polling instructions.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 - `GET|POST /.netlify/functions/get-agent-artifact-job-status`
@@ -55,6 +55,20 @@ Direct integrations can call these HTTP endpoints instead of moving binary paylo
   - MCP-facing facade for `get_agent_artifact_by_filename`.
   - Requires `projectId`, `requestId`, and `filename`.
   - Never returns image or PDF bytes.
+  - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
+- `POST /.netlify/functions/verify-agent-artifact`
+  - MCP-facing `verify_agent_artifact` endpoint (see "Artifact verification" below).
+  - Accepts `projectId`, `requestId`, a claimed `artifactReference` (or `blobKey` + `sha256`),
+    and an optional `materializationProof`; forward the `storage` grant for the storage-backed
+    checks.
+  - Returns a verdict (`verified`, per-check results, canonical safe `artifactReference`, a
+    fresh `materializationProof`). Never returns bytes.
+  - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
+- `POST /.netlify/functions/resume-agent-artifact-job`
+  - MCP-facing `resume_agent_artifact_job` endpoint (see "Operator approval" below).
+  - Accepts `projectId`, `jobId`, the `resumeToken` from the blocked state, and an operator
+    `approvalToken`; forward the `storage` grant so the blocked job record can be read/updated.
+  - On success the job returns to `pending` and the worker is triggered.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
 
 Artifact destinations are explicit metadata contracts containing `projectId`, `requestId`, `artifactKind`, optional `slot`, and `filename`. Generic pdf-tool responses wrap the project-native artifact reference as `artifactReference` with `projectId`, `requestId`, `jobId`, `artifactKind`, and `workflowPatchStatus`; they do not replace project-specific `ArtifactReference` shapes.
@@ -119,7 +133,7 @@ A fourth path — the revocable **URL connector key** `https://pdf-x.netlify.app
 that can only put a secret in the URL. An unauthenticated MCP request returns 401 with a
 `WWW-Authenticate: Bearer resource_metadata="…"` header so OAuth-capable clients auto-start
 discovery.
-  - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, and `get_agent_artifact_by_filename`.
+  - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, `get_agent_artifact_by_filename`, `verify_agent_artifact`, and `resume_agent_artifact_job`.
   - Tool calls dispatch to the existing shared artifact facade logic in `netlify/lib/agent-artifact-mcp.ts`; artifact generation, OpenAI usage, Blob storage, and project-native `ArtifactReference` shapes are unchanged.
   - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
   - Completed job status returns the project-native `artifactReference` exactly as the existing status facade returns it.
@@ -145,6 +159,81 @@ Existing internal endpoints remain available:
 - `POST /.netlify/functions/agent-artifact-worker-background`
   - Internal Netlify background worker entrypoint that runs the Agent SDK workflow and saves the artifact.
   - Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
+
+### Artifact verification
+
+pdf-tool is the only writer of the client's artifact Blob stores and indexes (it writes under
+the per-request storage grant), and it lays artifacts out deterministically as
+`{artifactKind}/{requestId}/{sha256}{ext}`. That lets the CMS *prove* that an
+`ArtifactReference` it received (in workflow JSON, from an agent) was genuinely materialized by
+pdf-tool for the current request — rather than hand-authored, copied from another request, or
+fabricated — before it trusts or publishes the artifact.
+
+Every completed job status and every `get_agent_artifact_by_slot` / `get_agent_artifact_by_filename`
+lookup returns a `materializationProof` alongside the `ArtifactReference`: a self-verifying
+HMAC envelope (only pdf-tool holds the signing secret) that binds `{projectId, requestId,
+blobKey, sha256, sizeBytes, contentType, createdAtISO}` together. Store it next to the
+reference.
+
+To verify, call `verify_agent_artifact` (MCP) or `POST /.netlify/functions/verify-agent-artifact`
+with `projectId`, `requestId`, the claimed `artifactReference` (or `blobKey` + `sha256`), and —
+if you have it — the `materializationProof`. Forward the `storage` grant so pdf-tool can also
+cross-check the client store. The verdict runs five independent checks:
+
+- `safety` — the blobKey/reference is not a remote URL, data URI, repo path, or traversal.
+- `blobKeyBinding` — the blobKey decodes (via the project adapter's own layout) to *this*
+  request id and *this* sha256. Rejects hand-authored keys and copied references.
+- `attestation` — a supplied `materializationProof` is valid and binds the same tuple
+  (conclusive; a supplied-but-wrong proof is a hard failure).
+- `persisted` — pdf-tool's own request-scoped index entry exists and points at the same
+  blobKey (needs storage access).
+- `bytesHash` — the bytes stored at the blobKey re-hash to the claimed sha256 (needs storage
+  access).
+
+`verified: true` requires `safety` + `blobKeyBinding` plus at least one positive authenticity
+signal (a valid attestation, a matching persisted index entry, or matching re-hashed bytes);
+any *contradicted* check fails the whole verdict. The response contains only safe metadata —
+never storage grants, credentials, bytes, repo paths, remote URLs, or data URIs.
+
+### Operator approval (resumable blocked jobs)
+
+Some artifact jobs must not run until a human operator approves them. A caller can request this
+per job with `requireApproval: true` (optionally `approvalAction: "…"`), or an operator can
+require it by policy with `AGENT_ARTIFACT_APPROVAL_REQUIRED` (`all`/`*`, or a comma list of
+artifact kinds/operations, e.g. `pdf,edit`).
+
+When approval is required, `create_agent_artifact_job` does **not** run the job. It persists the
+job in a resumable `blocked` state and returns it, including everything needed to resume:
+
+```json
+{
+  "status": "blocked",
+  "blocked": {
+    "state": "blocked",
+    "requestId": "<request id>",
+    "slot": "<artifact slot>",
+    "requestedAction": "generate image artifact hero.png",
+    "approval": { "required": true, "status": "pending", "approvalId": "…" },
+    "resume": {
+      "tool": "resume_agent_artifact_job",
+      "endpoint": "/.netlify/functions/resume-agent-artifact-job",
+      "method": "POST",
+      "input": { "projectId": "…", "jobId": "…", "resumeToken": "<signed, job-scoped>" },
+      "retryAfterMs": 15000,
+      "expiresAtISO": "<ISO>"
+    }
+  }
+}
+```
+
+`get_agent_artifact_job_status` keeps surfacing the `blocked` payload until the job is resumed.
+To resume, an operator calls `resume_agent_artifact_job` (MCP) or
+`POST /.netlify/functions/resume-agent-artifact-job` with the `resumeToken` (a signed,
+job-scoped envelope that can only resume that job) **and** an `approvalToken` — the operator
+secret (`ARTIFACT_APPROVAL_SECRET`, falling back to `MCP_OAUTH_PASSWORD` / `MCP_CONNECTOR_KEY`,
+the same human gate as the OAuth consent screen). On success the job returns to `pending`, the
+worker is triggered, and generation proceeds normally. The operator secret is never persisted
+in the job record and never echoed.
 
 ### Image search (least-cost sourcing)
 
@@ -231,6 +320,9 @@ argument:
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
+- `ARTIFACT_ATTESTATION_SECRET` (optional): HMAC secret for signing artifact materialization proofs (`verify_agent_artifact`) and job resume tokens. Defaults to `MCP_OAUTH_SIGNING_SECRET`, then `AGENT_RUN_TOKEN` (rotating that invalidates outstanding proofs/resume tokens).
+- `ARTIFACT_APPROVAL_SECRET` (optional): operator secret an approver supplies to resume a blocked artifact job. Falls back to `MCP_OAUTH_PASSWORD`, then `MCP_CONNECTOR_KEY`; if none is set, blocked jobs cannot be resumed.
+- `AGENT_ARTIFACT_APPROVAL_REQUIRED` (optional): approval policy. `all`/`*` gates every job; otherwise a comma list of artifact kinds (`image`/`pdf`/`binary`) or operations (`generate`/`edit`) to gate (e.g. `pdf,edit`). Unset = only jobs that pass `requireApproval: true` are gated.
 - `MCP_OAUTH_PASSWORD` (optional): owner secret typed on the OAuth consent screen to approve a claude.ai connector. Falls back to `MCP_CONNECTOR_KEY`; if neither is set, OAuth authorization is disabled.
 - `MCP_CONNECTOR_KEY` (optional): URL connector key enabling `https://.../mcp/<key>` access for clients that put a secret in the URL; also a fallback owner secret for the OAuth consent screen. Unset = URL-key auth disabled.
 - `MCP_OAUTH_SIGNING_SECRET` (optional): HMAC secret for signing OAuth access/refresh tokens. Defaults to `AGENT_RUN_TOKEN` (rotating that invalidates issued tokens).

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { validateArtifactJobRequest, createArtifactJob, getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError, updateArtifactJob } from "../lib/agent-artifact-jobs.js";
 import { artifactWorkerBaseUrl, triggerWorker } from "../lib/agent-artifact-worker-trigger.js";
 import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
+import { buildBlockedState, evaluateApprovalRequirement } from "../lib/agent-artifact-approval.js";
 
 type FunctionEvent = {
   httpMethod: string;
@@ -29,6 +31,14 @@ export async function handler(event: FunctionEvent) {
   if (grant.error) return jsonResponse(400, { error: grant.error });
 
   return runWithStorageGrant(grant.grant, async () => {
+    // Operator-approval gate: hold the job in a resumable blocked state instead of running it.
+    const requirement = evaluateApprovalRequirement(parsed.data);
+    if (requirement.required) {
+      const jobId = randomUUID();
+      const blocked = buildBlockedState({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, jobId, slot: parsed.data.slot }, requirement);
+      const blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId });
+      return jsonResponse(202, { projectId: blockedJob.projectId, requestId: blockedJob.requestId, jobId: blockedJob.jobId, artifactKind: blockedJob.artifactKind, status: blockedJob.status, slot: blockedJob.slot, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, requirements: blockedJob.requirements, adapterVersion: blockedJob.adapterVersion, workflowPatchStatus: "skipped_by_design", blocked });
+    }
     const job = await createArtifactJob(parsed.data);
     try {
       await triggerWorker(artifactWorkerBaseUrl(event), process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);

@@ -46,6 +46,11 @@ async function runWorker(projectId: string, jobId: string) {
   if (job.status === "complete" || job.status === "running") {
     return jsonResponse(200, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", artifactReference: job.artifactReference ?? job.artifact });
   }
+  // Defense in depth: a job held for operator approval must never be materialized by a direct
+  // worker invocation. The approval gate flips it to `pending` (via resume) before triggering.
+  if (job.status === "blocked") {
+    return jsonResponse(409, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, status: job.status, error: "Job is blocked awaiting operator approval", blocked: job.blocked });
+  }
 
   let runningJob = job;
   try {
