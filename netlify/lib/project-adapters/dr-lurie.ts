@@ -1,12 +1,27 @@
 import { projectBlobStore } from "../blob-store.js";
-import { sha256Hex, type ArtifactReference, type SaveArtifactBytesInput } from "../artifact-core/index.js";
+import { sha256Hex, type ArtifactKind, type ArtifactReference, type SaveArtifactBytesInput } from "../artifact-core/index.js";
 import { writeArtifactReferenceIndexes } from "../artifact-core/artifact-index.js";
-import type { ProjectArtifactAdapter } from "./types.js";
+import type { ArtifactBlobKeyParts, ProjectArtifactAdapter } from "./types.js";
 
 function safePathSegment(value: string): string {
   const safe = value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   if (!safe) throw new Error("Invalid empty path segment");
   return safe;
+}
+
+const DR_LURIE_ARTIFACT_KINDS: ArtifactKind[] = ["image", "pdf", "binary"];
+
+/** Dr. Lurie artifact keys are `{kind}/{safeRequestId}/{sha256}{ext}` (the same for generated
+ * and edited artifacts — no `/edits/` segment). Parsing one back proves the blobKey was
+ * produced by pdf-tool's deterministic layout rather than hand-authored. */
+function parseDrLurieBlobKey(blobKey: string): ArtifactBlobKeyParts | null {
+  if (typeof blobKey !== "string") return null;
+  const match = blobKey.match(/^([a-z]+)\/(.+)\/([a-f0-9]{64})(\.[a-z0-9]+)?$/);
+  if (!match) return null;
+  const [, kind, requestSegment, sha256] = match;
+  if (!requestSegment || requestSegment.includes("/")) return null;
+  const artifactKind = (DR_LURIE_ARTIFACT_KINDS as string[]).includes(kind) ? (kind as ArtifactKind) : undefined;
+  return { artifactKind, requestSegment, sha256 };
 }
 
 function extensionForContentType(contentType: string, filename: string): string {
@@ -47,6 +62,12 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     defaultModel: "gpt-image-1",
     allowedModels: ["gpt-image-1", "test-image-model", "alternate-test-image-model"],
     adapterVersion: "dr-lurie-v1"
+  },
+  parseArtifactBlobKey(blobKey) {
+    return parseDrLurieBlobKey(blobKey);
+  },
+  safeRequestSegment(requestId) {
+    return safePathSegment(requestId);
   },
   async saveArtifactBytes(input) {
     const bytes = Buffer.from(input.bytes);

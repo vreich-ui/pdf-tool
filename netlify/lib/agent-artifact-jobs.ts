@@ -128,6 +128,35 @@ export interface ArtifactJobRequest {
   preservation?: Record<string, unknown>;
   editInstructions?: ImageEditInstructions;
   requirements?: NormalizedArtifactJobRequirements;
+  /** When true (or when project/env policy demands it) the job is held in a resumable
+   * `blocked` state until an operator approves it, instead of running immediately. */
+  requireApproval?: boolean;
+  /** Human-readable description of the action awaiting approval; defaults from kind/operation. */
+  approvalAction?: string;
+}
+
+/** Metadata a blocked job returns so the caller can resume it once an operator approves. */
+export interface ArtifactResumeMetadata {
+  tool: string;
+  endpoint: string;
+  method: string;
+  input: { projectId: string; jobId: string; resumeToken: string };
+  retryAfterMs: number;
+  expiresAtISO?: string;
+}
+
+/** The resumable blocked state returned when operator approval is required. */
+export interface BlockedArtifactState {
+  state: "blocked";
+  reason: string;
+  projectId: string;
+  requestId: string;
+  jobId: string;
+  slot?: string;
+  requestedAction: string;
+  approval: { required: true; status: "pending"; approvalId: string; action: string };
+  resume: ArtifactResumeMetadata;
+  blockedAtISO: string;
 }
 
 
@@ -172,6 +201,8 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       transformInstructions: z.object({}).passthrough().optional(),
       preservation: z.object({}).passthrough().optional(),
       editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
+      requireApproval: z.boolean().optional(),
+      approvalAction: z.string().min(1).optional(),
       requirements: z.object({
         // The kind-dependent ceiling is enforced in normalizeArtifactJobRequirements.
         maxBytes: z.number().int().positive().optional(),
@@ -392,6 +423,8 @@ export const artifactJobRequestSchema = {
     const maskRef = value.maskRef && typeof value.maskRef === "object" && !Array.isArray(value.maskRef) ? value.maskRef as ArtifactReferenceHolder : undefined;
     const rawEditInstructions = value.editInstructions && typeof value.editInstructions === "object" && !Array.isArray(value.editInstructions) ? value.editInstructions as Record<string, unknown> : undefined;
     const editInstructions = rawEditInstructions ? { change: typeof rawEditInstructions.change === "string" ? rawEditInstructions.change : "", preserve: Array.isArray(rawEditInstructions.preserve) ? rawEditInstructions.preserve.filter((item): item is string => typeof item === "string") : [], negativeInstructions: Array.isArray(rawEditInstructions.negativeInstructions) ? rawEditInstructions.negativeInstructions.filter((item): item is string => typeof item === "string") : [] } : undefined;
+    const requireApproval = typeof value.requireApproval === "boolean" ? value.requireApproval : undefined;
+    const approvalAction = typeof value.approvalAction === "string" && value.approvalAction.trim() ? value.approvalAction.trim() : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
     if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
@@ -436,7 +469,7 @@ export const artifactJobRequestSchema = {
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, baseDataRef, currentData, dataPatch, overlayInstructions, transformInstructions, preservation, requirements: requirementsResult.requirements } };
+    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, baseDataRef, currentData, dataPatch, overlayInstructions, transformInstructions, preservation, requirements: requirementsResult.requirements, requireApproval, approvalAction } };
   }
 };
 
@@ -445,13 +478,14 @@ export async function validateArtifactJobRequest(input: unknown): Promise<{ succ
   return await zodSafeParse(input) ?? artifactJobRequestSchema.safeParse(input);
 }
 
-export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed";
+export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed" | "blocked";
 
 export interface ArtifactJobRecord extends ArtifactJobRequest {
   jobId: string;
   status: ArtifactJobStatus;
   artifactReference?: ArtifactReference;
   artifact?: ArtifactReference;
+  blocked?: BlockedArtifactState;
   error?: string;
   renderMetadata?: Record<string, unknown>;
   validationResults?: Record<string, unknown>;
@@ -487,7 +521,7 @@ export function safeError(error: unknown): string {
   return "Artifact generation failed";
 }
 
-export async function createArtifactJob(input: ArtifactJobRequest): Promise<ArtifactJobRecord> {
+export async function createArtifactJob(input: ArtifactJobRequest, overrides: { status?: ArtifactJobStatus; blocked?: BlockedArtifactState; jobId?: string } = {}): Promise<ArtifactJobRecord> {
   const adapter = getProjectAdapter(input.projectId);
   const adapterVersion = adapter?.config.adapterVersion ?? "v1";
   const selectedModel = resolveProjectModel(input.projectId, input.model);
@@ -495,12 +529,13 @@ export async function createArtifactJob(input: ArtifactJobRequest): Promise<Arti
   const job: ArtifactJobRecord = {
     ...input,
     operation: input.operation ?? "generate",
-    jobId: randomUUID(),
-    status: "pending",
+    jobId: overrides.jobId ?? randomUUID(),
+    status: overrides.status ?? "pending",
     createdAt: now,
     updatedAt: now,
     adapterVersion,
-    selectedModel
+    selectedModel,
+    ...(overrides.blocked ? { blocked: overrides.blocked } : {})
   };
   await writeArtifactJob(job);
   return job;
@@ -516,7 +551,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "error" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,

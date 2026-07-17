@@ -108,8 +108,8 @@ async function readArtifactReferenceAtKey(key: string, options: { storeName?: st
   return existing as ArtifactReference;
 }
 
-export async function readArtifactReference(requestId: string, sha256: string): Promise<ArtifactReference | undefined> {
-  return readArtifactReferenceAtKey(requestArtifactReferenceKey(requestId, sha256));
+export async function readArtifactReference(requestId: string, sha256: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ArtifactReference | undefined> {
+  return readArtifactReferenceAtKey(requestArtifactReferenceKey(requestId, sha256), options);
 }
 
 export async function readArtifactReferenceBySlot(projectId: string, requestId: string, slot: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<ArtifactReference | undefined> {

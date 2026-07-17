@@ -1,4 +1,6 @@
-import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
+import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, resumeAgentArtifactJob, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
+import { verifyArtifactMaterialization, type VerifyArtifactInput } from "../lib/agent-artifact-verification.js";
+import type { ResumeArtifactJobInput } from "../lib/agent-artifact-approval.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
@@ -10,7 +12,7 @@ import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
 // Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
 // to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds none.
@@ -187,6 +189,38 @@ const baseTools = [
     name: "get_agent_artifact_by_filename",
     description: "Look up a completed artifact reference by project, request, and filename. Returns metadata only, never binary bytes.",
     inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId", "filename"], properties: { projectId: { type: "string" }, requestId: { type: "string" }, filename: { type: "string" } } }
+  },
+  {
+    name: "verify_agent_artifact",
+    description: "Prove an ArtifactReference was materialized by pdf-tool for the current request. Pass the claimed reference (or its blobKey + sha256), the requestId, and optionally the materializationProof. Returns a verdict with per-check results and, when verified, the canonical safe reference. Rejects hand-authored blob keys, copied references, remote URLs, and data URIs. Never returns bytes.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "requestId"],
+      properties: {
+        projectId: { type: "string" },
+        requestId: { type: "string" },
+        artifactReference: { type: "object", additionalProperties: true, description: "The claimed ArtifactReference to verify (must contain at least blobKey and sha256)" },
+        blobKey: { type: "string", description: "The claimed blobKey (alternative to artifactReference)" },
+        sha256: { type: "string", description: "The claimed sha256 (alternative to artifactReference)" },
+        materializationProof: { type: "string", description: "The signed proof pdf-tool returned with the artifact; optional but conclusive when present" }
+      }
+    }
+  },
+  {
+    name: "resume_agent_artifact_job",
+    description: "Resume an artifact job that is blocked awaiting operator approval. Requires the resumeToken from the blocked state and an operator approvalToken. On success the job returns to pending and generation proceeds.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "jobId", "resumeToken", "approvalToken"],
+      properties: {
+        projectId: { type: "string" },
+        jobId: { type: "string" },
+        resumeToken: { type: "string", description: "The resume token from the blocked state's resume.input.resumeToken" },
+        approvalToken: { type: "string", description: "The operator approval secret authorizing this job to proceed" }
+      }
+    }
   },
   {
     name: "create_pdf_template",
@@ -529,15 +563,25 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     }
     case "get_agent_artifact_by_slot": {
       const result = await getAgentArtifactBySlot(args as never);
-      const { statusCode: _statusCode, ok, artifact, ...body } = result;
-      const structured = ok ? { ...body, artifactReference: artifact } : body;
-      return ok ? toolContent(structured) : { isError: true, ...toolContent(structured) };
+      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return { isError: true, ...toolContent(body) }; }
+      const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
+      return toolContent({ ...body, artifactReference: artifact });
     }
     case "get_agent_artifact_by_filename": {
       const result = await getAgentArtifactByFilename(args as never);
-      const { statusCode: _statusCode, ok, artifact, ...body } = result;
-      const structured = ok ? { ...body, artifactReference: artifact } : body;
-      return ok ? toolContent(structured) : { isError: true, ...toolContent(structured) };
+      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return { isError: true, ...toolContent(body) }; }
+      const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
+      return toolContent({ ...body, artifactReference: artifact });
+    }
+    case "verify_agent_artifact": {
+      const result = await verifyArtifactMaterialization(args as VerifyArtifactInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "resume_agent_artifact_job": {
+      const result = await resumeAgentArtifactJob(args as ResumeArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
     case "create_pdf_template": {
       const result = await createPdfTemplate(args as CreatePdfTemplateInput);
