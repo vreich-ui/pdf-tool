@@ -57,6 +57,18 @@ function attestationSecret(): string {
   return secret;
 }
 
+/**
+ * Whether the attestation secret is one an API caller does NOT already hold. A materialization
+ * proof is only trustworthy as *standalone* evidence when the signing secret is server-only:
+ * ARTIFACT_ATTESTATION_SECRET or MCP_OAUTH_SIGNING_SECRET (neither is ever presented by a
+ * client). When only AGENT_RUN_TOKEN is configured, the secret is the very bearer token every
+ * caller sends, so any authorized caller could forge a proof — the attestation then merely
+ * corroborates and must never substitute for a storage-backed materialization check.
+ */
+export function attestationSecretIsForgeryResistant(): boolean {
+  return Boolean(process.env.ARTIFACT_ATTESTATION_SECRET || process.env.MCP_OAUTH_SIGNING_SECRET);
+}
+
 function b64urlEncode(input: string): string {
   return Buffer.from(input, "utf8").toString("base64url");
 }
@@ -125,7 +137,7 @@ export function verifyMaterializationProof(token: string | undefined | null): Ma
  * fields the reference intentionally omits (projectId/requestId are never persisted in the
  * reference). Returns undefined when no signing secret is configured rather than throwing, so
  * proof generation never turns a healthy read into an error. */
-export function attestArtifactReference(projectId: string, requestId: string, reference: Pick<ArtifactReference, "blobKey" | "sha256" | "sizeBytes" | "contentType" | "createdAtISO" | "createdAt" | "size">): string | undefined {
+export function attestArtifactReference(projectId: string, requestId: string, reference: Partial<Pick<ArtifactReference, "blobKey" | "sha256" | "sizeBytes" | "contentType" | "createdAtISO" | "createdAt" | "size">>): string | undefined {
   if (!reference?.blobKey || !reference?.sha256) return undefined;
   try {
     return signMaterializationProof({

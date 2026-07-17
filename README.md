@@ -190,10 +190,16 @@ cross-check the client store. The verdict runs five independent checks:
 - `bytesHash` — the bytes stored at the blobKey re-hash to the claimed sha256 (needs storage
   access).
 
-`verified: true` requires `safety` + `blobKeyBinding` plus at least one positive authenticity
-signal (a valid attestation, a matching persisted index entry, or matching re-hashed bytes);
-any *contradicted* check fails the whole verdict. The response contains only safe metadata —
-never storage grants, credentials, bytes, repo paths, remote URLs, or data URIs.
+`verified: true` requires `safety` + `blobKeyBinding` plus proof of materialization for *this*
+request — either the `persisted` request-scoped index entry (authoritative: only pdf-tool
+writes it, keyed by the exact request id), or a *forgery-resistant* `attestation` (one signed
+with a dedicated `ARTIFACT_ATTESTATION_SECRET` / `MCP_OAUTH_SIGNING_SECRET`, not the
+caller-held `AGENT_RUN_TOKEN`). `blobKeyBinding` uses the adapter's path-sanitized request
+segment, which is not injective, so it is only a cheap pre-filter; `bytesHash` corroborates
+content integrity but does not by itself bind the request. Any *contradicted* check
+(mismatched attestation, wrong indexed blobKey, tampered bytes) fails the whole verdict. The
+response contains only safe metadata — never storage grants, credentials, bytes, repo paths,
+remote URLs, or data URIs (any unsafe value in a persisted field is dropped from the output).
 
 ### Operator approval (resumable blocked jobs)
 
@@ -230,10 +236,13 @@ job in a resumable `blocked` state and returns it, including everything needed t
 To resume, an operator calls `resume_agent_artifact_job` (MCP) or
 `POST /.netlify/functions/resume-agent-artifact-job` with the `resumeToken` (a signed,
 job-scoped envelope that can only resume that job) **and** an `approvalToken` — the operator
-secret (`ARTIFACT_APPROVAL_SECRET`, falling back to `MCP_OAUTH_PASSWORD` / `MCP_CONNECTOR_KEY`,
-the same human gate as the OAuth consent screen). On success the job returns to `pending`, the
-worker is triggered, and generation proceeds normally. The operator secret is never persisted
-in the job record and never echoed.
+secret (`ARTIFACT_APPROVAL_SECRET`, falling back to `MCP_OAUTH_PASSWORD`, the same human gate as
+the OAuth consent screen; **not** `MCP_CONNECTOR_KEY`, which callers already hold). On success
+the job returns to `pending`, the worker is triggered, and generation proceeds normally. If the
+worker trigger fails transiently the job reverts to `blocked` so the operator can simply retry —
+approval is never consumed by a transient failure. `get_agent_artifact_job_status` re-mints a
+fresh resume token on every poll, so a job stays resumable however late approval arrives. The
+operator secret is never persisted in the job record and never echoed.
 
 ### Image search (least-cost sourcing)
 
@@ -320,8 +329,8 @@ argument:
 ### Required environment variables
 
 - `AGENT_RUN_TOKEN`: bearer token for HTTP artifact APIs, the MCP endpoint, and internal agent job APIs.
-- `ARTIFACT_ATTESTATION_SECRET` (optional): HMAC secret for signing artifact materialization proofs (`verify_agent_artifact`) and job resume tokens. Defaults to `MCP_OAUTH_SIGNING_SECRET`, then `AGENT_RUN_TOKEN` (rotating that invalidates outstanding proofs/resume tokens).
-- `ARTIFACT_APPROVAL_SECRET` (optional): operator secret an approver supplies to resume a blocked artifact job. Falls back to `MCP_OAUTH_PASSWORD`, then `MCP_CONNECTOR_KEY`; if none is set, blocked jobs cannot be resumed.
+- `ARTIFACT_ATTESTATION_SECRET` (optional): HMAC secret for signing artifact materialization proofs (`verify_agent_artifact`) and job resume tokens. Defaults to `MCP_OAUTH_SIGNING_SECRET`, then `AGENT_RUN_TOKEN` (rotating that invalidates outstanding proofs/resume tokens). **Set a dedicated value** to make proofs *forgery-resistant*: because `AGENT_RUN_TOKEN` is the bearer token callers present, a proof signed with it can be minted by any authorized caller, so `verify_agent_artifact` treats such a proof as corroboration only and requires a storage-backed record. A dedicated `ARTIFACT_ATTESTATION_SECRET` (or `MCP_OAUTH_SIGNING_SECRET`) is server-only, so a valid proof then stands alone (enabling stateless verification without a storage grant).
+- `ARTIFACT_APPROVAL_SECRET` (optional): operator secret an approver supplies to resume a blocked artifact job. Falls back to `MCP_OAUTH_PASSWORD` (the OAuth consent-screen owner password). It deliberately does **not** fall back to `MCP_CONNECTOR_KEY` — that key is the URL credential a connector-key client presents to authenticate, so reusing it as the approval secret would let any caller self-approve. If neither `ARTIFACT_APPROVAL_SECRET` nor `MCP_OAUTH_PASSWORD` is set, blocked jobs cannot be resumed.
 - `AGENT_ARTIFACT_APPROVAL_REQUIRED` (optional): approval policy. `all`/`*` gates every job; otherwise a comma list of artifact kinds (`image`/`pdf`/`binary`) or operations (`generate`/`edit`) to gate (e.g. `pdf,edit`). Unset = only jobs that pass `requireApproval: true` are gated.
 - `MCP_OAUTH_PASSWORD` (optional): owner secret typed on the OAuth consent screen to approve a claude.ai connector. Falls back to `MCP_CONNECTOR_KEY`; if neither is set, OAuth authorization is disabled.
 - `MCP_CONNECTOR_KEY` (optional): URL connector key enabling `https://.../mcp/<key>` access for clients that put a secret in the URL; also a fallback owner secret for the OAuth consent screen. Unset = URL-key auth disabled.

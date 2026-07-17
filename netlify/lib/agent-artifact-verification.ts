@@ -4,8 +4,8 @@ import { projectBlobStore } from "./blob-store.js";
 import { currentStorageGrant } from "./storage-grant.js";
 import {
   attestArtifactReference,
+  attestationSecretIsForgeryResistant,
   findUnsafeReferenceValue,
-  signMaterializationProof,
   toSafeArtifactReference,
   unsafeReferenceStringReason,
   verifyMaterializationProof
@@ -137,9 +137,11 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
   }
   checks.blobKeyBinding = "pass";
 
-  // 3. Attestation — a supplied proof is conclusive (only pdf-tool can mint it). A supplied but
-  // invalid/mismatched proof is a hard failure.
-  let attestationPassed = false;
+  // 3. Attestation — a valid proof binds the same tuple. It is only *conclusive on its own*
+  // when signed with a forgery-resistant secret (one a caller does not hold); with the default
+  // AGENT_RUN_TOKEN secret any authorized caller could mint it, so it merely corroborates a
+  // storage-backed record. A supplied-but-invalid/mismatched proof is always a hard failure.
+  let attestationTrusted = false;
   if (input.materializationProof !== undefined && input.materializationProof !== null && input.materializationProof !== "") {
     const decoded = verifyMaterializationProof(input.materializationProof);
     if (!decoded || decoded.projectId !== projectId || decoded.requestId !== requestId || decoded.blobKey !== blobKey || decoded.sha256 !== sha256) {
@@ -147,11 +149,15 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
       return negative("materializationProof is invalid or does not match the reference");
     }
     checks.attestation = "pass";
-    attestationPassed = true;
+    attestationTrusted = attestationSecretIsForgeryResistant();
   }
 
-  // 4 & 5. Storage-backed checks, when a grant (or env fallback) can reach the client store.
-  // Absent storage access these stay "skipped" and the verdict relies on the attestation.
+  // 4 & 5. Storage-backed checks. The request-scoped index entry (persisted) is the
+  // AUTHORITATIVE, forgery-proof request binding: only pdf-tool writes it (under the client
+  // grant), keyed by the exact requestId (injective) + sha256. bytesHash re-hashes the stored
+  // bytes as an integrity corroboration; a present-but-wrong hash is a hard failure. Note the
+  // blobKey-binding check above uses the adapter's path-sanitized request segment, which is
+  // NOT injective, so it is only a cheap pre-filter — the request binding is proven here.
   const hasStorageAccess = Boolean(currentStorageGrant()) || Boolean(resolveProjectBlobStoreOptions(projectId).siteID);
   let persisted: ArtifactReference | undefined;
   if (hasStorageAccess) {
@@ -176,28 +182,39 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
     }
   }
 
-  const authenticitySignal = attestationPassed || checks.persisted === "pass" || checks.bytesHash === "pass";
-  if (!authenticitySignal) {
-    return negative(hasStorageAccess
-      ? "no pdf-tool record of this artifact for the current request"
-      : "no materializationProof supplied and no storage grant available to confirm materialization");
+  // Verdict: materialization must be proven by pdf-tool's own request-scoped index entry, or by
+  // a forgery-resistant attestation. A forgeable attestation and a matching content hash both
+  // only corroborate — neither, on its own, proves pdf-tool made this artifact for THIS request
+  // (bytes at a key don't prove the request binding; a caller-signable proof isn't authority).
+  const materialized = checks.persisted === "pass" || attestationTrusted;
+  if (!materialized) {
+    if (!hasStorageAccess) {
+      return negative(checks.attestation === "pass"
+        ? "materializationProof is not forgery-resistant in this deployment; pass a storage grant to confirm, or configure ARTIFACT_ATTESTATION_SECRET"
+        : "no storage grant and no materializationProof available to confirm materialization");
+    }
+    return negative("no pdf-tool record of this artifact for the current request");
   }
 
-  // Prefer pdf-tool's own persisted reference; fall back to the (already safety-checked)
-  // claim reduced to safe fields. Either way the output carries only safe metadata.
+  // Prefer pdf-tool's own persisted reference; fall back to the (already safety-checked) claim
+  // reduced to safe fields. Then drop any field that still carries an unsafe value — a persisted
+  // reference is pdf-tool's own, but its metadata/tags must never echo a remote URL, data URI,
+  // or repo path back to the caller.
   const safeReference = toSafeArtifactReference(persisted ? (persisted as unknown as Record<string, unknown>) : claimed);
   safeReference.blobKey = blobKey;
   safeReference.sha256 = sha256;
-  // Belt-and-suspenders: the persisted reference is pdf-tool's own, but if its metadata ever
-  // carried an unsafe value (e.g. a provenance URL on an imported artifact), never echo it —
-  // pdf-tool must not return remote URLs, data URIs, or repo paths.
-  if (safeReference.metadata !== undefined && findUnsafeReferenceValue(safeReference.metadata, ["metadata"])) {
-    delete safeReference.metadata;
+  for (const field of Object.keys(safeReference)) {
+    if (field === "blobKey" || field === "sha256") continue;
+    if (findUnsafeReferenceValue(safeReference[field], [field])) delete safeReference[field];
   }
 
-  const proof = persisted
-    ? attestArtifactReference(projectId, requestId, persisted)
-    : signMaterializationProof({ projectId, requestId, blobKey, sha256, sizeBytes: typeof safeReference.sizeBytes === "number" ? safeReference.sizeBytes : undefined, contentType: typeof safeReference.contentType === "string" ? safeReference.contentType : undefined, createdAtISO: typeof safeReference.createdAtISO === "string" ? safeReference.createdAtISO : undefined });
+  const proof = attestArtifactReference(projectId, requestId, {
+    blobKey,
+    sha256,
+    sizeBytes: typeof safeReference.sizeBytes === "number" ? safeReference.sizeBytes : undefined,
+    contentType: typeof safeReference.contentType === "string" ? safeReference.contentType : undefined,
+    createdAtISO: typeof safeReference.createdAtISO === "string" ? safeReference.createdAtISO : undefined
+  });
 
   return {
     ok: true,

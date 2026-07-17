@@ -71,8 +71,10 @@ test("resume token round-trips and rejects tampering / expiry", () => {
 
   assert.equal(verifyResumeToken(token + "x"), null, "tampered signature rejected");
   assert.equal(verifyResumeToken("garbage"), null);
-  const past = Math.floor(Date.now() / 1000) - 10;
-  assert.equal(verifyResumeToken(signResumeToken({ projectId: "dr-lurie", jobId: "j", requestId: "r" }, past - 999999), past), null, "expired token rejected");
+  const now = Math.floor(Date.now() / 1000);
+  // Mint with an iat far enough in the past that even the long (30-day) TTL has elapsed.
+  const longAgo = now - 40 * 24 * 60 * 60;
+  assert.equal(verifyResumeToken(signResumeToken({ projectId: "dr-lurie", jobId: "j", requestId: "r" }, longAgo), now), null, "expired token rejected");
 });
 
 // ── Blocked at creation ──
@@ -195,6 +197,51 @@ test("the worker refuses to materialize a blocked job invoked directly", async (
   const stored = await readArtifactJob("dr-lurie", jobId);
   assert.equal(stored?.status, "blocked");
   assert.equal(stored?.artifactReference, undefined, "no artifact materialized for a blocked job");
+});
+
+test("SECURITY: MCP_CONNECTOR_KEY is not accepted as operator approval", async () => {
+  // Connector-key deployment: the caller authenticates with MCP_CONNECTOR_KEY, so it must NOT
+  // double as the operator-approval secret (that would let any caller self-approve).
+  delete process.env.ARTIFACT_APPROVAL_SECRET;
+  delete process.env.MCP_OAUTH_PASSWORD;
+  process.env.MCP_CONNECTOR_KEY = "url-connector-key";
+  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-connkey", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const created = JSON.parse(create.body);
+  const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken: created.blocked.resume.input.resumeToken, approvalToken: "url-connector-key" }) });
+  // With no real operator secret configured, resume is refused (not silently approved).
+  assert.equal(response.statusCode, 503);
+  const stored = await readArtifactJob("dr-lurie", created.jobId);
+  assert.equal(stored?.status, "blocked", "job stays blocked; the connector key did not approve it");
+});
+
+test("resume reverts to blocked (recoverable) when the worker trigger fails transiently", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.URL = "https://example.netlify.app";
+  let failTrigger = true;
+  globalThis.fetch = (async () => { if (failTrigger) return { ok: false, status: 503 } as Response; return { ok: true, status: 200 } as Response; }) as typeof fetch;
+  try {
+    const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-revert", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+    const created = JSON.parse(create.body);
+    const resumeToken = created.blocked.resume.input.resumeToken;
+
+    // First resume: trigger fails → job must remain resumable, not consumed as "failed".
+    let response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
+    assert.equal(response.statusCode, 502);
+    assert.equal(JSON.parse(response.body).status, "blocked");
+    let stored = await readArtifactJob("dr-lurie", created.jobId);
+    assert.equal(stored?.status, "blocked", "a transient trigger failure must not consume the approval");
+    assert.ok(stored?.blocked, "blocked metadata is preserved for retry");
+
+    // Retry with the same token now that the trigger works.
+    failTrigger = false;
+    response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
+    assert.equal(response.statusCode, 202);
+    assert.equal(JSON.parse(response.body).status, "pending");
+    stored = await readArtifactJob("dr-lurie", created.jobId);
+    assert.equal(stored?.status, "pending");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // ── End-to-end via MCP ──
