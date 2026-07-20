@@ -6,7 +6,7 @@ import { handler as createHandler } from "../netlify/functions/create-pdf-templa
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
 import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
-import { renderPdfmeArtifact } from "../netlify/lib/pdfme-renderer.js";
+import { renderPdfArtifact } from "../netlify/lib/pdf-render/render.js";
 import { resolveOperationRoute } from "../netlify/lib/agent-artifact-operations.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import type { ArtifactJobRecord } from "../netlify/lib/agent-artifact-jobs.js";
@@ -77,12 +77,12 @@ test("pdfme renderer: published template renders valid PDF and field data affect
   await createTemplate("render-content-test");
   await publishTemplate("render-content-test");
 
-  const withData = await renderPdfmeArtifact({
+  const withData = await renderPdfArtifact({
     projectId: "dr-lurie",
     templateId: "render-content-test",
     data: { title: "Hello World" }
   });
-  const withEmpty = await renderPdfmeArtifact({
+  const withEmpty = await renderPdfArtifact({
     projectId: "dr-lurie",
     templateId: "render-content-test",
     data: { title: "" }
@@ -133,12 +133,13 @@ test("pdfme renderer: draft-only template fails with 'no published version' erro
   // deliberately NOT published
 
   await assert.rejects(
-    () => renderPdfmeArtifact({ projectId: "dr-lurie", templateId: "draft-only-tmpl" }),
-    (err: Error) => {
+    () => renderPdfArtifact({ projectId: "dr-lurie", templateId: "draft-only-tmpl" }),
+    (err: Error & { code?: string }) => {
       assert.ok(
         err.message.includes("no published version"),
         `expected "no published version" in error, got: ${err.message}`
       );
+      assert.equal(err.code, "TEMPLATE_NOT_PUBLISHED");
       return true;
     }
   );
@@ -148,8 +149,8 @@ test("pdfme renderer: draft-only template fails with 'no published version' erro
 
 test("pdfme renderer: nonexistent templateId fails with 'not found' error", async () => {
   await assert.rejects(
-    () => renderPdfmeArtifact({ projectId: "dr-lurie", templateId: "does-not-exist" }),
-    (err: Error) => {
+    () => renderPdfArtifact({ projectId: "dr-lurie", templateId: "does-not-exist" }),
+    (err: Error & { code?: string }) => {
       assert.ok(
         err.message.includes("not found"),
         `expected "not found" in error, got: ${err.message}`
@@ -159,14 +160,15 @@ test("pdfme renderer: nonexistent templateId fails with 'not found' error", asyn
         !err.message.includes("no published version"),
         "nonexistent template error should not say 'no published version'"
       );
+      assert.equal(err.code, "TEMPLATE_NOT_FOUND");
       return true;
     }
   );
 });
 
-// ── Test 4: routing regression — non-pdfme template does NOT route to pdfme executor ──
+// ── Test 4: routing — unknown templateId fails with a machine-readable code, no legacy fallback ──
 
-test("operation router: template with no pdfme meta routes to html-chromium, not pdfme", async () => {
+test("operation router: pdf generate with unknown templateId throws TEMPLATE_NOT_FOUND", async () => {
   // No template created in the store — templateId has no meta record
   const job = {
     projectId: "dr-lurie",
@@ -175,10 +177,34 @@ test("operation router: template with no pdfme meta routes to html-chromium, not
     templateId: "html-only-template",
   } as unknown as ArtifactJobRecord;
 
-  const route = await resolveOperationRoute(job);
-  assert.equal(route.executor, "html-chromium");
-  assert.equal(route.requiresAI, false);
-  assert.equal(route.requiresModel, false);
+  await assert.rejects(
+    () => resolveOperationRoute(job),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "TEMPLATE_NOT_FOUND");
+      assert.match(err.message, /not found/i);
+      return true;
+    }
+  );
+});
+
+// ── templateRef-only jobs fail honestly instead of hitting the deleted stub renderer ──
+
+test("operation router: pdf generate with templateRef only throws TEMPLATE_REF_UNSUPPORTED", async () => {
+  const job = {
+    projectId: "dr-lurie",
+    artifactKind: "pdf",
+    operation: "generate",
+    templateRef: { blobKey: "templates/legacy.json" },
+  } as unknown as ArtifactJobRecord;
+
+  await assert.rejects(
+    () => resolveOperationRoute(job),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "TEMPLATE_REF_UNSUPPORTED");
+      assert.match(err.message, /create_pdf_template/);
+      return true;
+    }
+  );
 });
 
 // ── Bonus: pdfme template routes to pdfme executor even when not yet published ──

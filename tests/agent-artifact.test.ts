@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import zlib from "node:zlib";
 import { readFile } from "node:fs/promises";
 import { projectBlobStore, projectBlobStoreCallLog, resetMemoryBlobStores, setMemoryBlobStoreList } from "../netlify/lib/blob-store.js";
 import { createArtifactJob, readArtifactJob, updateArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
+import { savePdfTemplate, publishPdfTemplate } from "../netlify/lib/pdf-template-store.js";
 import { handler as statusHandler } from "../netlify/functions/agent-artifact-job-status.js";
 import { handler as jobHandler } from "../netlify/functions/agent-artifact-job.js";
 import { triggerWorker } from "../netlify/lib/agent-artifact-worker-trigger.js";
@@ -787,24 +789,32 @@ test("MCP JSON-RPC unauthorized and unknown tool return JSON-RPC errors", async 
   assert.equal(body.error.code, -32602);
 });
 
-async function writePdfTemplate(overrides: Record<string, unknown> = {}) {
-  const store = await projectBlobStore("pdf-templates", { siteID: "dr-site", token: "dr-token", consistency: "strong" });
-  const template = {
-    templateId: "article_export_v1",
-    projectId: "dr-lurie",
-    renderer: "html_chromium",
-    status: "active",
-    version: 1,
-    name: "Article Export",
-    defaultRequirements: { format: "A4", orientation: "portrait", margins: { top: "20mm", right: "18mm", bottom: "20mm", left: "18mm" }, maxBytes: 5000000 },
-    dataSchema: { type: "object", required: ["title"], properties: { title: { type: "string" } }, additionalProperties: true },
-    htmlTemplate: "<h1>{{title}}</h1>",
-    css: "h1{font-size:20px}",
-    allowedAssets: { images: true },
-    ...overrides
-  };
-  await store.setJSON("templates/article_export_v1.json", template);
-  return template;
+const pdfmeTitleTemplate = {
+  basePdf: { width: 210, height: 297 },
+  schemas: [[
+    { name: "title", type: "text", content: "", position: { x: 10, y: 10 }, width: 180, height: 20 }
+  ]]
+};
+
+async function writePdfmeTemplate(templateId = "article_export_v1", options: { publish?: boolean } = {}) {
+  await savePdfTemplate({ projectId: "dr-lurie", templateId, templateJson: pdfmeTitleTemplate });
+  if (options.publish !== false) await publishPdfTemplate("dr-lurie", templateId);
+}
+
+function decompressPdfStreams(pdfBytes: Buffer): string[] {
+  const raw = pdfBytes.toString("binary");
+  const streams: string[] = [];
+  let pos = 0;
+  while ((pos = raw.indexOf("stream\n", pos)) >= 0) {
+    const start = pos + 7;
+    const end = raw.indexOf("\nendstream", start);
+    if (end < 0) break;
+    const chunk = pdfBytes.subarray(start, end);
+    try { streams.push(zlib.inflateSync(chunk).toString("latin1")); }
+    catch { try { streams.push(zlib.inflateRawSync(chunk).toString("latin1")); } catch { /* uncompressed stream, skip */ } }
+    pos = end + 10;
+  }
+  return streams;
 }
 
 test("PDF job validation requires templateId or templateRef and .pdf filename", async () => {
@@ -828,7 +838,6 @@ test("PDF job validation requires templateId or templateRef and .pdf filename", 
 
 
 test("PDF job can omit prompt when template data is provided", async () => {
-  await writePdfTemplate();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
@@ -868,53 +877,61 @@ test("PDF job requirements are persisted", async () => {
   }
 });
 
-test("PDF worker retrieves active project template and stores application/pdf", async () => {
-  await writePdfTemplate();
+test("PDF worker renders the active pdfme template version and stores application/pdf", async () => {
+  await writePdfmeTemplate();
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ok", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", data: { title: "<Unsafe>" }, tags: ["pdf"], label: undefined, requirements: { pdf: { pageCount: { min: 1, max: 1 } } } });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
+  assert.equal(body.executor, "pdfme");
   assert.equal(body.artifactReference.contentType, "application/pdf");
   assert.match(body.artifactReference.blobKey, /^pdf\/req-pdf-ok\/[a-f0-9]{64}\.pdf$/);
   assert.equal(body.artifactReference.metadata.templateId, "article_export_v1");
+  assert.equal(body.artifactReference.metadata.renderer, "pdfme");
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.validationResults?.pageCount, 1);
   assert.ok(projectBlobStoreCallLog().some((call) => call.name === "pdf-templates" && call.siteID === "dr-site" && call.token === "dr-token"));
 });
 
-test("PDF worker fails safely for unknown or disabled templates", async () => {
+test("PDF worker fails with machine-readable codes for missing and unpublished templates", async () => {
   const missing = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-missing", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
   let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: missing.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /template not found/i);
+  assert.equal(JSON.parse(response.body).errorCode, "TEMPLATE_NOT_FOUND");
+  let stored = await readArtifactJob("dr-lurie", missing.jobId);
+  assert.equal(stored?.errorCode, "TEMPLATE_NOT_FOUND");
 
-  await writePdfTemplate({ status: "disabled" });
-  const disabled = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-disabled", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
-  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: disabled.jobId }) });
+  await writePdfmeTemplate("draft-only-export", { publish: false });
+  const draftOnly = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-draft-only", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "draft-only-export", data: { title: "Hello" }, tags: [], label: undefined });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: draftOnly.jobId }) });
   assert.equal(response.statusCode, 500);
-  assert.match(JSON.parse(response.body).error, /not active/i);
+  assert.match(JSON.parse(response.body).error, /no published version/i);
+  stored = await readArtifactJob("dr-lurie", draftOnly.jobId);
+  assert.equal(stored?.errorCode, "TEMPLATE_NOT_PUBLISHED");
 });
 
-
-
-test("PDF worker fails clearly for unsupported template renderer", async () => {
-  const template = await writePdfTemplate();
+test("PDF worker fails clearly when template meta names an unsupported renderer", async () => {
+  // Hand-write a corrupted meta record: a renderer id the system does not know.
   const store = await projectBlobStore("pdf-templates", { siteID: "dr-site", token: "dr-token", consistency: "strong" });
-  await store.setJSON("templates/article_export_v1.json", { ...template, renderer: "unsupported_renderer" });
-  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-renderer", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
+  const now = new Date().toISOString();
+  await store.setJSON("pdfme/bogus-renderer-tmpl/meta.json", { templateId: "bogus-renderer-tmpl", projectId: "dr-lurie", renderer: "html_chromium", latestVersion: 1, latestActiveVersion: 1, status: "active", createdAt: now, updatedAt: now });
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-renderer", artifactKind: "pdf", filename: "article.pdf", templateId: "bogus-renderer-tmpl", data: { title: "Hello" }, tags: [], label: undefined });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
-  assert.match(JSON.parse(response.body).error, /Unsupported PDF renderer/i);
+  assert.match(JSON.parse(response.body).error, /unsupported renderer/i);
+  assert.equal(JSON.parse(response.body).errorCode, "RENDERER_NOT_AVAILABLE");
 });
 
-test("PDF data schema validation failure fails the job", async () => {
-  await writePdfTemplate();
-  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-schema", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: {}, tags: [], label: undefined });
+test("PDF worker fails templateRef-only jobs with TEMPLATE_REF_UNSUPPORTED instead of stub output", async () => {
+  const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ref-only", artifactKind: "pdf", filename: "article.pdf", templateRef: { blobKey: "templates/article_export_v1.json" }, data: { title: "Hello" }, tags: [], label: undefined });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
+  assert.equal(JSON.parse(response.body).errorCode, "TEMPLATE_REF_UNSUPPORTED");
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.status, "failed");
-  assert.match(stored?.error ?? "", /data validation failed/i);
+  assert.equal(stored?.errorCode, "TEMPLATE_REF_UNSUPPORTED");
+  assert.equal(stored?.artifactReference, undefined, "no stub artifact may be produced");
 });
 
 
@@ -939,7 +956,7 @@ test("PDF edit job validation requires source lock, supported mode, and mode inp
 });
 
 test("PDF edit execution source-locks and creates derived artifacts", async () => {
-  await writePdfTemplate();
+  await writePdfmeTemplate();
   const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
   const sourceJob = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-src", artifactKind: "pdf", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
   await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: sourceJob.jobId }) });
@@ -958,6 +975,15 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
   assert.notEqual(edited.blobKey, source.blobKey);
   assert.equal(edited.metadata.derivedFrom.blobKey, source.blobKey);
   assert.equal(edited.metadata.editMode, "template_data_patch");
+  assert.equal(edited.metadata.renderer, "pdfme", "template_data_patch must re-render via the template's own renderer");
+
+  // The re-render carries the patched value: "Updated" is 7 chars → one 28-hex-digit glyph
+  // run (4 hex digits per CID glyph); the original 8-char "Original" would be 32.
+  const artifactsStore = await projectBlobStore(adapter.config.artifactStoreName, { siteID: "dr-site", token: "dr-token" });
+  const editedBytes = Buffer.from(await artifactsStore.get(edited.blobKey) as Uint8Array);
+  const editedStreams = decompressPdfStreams(editedBytes).join("\n");
+  const glyphRuns = [...editedStreams.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)].map((match) => match[1].length);
+  assert.ok(glyphRuns.includes("Updated".length * 4), `expected a ${"Updated".length * 4}-hex glyph run for "Updated", got runs: ${glyphRuns.join(",")}`);
 
   const overlay = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-overlay-ok", operation: "edit", artifactKind: "pdf", filename: "overlay.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
   response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: overlay.jobId }) });

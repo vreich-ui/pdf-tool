@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
-import { validatePdfTemplate } from "../netlify/lib/pdf-template-store.js";
+import { validateTemplateJsonForRenderer } from "../netlify/lib/pdf-render/registry.js";
 import { handler as createHandler } from "../netlify/functions/create-pdf-template.js";
 import { handler as getHandler } from "../netlify/functions/get-pdf-template.js";
 import { handler as listHandler } from "../netlify/functions/list-pdf-templates.js";
@@ -21,6 +21,9 @@ function env() {
 }
 
 const AUTH = { authorization: "Bearer test-token" };
+
+// The pdfme template validator moved onto the engine; these unit tests exercise it via the registry.
+const validatePdfTemplate = (templateJson: unknown) => validateTemplateJsonForRenderer("pdfme", templateJson);
 
 const validTemplate = {
   basePdf: { width: 210, height: 297 },

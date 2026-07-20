@@ -1,12 +1,15 @@
 import type { ArtifactJobRecord, ArtifactEditMode } from "./agent-artifact-jobs.js";
 import { getPdfTemplateMeta } from "./pdf-template-store.js";
+import { RenderError } from "./pdf-render/errors.js";
+import { isKnownRendererId } from "./pdf-render/types.js";
 
 export type ArtifactExecutor =
-  | "html-chromium"
   | "pdf-lib"
   | "pdfcpu"
   | "pdfme"
-  | "vivliostyle"
+  | "typst"
+  | "chromium"
+  | "react-pdf"
   | "openai-image"
   | "sharp";
 
@@ -22,8 +25,29 @@ export interface OperationRoute {
 const PDF_EDIT_EXECUTORS: Partial<Record<string, ArtifactExecutor>> = {
   pdf_overlay: "pdf-lib",
   pdf_transform: "pdfcpu",
-  template_data_patch: "html-chromium",
 };
+
+/** Resolves the executor for template-driven PDF work from the template's own renderer. */
+async function pdfTemplateExecutor(job: ArtifactJobRecord): Promise<ArtifactExecutor> {
+  if (!job.templateId) {
+    if (job.templateRef) {
+      throw new RenderError(
+        "TEMPLATE_REF_UNSUPPORTED",
+        "Raw templateRef rendering was removed; create a versioned template with create_pdf_template and pass templateId",
+        { templateRef: job.templateRef.blobKey }
+      );
+    }
+    throw new RenderError("TEMPLATE_NOT_FOUND", "PDF jobs require a templateId");
+  }
+  const meta = await getPdfTemplateMeta(job.projectId, job.templateId);
+  if (!meta) throw new RenderError("TEMPLATE_NOT_FOUND", `PDF template not found: "${job.templateId}"`);
+  if (!isKnownRendererId(meta.renderer)) {
+    throw new RenderError("RENDERER_NOT_AVAILABLE", `PDF template "${job.templateId}" uses unsupported renderer "${String(meta.renderer)}"`, {
+      renderer: String(meta.renderer)
+    });
+  }
+  return meta.renderer;
+}
 
 export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<OperationRoute> {
   const kind = job.artifactKind;
@@ -32,16 +56,15 @@ export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<Ope
 
   if (kind === "pdf") {
     if (op === "edit") {
-      const executor: ArtifactExecutor = PDF_EDIT_EXECUTORS[editMode ?? ""] ?? "html-chromium";
+      // template_data_patch re-renders through the template's own renderer; the byte-level
+      // edit modes keep their dedicated executors.
+      const executor = editMode === "template_data_patch"
+        ? await pdfTemplateExecutor(job)
+        : PDF_EDIT_EXECUTORS[editMode ?? ""];
+      if (!executor) throw new RenderError("RENDER_ENGINE_ERROR", `Unsupported PDF editMode: ${editMode ?? "(none)"}`);
       return { artifactKind: kind, operation: op, editMode, requiresAI: false, requiresModel: false, executor };
     }
-    if (job.templateId) {
-      const meta = await getPdfTemplateMeta(job.projectId, job.templateId);
-      if (meta?.renderer === "pdfme") {
-        return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "pdfme" };
-      }
-    }
-    return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "html-chromium" };
+    return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: await pdfTemplateExecutor(job) };
   }
 
   if (kind === "image") {
@@ -51,5 +74,5 @@ export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<Ope
     return { artifactKind: kind, operation: op, editMode, requiresAI: true, requiresModel: true, executor: "openai-image" };
   }
 
-  return { artifactKind: kind, operation: op, requiresAI: false, requiresModel: false, executor: "html-chromium" };
+  throw new RenderError("RENDER_ENGINE_ERROR", `No executor available for artifactKind "${kind}"`);
 }
