@@ -1,11 +1,13 @@
-import { validatePdfTemplate, savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate } from "./pdf-template-store.js";
+import { savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate } from "./pdf-template-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
+import { REGISTERED_RENDERERS, isRegisteredRenderer, validateTemplateJsonForRenderer } from "./pdf-render/registry.js";
+import { RenderError } from "./pdf-render/errors.js";
 
 export interface CreatePdfTemplateInput {
   projectId: string;
   templateId?: string;
   templateJson: unknown;
-  renderer?: "pdfme";
+  renderer?: string;
   label?: string;
   tags?: string[];
 }
@@ -30,9 +32,12 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
   if (!input.projectId) return { ok: false as const, statusCode: 400, error: "projectId is required" };
   if (!input.templateJson) return { ok: false as const, statusCode: 400, error: "templateJson is required" };
   if (!getProjectAdapter(input.projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${input.projectId}` };
-  if (input.renderer && input.renderer !== "pdfme") return { ok: false as const, statusCode: 400, error: `Unsupported renderer: ${input.renderer}` };
+  const renderer = input.renderer ?? "pdfme";
+  if (!isRegisteredRenderer(renderer)) {
+    return { ok: false as const, statusCode: 400, error: `Unsupported renderer: ${renderer}. Supported renderers: ${REGISTERED_RENDERERS.join(", ")}` };
+  }
 
-  const validation = validatePdfTemplate(input.templateJson);
+  const validation = validateTemplateJsonForRenderer(renderer, input.templateJson);
   if (!validation.valid) return { ok: false as const, statusCode: 400, error: "Invalid templateJson", issues: validation.issues };
 
   try {
@@ -40,12 +45,15 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
       projectId: input.projectId,
       templateId: input.templateId,
       templateJson: input.templateJson,
-      renderer: "pdfme",
+      renderer,
       label: input.label,
       tags: input.tags
     });
-    return { ok: true as const, statusCode: 201, projectId: record.projectId, templateId: record.templateId, version: record.version, status: record.status };
+    return { ok: true as const, statusCode: 201, projectId: record.projectId, templateId: record.templateId, version: record.version, status: record.status, renderer: record.renderer };
   } catch (error) {
+    if (error instanceof RenderError && error.code === "TEMPLATE_INVALID") {
+      return { ok: false as const, statusCode: 400, error: error.message };
+    }
     const message = error instanceof Error ? error.message : "Failed to save template";
     return { ok: false as const, statusCode: 500, error: message };
   }

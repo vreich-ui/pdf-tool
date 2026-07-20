@@ -224,7 +224,7 @@ const baseTools = [
   },
   {
     name: "create_pdf_template",
-    description: "Create and store a versioned pdfme PDF template definition. Status starts as draft; use publish_pdf_template to make it active.",
+    description: "Create and store a versioned PDF template definition for a supported renderer. Status starts as draft; use publish_pdf_template to make it active. A templateId is pinned to one renderer for life.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -232,8 +232,8 @@ const baseTools = [
       properties: {
         projectId: { type: "string" },
         templateId: { type: "string", description: "Stable identifier for this template; auto-generated if omitted" },
-        templateJson: { type: "object", additionalProperties: true, description: "pdfme template: must contain basePdf and schemas array" },
-        renderer: { type: "string", enum: ["pdfme"] },
+        templateJson: { type: "object", additionalProperties: true, description: "Renderer-specific template document. pdfme: must contain basePdf and schemas array" },
+        renderer: { type: "string", enum: ["pdfme"], description: "Target renderer; defaults to pdfme. The enum grows as new render engines ship." },
         label: { type: "string" },
         tags: { type: "array", items: { type: "string" } }
       }
@@ -241,7 +241,7 @@ const baseTools = [
   },
   {
     name: "get_pdf_template",
-    description: "Retrieve a stored pdfme PDF template definition. Defaults to the latest active version; pass version to retrieve a specific version.",
+    description: "Retrieve a stored PDF template definition. Defaults to the latest active version; pass version to retrieve a specific version.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -255,7 +255,7 @@ const baseTools = [
   },
   {
     name: "list_pdf_templates",
-    description: "List all pdfme PDF templates stored for a project, with their latest version, active version, and status.",
+    description: "List all PDF templates stored for a project, with their renderer, latest version, active version, and status.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -267,7 +267,7 @@ const baseTools = [
   },
   {
     name: "publish_pdf_template",
-    description: "Publish a pdfme PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted.",
+    description: "Publish a PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

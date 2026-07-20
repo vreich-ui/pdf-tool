@@ -487,6 +487,9 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   artifact?: ArtifactReference;
   blocked?: BlockedArtifactState;
   error?: string;
+  /** Machine-readable failure code (see pdf-render/errors.ts) set alongside error when known. */
+  errorCode?: string;
+  errorDetail?: Record<string, unknown>;
   renderMetadata?: Record<string, unknown>;
   validationResults?: Record<string, unknown>;
   adapterVersion: string;
@@ -551,7 +554,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,

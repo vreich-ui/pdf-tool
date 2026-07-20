@@ -2,10 +2,10 @@ import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js"
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
 import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
-import { renderProjectPdf } from "../lib/agent-pdf-generation.js";
 import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
 import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
-import { renderPdfmeArtifact } from "../lib/pdfme-renderer.js";
+import { renderPdfArtifact } from "../lib/pdf-render/render.js";
+import { structuredError } from "../lib/pdf-render/errors.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 
 export const config = { name: "agent-artifact-worker-background" };
@@ -54,7 +54,7 @@ async function runWorker(projectId: string, jobId: string) {
 
   let runningJob = job;
   try {
-    runningJob = await updateArtifactJob(job, { status: "running", error: undefined });
+    runningJob = await updateArtifactJob(job, { status: "running", error: undefined, errorCode: undefined, errorDetail: undefined });
     const adapter = getProjectAdapter(runningJob.projectId);
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
@@ -72,9 +72,9 @@ async function runWorker(projectId: string, jobId: string) {
     const generated = route.artifactKind === "pdf"
       ? (runningJob.operation === "edit"
         ? await executePdfEditJob(runningJob)
-        : route.executor === "pdfme"
-        ? await renderPdfmeArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, requirements: runningJob.requirements })
-        : await renderProjectPdf({ projectId: runningJob.projectId, templateId: runningJob.templateId, templateRef: runningJob.templateRef, data: runningJob.data, requirements: runningJob.requirements }))
+        // Route resolution already threw for templateRef-only / missing-template jobs, so
+        // templateId is guaranteed here; the orchestrator dispatches on the stored renderer.
+        : await renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, requirements: runningJob.requirements, mode: "final" }))
       : await executeAgentArtifactWorkflow(runningJob, { apiKey });
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
@@ -120,7 +120,8 @@ async function runWorker(projectId: string, jobId: string) {
     const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
     return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, artifactReference: complete.artifactReference });
   } catch (error) {
-    const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error) });
-    return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error });
+    const { code, detail } = structuredError(error);
+    const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error), errorCode: code, errorDetail: detail });
+    return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error, ...(failed.errorCode ? { errorCode: failed.errorCode, errorDetail: failed.errorDetail } : {}) });
   }
 }

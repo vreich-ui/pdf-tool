@@ -1,7 +1,9 @@
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
-import { countPdfPages, renderProjectPdf } from "./agent-pdf-generation.js";
+import { renderPdfArtifact } from "./pdf-render/render.js";
+import { RenderError } from "./pdf-render/errors.js";
+import { countPdfPagesHeuristic } from "./pdf-render/inspect.js";
 import { MAX_PDF_OUTPUT_BYTES, type ArtifactJobRecord, type NormalizedArtifactJobRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface BlobJsonRef { storeName?: string; blobKey: string; version?: number }
@@ -89,7 +91,7 @@ function appendPdfComment(bytes: Buffer, comment: string): Buffer {
 
 function validatePdfOutput(bytes: Buffer, requirements?: NormalizedArtifactJobRequirements): { pageCount: number; sizeBytes: number } {
   if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("Edited PDF bytes are invalid");
-  const pageCount = countPdfPages(bytes);
+  const pageCount = countPdfPagesHeuristic(bytes);
   const pdfReq = requirements?.pdf ?? requirements;
   if (pdfReq?.pageCount?.min !== undefined && pageCount < pdfReq.pageCount.min) throw new Error("Edited PDF page count is below minimum");
   if (pdfReq?.pageCount?.max !== undefined && pageCount > pdfReq.pageCount.max) throw new Error("Edited PDF page count exceeds maximum");
@@ -107,10 +109,13 @@ export async function executePdfEditJob(job: ArtifactJobRecord): Promise<PdfEdit
   const mode = job.editMode as PdfEditMode;
 
   if (mode === "template_data_patch") {
+    if (!job.templateId) {
+      throw new RenderError("TEMPLATE_REF_UNSUPPORTED", "Raw templateRef rendering was removed; template_data_patch requires templateId", { templateRef: job.templateRef?.blobKey });
+    }
     const baseRecord = job.baseDataRef ? await readJsonRef(job.projectId, job.baseDataRef) : job.currentData;
     const baseData = baseRecord && typeof baseRecord === "object" && "data" in (baseRecord as Record<string, unknown>) ? (baseRecord as Record<string, unknown>).data : baseRecord;
     const patchedData = applyPatch(baseData, job.dataPatch ?? []);
-    const rendered = await renderProjectPdf({ projectId: job.projectId, templateId: job.templateId, templateRef: job.templateRef, data: patchedData, requirements: job.requirements });
+    const rendered = await renderPdfArtifact({ projectId: job.projectId, templateId: job.templateId, data: patchedData, requirements: job.requirements, mode: "final" });
     return {
       bytes: rendered.bytes,
       contentType: "application/pdf",

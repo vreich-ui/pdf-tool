@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
+import { RenderError } from "./pdf-render/errors.js";
+import type { PdfRendererId } from "./pdf-render/types.js";
 
 export type PdfTemplateStatus = "draft" | "active" | "disabled";
 
@@ -9,7 +11,7 @@ export interface PdfTemplateRecord {
   projectId: string;
   version: number;
   status: PdfTemplateStatus;
-  renderer: "pdfme";
+  renderer: PdfRendererId;
   templateJson: unknown;
   label?: string;
   tags: string[];
@@ -20,7 +22,7 @@ export interface PdfTemplateRecord {
 export interface PdfTemplateMeta {
   templateId: string;
   projectId: string;
-  renderer: "pdfme";
+  renderer: PdfRendererId;
   latestVersion: number;
   latestActiveVersion: number | null;
   status: PdfTemplateStatus;
@@ -33,14 +35,14 @@ export interface PdfTemplateListEntry {
   latestVersion: number;
   latestActiveVersion: number | null;
   status: PdfTemplateStatus;
-  renderer: "pdfme";
+  renderer: PdfRendererId;
   createdAt: string;
 }
 
-export interface PdfTemplateValidationResult {
-  valid: boolean;
-  issues: string[];
-}
+/** Historical namespace: templates for ALL renderers live under this key prefix. The
+ * record's renderer field is authoritative; the prefix is opaque storage layout kept so
+ * existing stored templates keep resolving. */
+const TEMPLATE_KEY_NAMESPACE = "pdfme";
 
 function safeSegment(value: string): string {
   const safe = value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -49,11 +51,11 @@ function safeSegment(value: string): string {
 }
 
 function versionKey(templateId: string, version: number): string {
-  return `pdfme/${safeSegment(templateId)}/v${version}.json`;
+  return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/v${version}.json`;
 }
 
 function metaKey(templateId: string): string {
-  return `pdfme/${safeSegment(templateId)}/meta.json`;
+  return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/meta.json`;
 }
 
 async function openTemplateStore(projectId: string) {
@@ -68,39 +70,11 @@ async function openTemplateStore(projectId: string) {
   });
 }
 
-export function validatePdfTemplate(templateJson: unknown): PdfTemplateValidationResult {
-  const issues: string[] = [];
-  if (!templateJson || typeof templateJson !== "object" || Array.isArray(templateJson)) {
-    return { valid: false, issues: ["templateJson must be a non-null object"] };
-  }
-  const obj = templateJson as Record<string, unknown>;
-  if (!("basePdf" in obj)) {
-    issues.push("templateJson.basePdf is required");
-  } else {
-    const t = typeof obj.basePdf;
-    if (t !== "string" && (t !== "object" || obj.basePdf === null)) {
-      issues.push("templateJson.basePdf must be a string or object");
-    }
-  }
-  if (!("schemas" in obj)) {
-    issues.push("templateJson.schemas is required");
-  } else if (!Array.isArray(obj.schemas)) {
-    issues.push("templateJson.schemas must be an array");
-  } else {
-    for (let i = 0; i < (obj.schemas as unknown[]).length; i++) {
-      if (!Array.isArray((obj.schemas as unknown[])[i])) {
-        issues.push(`templateJson.schemas[${i}] must be an array of schema objects`);
-      }
-    }
-  }
-  return { valid: issues.length === 0, issues };
-}
-
 export interface SavePdfTemplateInput {
   projectId: string;
   templateId?: string;
   templateJson: unknown;
-  renderer?: "pdfme";
+  renderer?: PdfRendererId;
   label?: string;
   tags?: string[];
 }
@@ -108,10 +82,16 @@ export interface SavePdfTemplateInput {
 export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfTemplateRecord> {
   const { projectId, templateJson, label, tags } = input;
   const templateId = input.templateId ?? randomUUID();
+  const renderer: PdfRendererId = input.renderer ?? "pdfme";
   const store = await openTemplateStore(projectId);
   const now = new Date().toISOString();
 
   const existingMeta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+  // Routing dispatches on meta.renderer while rendering loads a specific version record, so
+  // the two must never disagree: a templateId is pinned to one renderer for life.
+  if (existingMeta && existingMeta.renderer !== renderer) {
+    throw new RenderError("TEMPLATE_INVALID", `Template "${templateId}" already uses renderer "${existingMeta.renderer}"; create a new templateId to target a different renderer`);
+  }
   const version = existingMeta ? existingMeta.latestVersion + 1 : 1;
 
   const record: PdfTemplateRecord = {
@@ -119,7 +99,7 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
     projectId,
     version,
     status: "draft",
-    renderer: "pdfme",
+    renderer,
     templateJson,
     label,
     tags: tags ?? [],
@@ -130,7 +110,7 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
   const meta: PdfTemplateMeta = {
     templateId,
     projectId,
-    renderer: "pdfme",
+    renderer,
     latestVersion: version,
     latestActiveVersion: existingMeta?.latestActiveVersion ?? null,
     status: existingMeta?.status === "active" ? "active" : "draft",
@@ -195,7 +175,7 @@ export async function listPdfTemplates(projectId: string): Promise<PdfTemplateLi
     return [];
   }
   if (!store.list) return [];
-  const result = await store.list({ prefix: "pdfme/", paginate: true });
+  const result = await store.list({ prefix: `${TEMPLATE_KEY_NAMESPACE}/`, paginate: true });
   const metaKeys = await collectMetaKeys(result);
 
   const entries: PdfTemplateListEntry[] = [];
