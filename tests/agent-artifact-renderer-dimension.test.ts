@@ -33,8 +33,8 @@ test.beforeEach(() => {
   env();
 });
 
-test("renderer registry: only pdfme is registered in this deployment", () => {
-  assert.deepEqual([...REGISTERED_RENDERERS], ["pdfme"]);
+test("renderer registry: pdfme and react-pdf are registered in this deployment", () => {
+  assert.deepEqual([...REGISTERED_RENDERERS], ["pdfme", "react-pdf"]);
 });
 
 test("create-pdf-template rejects unregistered renderer and lists supported values", async () => {

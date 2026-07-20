@@ -1,6 +1,8 @@
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
+  # Bundled SIL-OFL Noto fonts for the react-pdf engine (registered by pdf-render/fonts.ts).
+  included_files = ["netlify/assets/fonts/*"]
 
 # Keeps the mcp function warm on a platform with no min-instances/provisioned-concurrency
 # setting: pings its unauthenticated liveness route (GET /mcp?health=1) every 5 minutes.

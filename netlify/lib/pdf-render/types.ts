@@ -21,6 +21,11 @@ export interface TemplateValidationResult {
 export interface RenderDiagnostics {
   pageCount: number;
   sizeBytes: number;
+  /** Real per-page dimensions in points (from the shared pdf-lib inspector). */
+  pages?: Array<{ widthPt: number; heightPt: number }>;
+  /** How requirements.margins were honored: applied by the engine, advisory because the
+   * template overrides them, or not applicable (no margins requested / engine ignores them). */
+  marginsApplied?: "engine" | "template-advisory" | "not-applicable";
   engineWarnings?: string[];
   engine: { id: PdfRendererId; executedIn: "netlify" | "render-service" };
 }
@@ -29,6 +34,8 @@ export interface RenderInput {
   projectId: string;
   template: PdfTemplateRecord;
   data: unknown;
+  /** The job's declared assets (assets.images entries, resolvable by jobAsset image refs). */
+  assets?: { images?: unknown[] };
   requirements?: NormalizedPdfRequirements;
   /** "validation" renders draft templates for pre-publish checks and must never persist artifacts. */
   mode: "final" | "validation";

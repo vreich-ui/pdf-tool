@@ -1,6 +1,7 @@
 import { getPdfTemplate, getPdfTemplateMeta, type PdfTemplateRecord } from "../pdf-template-store.js";
 import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements } from "../agent-artifact-jobs.js";
 import { RenderError } from "./errors.js";
+import { enforcePdfRequirements, inspectPdf } from "./inspect.js";
 import { getPdfRendererEngine, REGISTERED_RENDERERS } from "./registry.js";
 import { isKnownRendererId, type RenderDiagnostics } from "./types.js";
 
@@ -25,10 +26,12 @@ export async function renderPdfArtifact(options: {
   /** Only meaningful for validation renders; final renders always use the active version. */
   templateVersion?: number;
   data?: unknown;
+  /** The job's declared assets; jobAsset image refs in docTree templates resolve against assets.images. */
+  assets?: { images?: unknown[] };
   requirements?: NormalizedArtifactJobRequirements;
   mode?: "final" | "validation";
 }): Promise<RenderPdfArtifactOutput> {
-  const { projectId, templateId, data, requirements } = options;
+  const { projectId, templateId, data, assets, requirements } = options;
   const mode = options.mode ?? "final";
 
   let record: PdfTemplateRecord;
@@ -65,32 +68,35 @@ export async function renderPdfArtifact(options: {
   // requirements.pdf is canonical; the bare top-level PDF fields are the legacy spelling.
   const pdfRequirements: NormalizedPdfRequirements | undefined = requirements?.pdf ?? requirements;
 
-  const output = await engine.render({ projectId, template: record, data, requirements: pdfRequirements, mode });
+  const output = await engine.render({ projectId, template: record, data, assets, requirements: pdfRequirements, mode });
 
-  const pageCount = output.diagnostics.pageCount;
-  if (pdfRequirements?.pageCount?.min !== undefined && pageCount < pdfRequirements.pageCount.min) {
-    throw new RenderError("PDF_REQ_PAGE_COUNT_MIN", "Rendered PDF page count is below minimum", {
-      expected: { min: pdfRequirements.pageCount.min }, actual: pageCount
-    });
+  // SHARED post-render enforcement: one pdf-lib inspector, one failure-code set — never
+  // per-engine. Real page counts replace any engine-reported proxy (pdfme's schema length).
+  const inspection = await inspectPdf(output.bytes);
+  const failures = enforcePdfRequirements(inspection, {
+    pageCount: pdfRequirements?.pageCount,
+    format: pdfRequirements?.format,
+    orientation: pdfRequirements?.orientation,
+    maxBytes: pdfRequirements?.maxBytes ?? requirements?.maxBytes,
+  }, { maxBytesCeiling: MAX_PDF_OUTPUT_BYTES });
+  if (failures.length > 0) {
+    const [first] = failures;
+    throw new RenderError(first.code, first.message, { ...(first.detail ?? {}), failures });
   }
-  if (pdfRequirements?.pageCount?.max !== undefined && pageCount > pdfRequirements.pageCount.max) {
-    throw new RenderError("PDF_REQ_PAGE_COUNT_MAX", "Rendered PDF page count exceeds maximum", {
-      expected: { max: pdfRequirements.pageCount.max }, actual: pageCount
-    });
-  }
-  const maxBytes = requirements?.maxBytes ?? MAX_PDF_OUTPUT_BYTES;
-  if (output.bytes.byteLength > maxBytes) {
-    throw new RenderError("PDF_REQ_MAX_BYTES", `Rendered PDF exceeds maximum size of ${maxBytes} bytes`, {
-      expected: { maxBytes }, actual: output.bytes.byteLength
-    });
-  }
+
+  const diagnostics: RenderDiagnostics = {
+    ...output.diagnostics,
+    pageCount: inspection.pageCount,
+    sizeBytes: inspection.sizeBytes,
+    pages: inspection.pages,
+  };
 
   return {
     bytes: output.bytes,
     contentType: "application/pdf",
     requirements: requirements?.pdf ?? {},
     template: { templateId: record.templateId, version: record.version, renderer: record.renderer },
-    validation: { pageCount, sizeBytes: output.bytes.byteLength },
-    diagnostics: output.diagnostics,
+    validation: { pageCount: inspection.pageCount, sizeBytes: inspection.sizeBytes },
+    diagnostics,
   };
 }

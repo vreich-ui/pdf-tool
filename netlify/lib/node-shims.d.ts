@@ -44,6 +44,10 @@ declare module "openai" {
 declare module "zod" {
   export const z: any;
 }
+declare module "react" {
+  const React: { createElement: (type: unknown, props: unknown, ...children: unknown[]) => unknown };
+  export default React;
+}
 declare module "@openai/agents" {
   export class Agent { constructor(input: Record<string, unknown>); }
   export class Runner { run?(agent: unknown, input: string): Promise<unknown>; }

@@ -8,6 +8,7 @@ import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMc
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
+import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
@@ -232,8 +233,8 @@ const baseTools = [
       properties: {
         projectId: { type: "string" },
         templateId: { type: "string", description: "Stable identifier for this template; auto-generated if omitted" },
-        templateJson: { type: "object", additionalProperties: true, description: "Renderer-specific template document. pdfme: must contain basePdf and schemas array" },
-        renderer: { type: "string", enum: ["pdfme"], description: "Target renderer; defaults to pdfme. The enum grows as new render engines ship." },
+        templateJson: { type: "object", additionalProperties: true, description: "Renderer-specific template document. pdfme: must contain basePdf and schemas array. react-pdf: a docTree document ({docTreeVersion: 1, document: {...}}) — see docs/REACT_PDF_DOCTREE.md" },
+        renderer: { type: "string", enum: [...REGISTERED_RENDERERS], description: "Target renderer; defaults to pdfme. The enum grows as new render engines ship." },
         label: { type: "string" },
         tags: { type: "array", items: { type: "string" } }
       }
