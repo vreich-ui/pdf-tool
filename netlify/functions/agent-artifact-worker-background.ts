@@ -74,7 +74,7 @@ async function runWorker(projectId: string, jobId: string) {
         ? await executePdfEditJob(runningJob)
         // Route resolution already threw for templateRef-only / missing-template jobs, so
         // templateId is guaranteed here; the orchestrator dispatches on the stored renderer.
-        : await renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, requirements: runningJob.requirements, mode: "final" }))
+        : await renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, assets: runningJob.assets, requirements: runningJob.requirements, mode: "final" }))
       : await executeAgentArtifactWorkflow(runningJob, { apiKey });
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })

@@ -4,8 +4,8 @@
 > below (in order), after verifying the previous PR is MERGED into main. Update this checklist
 > as part of each PR.
 
-- [x] **PR1** — Renderer dimension, engine registry, legacy-path removal, error codes *(this PR)*
-- [ ] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement
+- [x] **PR1** — Renderer dimension, engine registry, legacy-path removal, error codes
+- [x] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement *(this PR)*
 - [ ] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy
 - [ ] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy
 - [ ] **PR5** — validate_pdf_template + publish gating + overflow diagnostics
