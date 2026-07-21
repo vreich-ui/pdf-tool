@@ -91,10 +91,26 @@ export async function publishPdfTemplateRecord(input: PublishPdfTemplateInput) {
     return { ok: false as const, statusCode: 400, error: "projectId and templateId are required" };
   }
   try {
-    const record = await publishPdfTemplate(input.projectId, input.templateId, input.version);
-    if (!record) return { ok: false as const, statusCode: 404, error: "Template or version not found" };
-    return { ok: true as const, statusCode: 200, projectId: record.projectId, templateId: record.templateId, version: record.version, status: record.status };
+    const result = await publishPdfTemplate(input.projectId, input.templateId, input.version);
+    if (!result) return { ok: false as const, statusCode: 404, error: "Template or version not found" };
+    const { record } = result;
+    return {
+      ok: true as const,
+      statusCode: 200,
+      projectId: record.projectId,
+      templateId: record.templateId,
+      version: record.version,
+      status: record.status,
+      renderer: record.renderer,
+      ...(result.validation ? { validation: result.validation } : {}),
+      ...(result.validationWarning ? { validationWarning: result.validationWarning } : {}),
+    };
   } catch (error) {
+    if (error instanceof RenderError && (error.code === "TEMPLATE_VALIDATION_REQUIRED" || error.code === "TEMPLATE_VALIDATION_FAILED")) {
+      // 409: the publish is blocked by validation state the caller can change (run/fix a
+      // validation render), not by a malformed request.
+      return { ok: false as const, statusCode: 409, error: error.message, errorCode: error.code, ...(error.detail ? { detail: error.detail } : {}) };
+    }
     const message = error instanceof Error ? error.message : "Failed to publish template";
     return { ok: false as const, statusCode: 500, error: message };
   }

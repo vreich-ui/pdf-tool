@@ -15,6 +15,7 @@ import { handler as publishHandler } from "../netlify/functions/publish-pdf-temp
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { renderPdfArtifact } from "../netlify/lib/pdf-render/render.js";
+import { writePdfTemplateValidation } from "../netlify/lib/pdf-template-store.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -96,6 +97,26 @@ async function buildPdfBase64(widthPt: number, heightPt: number): Promise<string
   return Buffer.from(await doc.save()).toString("base64");
 }
 
+// PR5: typst has a HARD publish gate (a passed validate_pdf_template report is required).
+// This suite tests ENGINE behavior, not gating, so seed a synthetic passed report before every
+// publish here — the dedicated validation suite (agent-artifact-template-validation.test.ts)
+// exercises the real validate → publish gating flows.
+async function seedPassedValidation(templateId: string, version = 1) {
+  const now = new Date().toISOString();
+  await writePdfTemplateValidation("dr-lurie", {
+    validationId: `seed-${templateId}-v${version}`,
+    projectId: "dr-lurie",
+    templateId,
+    version,
+    renderer: "typst",
+    status: "passed",
+    dataSha256: "seeded",
+    createdAt: now,
+    updatedAt: now,
+    completedAt: now,
+  });
+}
+
 async function createAndPublishTypstTemplate(templateId: string) {
   const created = await createHandler({
     httpMethod: "POST",
@@ -103,6 +124,7 @@ async function createAndPublishTypstTemplate(templateId: string) {
     body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: { source: TYPST_SOURCE }, renderer: "typst" }),
   });
   assert.equal(created.statusCode, 201, `create failed: ${created.body}`);
+  await seedPassedValidation(templateId);
   const published = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,

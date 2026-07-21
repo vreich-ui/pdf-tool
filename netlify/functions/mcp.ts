@@ -9,11 +9,12 @@ import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
 import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
+import { getPdfTemplateValidation, startPdfTemplateValidation, type GetPdfTemplateValidationInput, type ValidatePdfTemplateInput } from "../lib/pdf-template-validation.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "validate_pdf_template" | "get_pdf_template_validation" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
 
 // Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
 // to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds none.
@@ -268,7 +269,7 @@ const baseTools = [
   },
   {
     name: "publish_pdf_template",
-    description: "Publish a PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted.",
+    description: "Publish a PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted. GATING: react-pdf/typst/chromium templates require a PASSED validate_pdf_template report for the exact target version (409 TEMPLATE_VALIDATION_REQUIRED/TEMPLATE_VALIDATION_FAILED otherwise); pdfme publishes warn-only (a validationWarning is returned when no passed report exists).",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -277,6 +278,36 @@ const baseTools = [
         projectId: { type: "string" },
         templateId: { type: "string" },
         version: { type: "number", description: "Specific version to publish; omit to publish the latest version" }
+      }
+    }
+  },
+  {
+    name: "validate_pdf_template",
+    description: "Start a pre-publish validation render for a (draft) template version with REQUIRED worst-case sample data. Background job: poll get_pdf_template_validation (~2s interval) for the passed/failed report with diagnostics (real pageCount, per-page dimensions, layout overflows for chromium, engine warnings) and requirement failures. Never writes an artifact. A PASSED report is required to publish react-pdf/typst/chromium templates.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "templateId", "data"],
+      properties: {
+        projectId: { type: "string" },
+        templateId: { type: "string" },
+        version: { type: "number", description: "Version to validate; omit for the latest version (drafts allowed)" },
+        data: { description: "Worst-case sample data for the render. Must be complete: validation mode treats missing bindings as DATA_BINDING_ERROR." },
+        requirements: { type: "object", additionalProperties: true, description: "Same shape as job requirements (pdf.format/orientation/margins/pageCount, maxBytes); failures are reported, not thrown" }
+      }
+    }
+  },
+  {
+    name: "get_pdf_template_validation",
+    description: "Read the validation report for a template version: status (running/passed/failed), diagnostics (pageCount, pages, overflows, engineWarnings), requirementFailures, and dataSha256 of the sample data used.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "templateId"],
+      properties: {
+        projectId: { type: "string" },
+        templateId: { type: "string" },
+        version: { type: "number", description: "Version whose report to read; omit for the latest version" }
       }
     }
   },
@@ -601,6 +632,16 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     }
     case "publish_pdf_template": {
       const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "validate_pdf_template": {
+      const result = await startPdfTemplateValidation(args as ValidatePdfTemplateInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_pdf_template_validation": {
+      const result = await getPdfTemplateValidation(args as GetPdfTemplateValidationInput);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
     }
