@@ -8,7 +8,7 @@ engine lands in PR4; `POST /render/chromium` currently returns `501 RENDERER_NOT
 
 ## Contract
 
-### `GET /healthz` (unauthenticated)
+### `GET /health` (unauthenticated; `/healthz` kept as a local alias — Google's frontend intercepts the exact path `/healthz` on *.run.app)
 
 ```json
 { "ok": true, "service": "pdf-tool-render", "engines": { "typst": { "available": true, "version": "typst 0.15.0 (…)" }, "chromium": { "available": false } } }
@@ -143,7 +143,7 @@ npm run dev            # tsx src/index.ts, listens on :8080
 `npm run dev` works without a container: with `TYPST_VENDOR_DIR`/`RENDER_SERVICE_FONT_DIR`
 unset, the engine falls back to this workspace's own `fonts/` and `vendor/typst-packages/`
 directories (see `src/engines/typst.ts`). Install the `typst` CLI locally (or set `TYPST_BIN`
-to its path) to exercise real renders; without it, `/healthz` reports
+to its path) to exercise real renders; without it, `/health` reports
 `engines.typst.available: false` and `/render/typst` returns `RENDER_ENGINE_ERROR`.
 
 ## Tests
@@ -180,7 +180,7 @@ GCP_PROJECT_ID=... GCP_SERVICE_ACCOUNT_KEY=... [GCP_REGION=europe-west1] \
 
 Builds + pushes the image via Cloud Build (`deploy/cloudbuild.yaml`, since `gcloud builds
 submit` has no `--build-arg` flag), deploys to Cloud Run (`pdf-tool-render`,
-`--allow-unauthenticated`, auth is the shared secret header), smoke-tests `/healthz` +
+`--allow-unauthenticated`, auth is the shared secret header), smoke-tests `/health` +
 one authenticated sample render, writes the secret to `.local/render-service-secret`
 (gitignored, chmod 600, never echoed), and — if `NETLIFY_AUTH_TOKEN`/`NETLIFY_SITE_ID` are
 present — sets `RENDER_SERVICE_URL`/`RENDER_SERVICE_SECRET` in Netlify via `netlify-cli`

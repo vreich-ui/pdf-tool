@@ -114,8 +114,12 @@ IMAGE_TAG="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}:$
 
 echo "== Building + pushing ${IMAGE_TAG} via Cloud Build =="
 BUILD_LOG="$(mktemp)"
+# --gcs-log-dir: the DEFAULT logs bucket is outside the project and only streams for
+# project Viewers/Owners; a deploy service account with Storage Admin can stream from the
+# project's own staging bucket instead.
 gcloud builds submit "${RENDER_SERVICE_DIR}" \
   --config="${RENDER_SERVICE_DIR}/deploy/cloudbuild.yaml" \
+  --gcs-log-dir="gs://${GCP_PROJECT_ID}_cloudbuild/logs" \
   --substitutions="_TYPST_VERSION=${TYPST_VERSION},_TYPST_SHA256=${TYPST_SHA256},_IMAGE_TAG=${IMAGE_TAG}" \
   2>&1 | tee "${BUILD_LOG}"
 
@@ -157,15 +161,17 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION
 echo "Service URL: ${SERVICE_URL}"
 
 # --- smoke test -------------------------------------------------------------------------------
-echo "== Smoke test: GET /healthz =="
-HEALTH_RESPONSE="$(curl -fsS "${SERVICE_URL}/healthz")"
+# /health, not /healthz: Google's frontend intercepts the exact path /healthz on *.run.app
+# and answers 404 before the container is reached.
+echo "== Smoke test: GET /health =="
+HEALTH_RESPONSE="$(curl -fsS "${SERVICE_URL}/health")"
 echo "${HEALTH_RESPONSE}"
 if ! grep -q '"ok":true' <<<"${HEALTH_RESPONSE}"; then
-  echo "ERROR: /healthz did not report ok:true" >&2
+  echo "ERROR: /health did not report ok:true" >&2
   exit 1
 fi
 if ! grep -q '"typst":{"available":true' <<<"${HEALTH_RESPONSE}"; then
-  echo "ERROR: /healthz reports typst engine unavailable" >&2
+  echo "ERROR: /health reports typst engine unavailable" >&2
   exit 1
 fi
 

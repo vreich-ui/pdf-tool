@@ -15,7 +15,10 @@ export function buildServer(): FastifyInstance {
     logger: process.env.NODE_ENV === "production",
   });
 
-  fastify.get("/healthz", async () => {
+  // NOTE: the PRIMARY health path is /health. Google's frontend intercepts the exact path
+  // /healthz on *.run.app (legacy GFE health checking) and answers 404 before the container
+  // is reached; /healthz is kept only as an alias for local dev and tests.
+  const healthHandler = async () => {
     const version = await typstVersion();
     return {
       ok: true,
@@ -25,7 +28,9 @@ export function buildServer(): FastifyInstance {
         chromium: { available: false },
       },
     };
-  });
+  };
+  fastify.get("/health", healthHandler);
+  fastify.get("/healthz", healthHandler);
 
   fastify.post("/render/typst", async (request, reply) => {
     if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {

@@ -40,4 +40,5 @@ substitutions:
   _IMAGE_TAG: "pdf-tool-render:local"
 options:
   substitution_option: ALLOW_LOOSE
-  logging: CLOUD_LOGGING_ONLY
+  # Default (GCS) logging so `gcloud builds submit` streams step output — deploy/cloud-run.sh
+  # greps TYPST_TARBALL_SHA256=<sha> from the stream on first trusted deploy.
