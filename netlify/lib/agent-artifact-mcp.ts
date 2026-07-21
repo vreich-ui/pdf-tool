@@ -5,6 +5,10 @@ import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./
 import { resolveProjectArtifactIndexOptions } from "./agent-project-registry.js";
 import { attestArtifactReference } from "./artifact-attestation.js";
 import { buildBlockedState, evaluateApprovalRequirement, refreshedBlockedState, resumeArtifactJob, type ResumeArtifactJobInput } from "./agent-artifact-approval.js";
+import { canonicalImageModel, findImageProvider } from "./image-providers/registry.js";
+import { estimateImageJobCost } from "./image-providers/pricing.js";
+import { policyModelForUsageContext } from "./image-routing/policy.js";
+import { resolveProjectModel } from "./agent-project-registry.js";
 
 export interface CreateAgentArtifactJobInput {
   projectId: string;
@@ -45,8 +49,30 @@ export function artifactJobPollingInstructions(projectId: string, jobId: string)
 }
 
 export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
-  const parsed = await validateArtifactJobRequest({ ...input, tags: input.tags ?? [] });
+  // Model routing (PR6): the usageContext policy applies ONLY when the job omits `model` —
+  // an explicit model always wins (it is just canonicalized: flux-2 → fal-ai/flux-2/klein/9b).
+  let routedInput = input;
+  if (input.artifactKind === "image" && (input.operation ?? "generate") === "generate") {
+    if (!input.model) {
+      const usageContext = (input.requirements as { image?: { usageContext?: unknown } } | undefined)?.image?.usageContext;
+      const policyModel = await policyModelForUsageContext(input.projectId, typeof usageContext === "string" ? usageContext : undefined).catch(() => undefined);
+      if (policyModel) routedInput = { ...input, model: policyModel };
+    } else {
+      routedInput = { ...input, model: canonicalImageModel(input.model) };
+    }
+  }
+
+  const parsed = await validateArtifactJobRequest({ ...routedInput, tags: routedInput.tags ?? [] });
   if (!parsed.success) return { ok: false as const, statusCode: 400, error: "Invalid artifact job input", issues: parsed.error.issues };
+
+  // Cost estimate (output-only record field, source: "config") for the model this job will run.
+  if (parsed.data.artifactKind === "image") {
+    const selected = resolveProjectModel(parsed.data.projectId, parsed.data.model);
+    const provider = selected ? findImageProvider(selected) : undefined;
+    if (selected && provider) {
+      parsed.data.costEstimate = estimateImageJobCost(provider.id, canonicalImageModel(selected), parsed.data.requirements?.image?.size);
+    }
+  }
 
   // Operator-approval gate: when approval is required, persist the job in a resumable
   // `blocked` state and DO NOT trigger the worker. The caller gets everything needed to
@@ -62,7 +88,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     } catch (error) {
       return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
     }
-    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, selectedModel: blockedJob.selectedModel, adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
+    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
 
   let job: Awaited<ReturnType<typeof createArtifactJob>>;
@@ -79,7 +105,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
@@ -93,7 +119,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const artifactReference = job.artifactReference ?? job.artifact;
   // A completed artifact carries a materialization proof so the CMS can verify it later.
   const materializationProof = job.status === "complete" && artifactReference ? attestArtifactReference(job.projectId, job.requestId, artifactReference) : undefined;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}) };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}) };
 }
 
 

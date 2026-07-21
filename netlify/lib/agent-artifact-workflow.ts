@@ -2,6 +2,8 @@ import { sha256Hex } from "./artifact-core/index.js";
 import type { ArtifactJobRecord } from "./agent-artifact-jobs.js";
 import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerationClient } from "./agent-image-generation.js";
 import { editImageArtifactBytes, readSourceArtifactBytes, contentTypeForImageOutputFormat, type ImageEditingClient } from "./agent-image-editing.js";
+import { resolveImageProvider } from "./image-providers/registry.js";
+import { RenderError } from "./pdf-render/errors.js";
 
 export interface AgentArtifactWorkflowOptions {
   imageClient?: ImageGenerationClient & ImageEditingClient;
@@ -82,28 +84,57 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
       const source = await readSourceArtifactBytes(job.projectId, job.sourceArtifact);
       const outputFormat = job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename);
       const mask = job.maskRef ? await readSourceArtifactBytes(job.projectId, { artifactReference: job.maskRef.artifactReference, expectedSha256: job.maskRef.artifactReference.sha256 }) : undefined;
-      generated = await editImageArtifactBytes({
-        mode: job.editMode as import("./agent-artifact-jobs.js").ImageEditMode,
-        sourceBytes: source.bytes,
-        maskBytes: mask?.bytes,
-        instructions: job.editInstructions,
+      if (job.editMode === "deterministic_transform") {
+        // Pure sharp transform — no model, no provider routing.
+        generated = await editImageArtifactBytes({
+          mode: job.editMode as import("./agent-artifact-jobs.js").ImageEditMode,
+          sourceBytes: source.bytes,
+          maskBytes: mask?.bytes,
+          instructions: job.editInstructions,
+          client: options.imageClient,
+          apiKey: options.apiKey,
+          size: job.requirements?.image?.size,
+          outputFormat,
+          maxBytes: job.requirements?.maxBytes,
+          model: job.selectedModel
+        });
+      } else {
+        // Adapter dispatch with an EXPLICIT capability check: an edit mode the selected
+        // model cannot perform fails loudly — never a silent fallback to another API.
+        const { provider, model } = resolveImageProvider(job.selectedModel);
+        const editFeature = job.editMode as "masked_edit" | "image_variation";
+        if (!provider.supports(editFeature, model) || !provider.edit) {
+          throw new RenderError("IMAGE_EDIT_MODE_UNSUPPORTED", `Model ${model} does not support ${job.editMode}`, {
+            model,
+            mode: job.editMode,
+            provider: provider.id,
+          });
+        }
+        generated = await provider.edit({
+          mode: editFeature,
+          model,
+          sourceBytes: source.bytes,
+          maskBytes: mask?.bytes,
+          instructions: job.editInstructions,
+          prompt: job.prompt,
+          client: options.imageClient,
+          apiKey: options.apiKey,
+          size: job.requirements?.image?.size,
+          outputFormat,
+          maxBytes: job.requirements?.maxBytes,
+        });
+      }
+    } else {
+      if (!job.prompt) throw new Error("Image generation jobs require prompt");
+      const { provider, model } = resolveImageProvider(job.selectedModel);
+      generated = await provider.generate({
+        prompt: job.prompt,
+        model,
         client: options.imageClient,
         apiKey: options.apiKey,
         size: job.requirements?.image?.size,
-        outputFormat,
+        outputFormat: job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename),
         maxBytes: job.requirements?.maxBytes,
-        model: job.selectedModel
-      });
-    } else {
-      if (!job.prompt) throw new Error("Image generation jobs require prompt");
-      generated = await generateImageArtifactBytes({
-      prompt: job.prompt,
-      client: options.imageClient,
-      apiKey: options.apiKey,
-      size: job.requirements?.image?.size,
-      outputFormat: job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename),
-      maxBytes: job.requirements?.maxBytes,
-      model: job.selectedModel
       });
     }
     return {

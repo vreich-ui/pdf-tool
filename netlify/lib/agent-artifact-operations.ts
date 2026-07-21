@@ -2,6 +2,7 @@ import type { ArtifactJobRecord, ArtifactEditMode } from "./agent-artifact-jobs.
 import { getPdfTemplateMeta } from "./pdf-template-store.js";
 import { RenderError } from "./pdf-render/errors.js";
 import { isKnownRendererId } from "./pdf-render/types.js";
+import { findImageProvider } from "./image-providers/registry.js";
 
 export type ArtifactExecutor =
   | "pdf-lib"
@@ -11,6 +12,7 @@ export type ArtifactExecutor =
   | "chromium"
   | "react-pdf"
   | "openai-image"
+  | "fal-image"
   | "sharp";
 
 export interface OperationRoute {
@@ -71,7 +73,10 @@ export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<Ope
     if (op === "edit" && editMode === "deterministic_transform") {
       return { artifactKind: kind, operation: op, editMode, requiresAI: false, requiresModel: false, executor: "sharp" };
     }
-    return { artifactKind: kind, operation: op, editMode, requiresAI: true, requiresModel: true, executor: "openai-image" };
+    // Executor reflects the routed provider (fal vs openai); requiresAI stays true for both
+    // (the worker's OpenAI-key resolution returns undefined harmlessly for fal models).
+    const provider = findImageProvider(job.selectedModel ?? "");
+    return { artifactKind: kind, operation: op, editMode, requiresAI: true, requiresModel: true, executor: provider?.id === "fal" ? "fal-image" : "openai-image" };
   }
 
   throw new RenderError("RENDER_ENGINE_ERROR", `No executor available for artifactKind "${kind}"`);

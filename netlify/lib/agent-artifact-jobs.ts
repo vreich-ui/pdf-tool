@@ -111,6 +111,10 @@ export interface ArtifactJobRequest {
   templateRef?: PdfTemplateRef;
   data?: unknown;
   assets?: { images?: unknown[] };
+  /** OUTPUT-ONLY (server-computed at job creation; never part of the validated input
+   * schema — the three-copies rule does not apply). Static-config price estimate for the
+   * routed image model. */
+  costEstimate?: import("./image-providers/types.js").ImageJobCostEstimate;
   slot?: string;
   tags: string[];
   label?: string;

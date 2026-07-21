@@ -688,7 +688,7 @@ test("MCP JSON-RPC tools/list includes all artifact tools", async () => {
   const response = await mcpRpc("tools/list");
   assert.equal(response.statusCode, 200);
   const names = JSON.parse(response.body).result.tools.map((tool: { name: string }) => tool.name).sort();
-  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "import_image_from_url", "import_images_from_url"].sort());
+  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "get_image_model_policy", "set_image_model_policy", "import_image_from_url", "import_images_from_url"].sort());
 });
 
 
@@ -1162,8 +1162,9 @@ test("MCP tools/list schema includes image edit fields", async () => {
   assert.ok(properties.editMode);
   assert.ok(properties.maskRef);
   assert.ok(properties.editInstructions);
-  assert.deepEqual(properties.requirements.properties.image.properties.size.enum, ["1024x1024"]);
-  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png", "webp"]);
+  // PR6 widened both enums (extension-only: original values keep their positions).
+  assert.deepEqual(properties.requirements.properties.image.properties.size.enum, ["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"]);
+  assert.deepEqual(properties.requirements.properties.image.properties.outputFormat.enum, ["png", "webp", "jpeg"]);
   assert.deepEqual(properties.requirements.properties.image.properties.role.enum, ["featured"]);
   assert.ok(properties.requirements.properties.image.properties.usageContext);
   assert.ok(properties.requirements.properties.pdf);
