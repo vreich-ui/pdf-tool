@@ -6,7 +6,8 @@
   "scripts": {
     "check:eslint": "tsc --noEmit",
     "test": "npm run test:netlify",
-    "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js"
+    "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js",
+    "test:service": "npm --prefix render-service run test"
   },
   "dependencies": {
     "@netlify/blobs": "^9.1.2",
