@@ -1,0 +1,6 @@
+TBD
+# The line above is filled in and verified by render-service/deploy/cloud-run.sh on the
+# first trusted deploy: it downloads the pinned typst release tarball for TYPST_VERSION,
+# computes its sha256, writes the digest here (replacing TBD), and prints a notice asking
+# the operator to commit this file. From then on every build verifies the tarball against
+# this pinned digest (see Dockerfile ARG TYPST_SHA256) instead of trusting the network.

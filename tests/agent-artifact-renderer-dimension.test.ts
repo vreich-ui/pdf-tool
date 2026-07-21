@@ -33,19 +33,19 @@ test.beforeEach(() => {
   env();
 });
 
-test("renderer registry: pdfme and react-pdf are registered in this deployment", () => {
-  assert.deepEqual([...REGISTERED_RENDERERS], ["pdfme", "react-pdf"]);
+test("renderer registry: pdfme, react-pdf, and typst are registered in this deployment", () => {
+  assert.deepEqual([...REGISTERED_RENDERERS], ["pdfme", "react-pdf", "typst"]);
 });
 
 test("create-pdf-template rejects unregistered renderer and lists supported values", async () => {
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateJson: { source: "#set page(paper: \"a4\")" }, renderer: "typst" })
+    body: JSON.stringify({ projectId: "dr-lurie", templateJson: { html: "<main/>" }, renderer: "chromium" })
   });
   assert.equal(response.statusCode, 400);
   const body = JSON.parse(response.body);
-  assert.match(body.error, /Unsupported renderer: typst/);
+  assert.match(body.error, /Unsupported renderer: chromium/);
   assert.match(body.error, /Supported renderers: pdfme/);
 });
 

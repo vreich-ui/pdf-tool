@@ -340,6 +340,9 @@ argument:
 - `MCP_SESSION_TTL_SECONDS` (optional, default 86400): idle expiry for MCP sessions.
 - `MCP_REQUIRE_SESSION` (optional): set to `1` to reject sessionless MCP requests.
 - `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
+- `RENDER_SERVICE_URL` (required for the `typst` renderer): base URL of the Cloud Run render service (see `render-service/README.md`). Binary engines (typst; chromium in PR4) render there — Netlify inlines template/data/asset bytes per request; the storage grant never leaves Netlify. Unset ⇒ typst jobs fail with machine-readable `RENDER_SERVICE_UNCONFIGURED`.
+- `RENDER_SERVICE_SECRET` (required with `RENDER_SERVICE_URL`): shared secret sent as `x-render-secret`; the service compares it timing-safely. Set the same value on the Cloud Run service (the deploy script generates and wires one).
+- `RENDER_SERVICE_TIMEOUT_MS` (optional, default 120000): Netlify-side deadline per render-service call; expiry surfaces as `RENDER_TIMEOUT`.
 - `PDF_TOOL_SITE_ID`: Netlify site ID for pdf-tool job-state Blob storage when running outside same-site Blob context.
 - `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
   - These back the pdf-tool job store, MCP sessions, and image-search banks. When the

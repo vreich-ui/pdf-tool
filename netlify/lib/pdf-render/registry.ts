@@ -1,9 +1,10 @@
 import { pdfmeEngine } from "./engines/pdfme.js";
 import { reactPdfEngine } from "./engines/react-pdf.js";
+import { typstEngine } from "./engines/typst.js";
 import type { PdfRendererEngine, PdfRendererId, TemplateValidationResult } from "./types.js";
 
-/** Engines available in this deployment. Grows as engine PRs land (typst, chromium). */
-const engines: PdfRendererEngine[] = [pdfmeEngine, reactPdfEngine];
+/** Engines available in this deployment. Grows as engine PRs land (chromium in PR4). */
+const engines: PdfRendererEngine[] = [pdfmeEngine, reactPdfEngine, typstEngine];
 
 export const REGISTERED_RENDERERS: readonly PdfRendererId[] = engines.map((engine) => engine.id);
 

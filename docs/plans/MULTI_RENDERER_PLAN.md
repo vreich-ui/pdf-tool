@@ -5,8 +5,8 @@
 > as part of each PR.
 
 - [x] **PR1** — Renderer dimension, engine registry, legacy-path removal, error codes
-- [x] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement *(this PR)*
-- [ ] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy
+- [x] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement
+- [x] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy *(this PR — deploy pending GCP creds)*
 - [ ] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy
 - [ ] **PR5** — validate_pdf_template + publish gating + overflow diagnostics
 - [ ] **PR6** — fal.ai image adapters + usageContext routing policy + cost records
