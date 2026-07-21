@@ -5,6 +5,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { checkAuth } from "./auth.js";
 import { validateRenderRequest } from "./contract.js";
+import { chromiumAvailable, renderChromium } from "./engines/chromium.js";
 import { renderTypst, typstVersion } from "./engines/typst.js";
 
 const BODY_LIMIT_BYTES = 32 * 1024 * 1024; // 32 MB
@@ -15,17 +16,22 @@ export function buildServer(): FastifyInstance {
     logger: process.env.NODE_ENV === "production",
   });
 
-  fastify.get("/healthz", async () => {
-    const version = await typstVersion();
+  // NOTE: the PRIMARY health path is /health. Google's frontend intercepts the exact path
+  // /healthz on *.run.app (legacy GFE health checking) and answers 404 before the container
+  // is reached; /healthz is kept only as an alias for local dev and tests.
+  const healthHandler = async () => {
+    const [typstVer, chromiumInfo] = await Promise.all([typstVersion(), chromiumAvailable()]);
     return {
       ok: true,
       service: "pdf-tool-render",
       engines: {
-        typst: { available: version !== null, ...(version ? { version } : {}) },
-        chromium: { available: false },
+        typst: { available: typstVer !== null, ...(typstVer ? { version: typstVer } : {}) },
+        chromium: { available: chromiumInfo.available, ...(chromiumInfo.version ? { version: chromiumInfo.version } : {}) },
       },
     };
-  });
+  };
+  fastify.get("/health", healthHandler);
+  fastify.get("/healthz", healthHandler);
 
   fastify.post("/render/typst", async (request, reply) => {
     if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
@@ -33,7 +39,7 @@ export function buildServer(): FastifyInstance {
       return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
     }
 
-    const validated = validateRenderRequest(request.body);
+    const validated = validateRenderRequest(request.body, "typst");
     if (!validated.ok) {
       reply.code(validated.status);
       return { ok: false, code: validated.code, message: validated.message };
@@ -73,8 +79,41 @@ export function buildServer(): FastifyInstance {
       reply.code(401);
       return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
     }
-    reply.code(501);
-    return { ok: false, code: "RENDERER_NOT_AVAILABLE", message: "chromium engine lands in PR4" };
+
+    const validated = validateRenderRequest(request.body, "chromium");
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await renderChromium(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "RENDER_ENGINE_ERROR",
+        message: `Unexpected chromium engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status =
+        result.code === "RENDER_TIMEOUT" ? 504 : result.code === "PDF_REQ_MAX_BYTES" ? 507 : result.code === "DATA_BINDING_ERROR" ? 400 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      pdfBase64: result.pdfBytes.toString("base64"),
+      diagnostics: {
+        ...result.diagnostics,
+        engine: { id: "chromium", executedIn: "render-service" },
+      },
+    };
   });
 
   return fastify;

@@ -19,7 +19,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { NormalizedRenderRequest } from "../contract.js";
+import type { NormalizedTypstRenderRequest } from "../contract.js";
+import { resolveFontDir } from "../fonts.js";
 import { inspectPdf } from "../inspect.js";
 
 const STDERR_TAIL_MAX_CHARS = 2000;
@@ -42,14 +43,6 @@ export type TypstRenderResult =
 
 function typstBin(): string {
   return process.env.TYPST_BIN ?? "typst";
-}
-
-/** FONT_DIR: env override, else /srv/fonts (image path), else the local repo fonts/ dir. */
-function fontDir(): string {
-  const envDir = process.env.RENDER_SERVICE_FONT_DIR;
-  if (envDir) return envDir;
-  if (existsSync("/srv/fonts")) return "/srv/fonts";
-  return path.join(RENDER_SERVICE_ROOT, "fonts");
 }
 
 /** VENDOR: env override, else /srv/vendor/typst-packages (image path), else the local repo vendor dir. */
@@ -101,7 +94,7 @@ export function typstVersion(): Promise<string | null> {
 }
 
 /** Renders a typst template in an isolated temp root. Always cleans up the temp root. */
-export async function renderTypst(request: NormalizedRenderRequest): Promise<TypstRenderResult> {
+export async function renderTypst(request: NormalizedTypstRenderRequest): Promise<TypstRenderResult> {
   const tmpRoot = await mkdtemp(path.join(tmpdir(), "typst-render-"));
   try {
     await writeFile(path.join(tmpRoot, "main.typ"), request.templateSource, "utf8");
@@ -135,7 +128,7 @@ export async function renderTypst(request: NormalizedRenderRequest): Promise<Typ
       "--font-path",
       fontsDir,
       "--font-path",
-      fontDir(),
+      resolveFontDir(),
       "--ignore-system-fonts",
       "--input",
       `data=${JSON.stringify(request.data ?? {})}`,

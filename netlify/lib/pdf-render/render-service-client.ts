@@ -24,8 +24,13 @@ export interface RenderServiceFont {
   bytesBase64: string;
 }
 
+/** typst templates are a single source; chromium templates are Liquid html + css + partials. */
+export type RenderServiceTemplate =
+  | { source: string }
+  | { html: string; css?: string; assets?: { partials?: Record<string, string> } };
+
 export interface RenderServiceRequest {
-  template: { source: string };
+  template: RenderServiceTemplate;
   data?: unknown;
   requirements?: {
     format?: "A4" | "Letter";
@@ -43,6 +48,8 @@ export interface RenderServiceDiagnostics {
   pageCount?: number;
   sizeBytes?: number;
   pages?: Array<{ widthPt: number; heightPt: number }>;
+  /** Validation-mode layout overflow findings (chromium). */
+  overflows?: Array<Record<string, unknown>>;
   engineWarnings?: string[];
 }
 

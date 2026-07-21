@@ -6,8 +6,8 @@
 
 - [x] **PR1** — Renderer dimension, engine registry, legacy-path removal, error codes
 - [x] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement
-- [x] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy *(this PR — deploy pending GCP creds)*
-- [ ] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy
+- [x] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy *(deployed 2026-07-21)*
+- [x] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy *(this PR — deployed + live-smoked)*
 - [ ] **PR5** — validate_pdf_template + publish gating + overflow diagnostics
 - [ ] **PR6** — fal.ai image adapters + usageContext routing policy + cost records
 
@@ -635,7 +635,7 @@ when a fal model is actually selected).
 
 - **Per-PR**: commands in each PR's DoD (`npm run check:eslint && npm test`, `test:service`,
   `docker build render-service`).
-- **Post-PR3/PR4 (deployed)**: `curl $RENDER_SERVICE_URL/healthz`; authenticated sample
+- **Post-PR3/PR4 (deployed)**: `curl $RENDER_SERVICE_URL/health`; authenticated sample
   renders for typst + chromium via the deploy script's smoke step.
 - **Live MCP smoke (after each engine PR, optional but recommended)**: against the deployed
   Netlify site with a real storage grant — `create_pdf_template(renderer=X)` →

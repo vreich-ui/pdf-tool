@@ -1,6 +1,2 @@
-TBD
-# The line above is filled in and verified by render-service/deploy/cloud-run.sh on the
-# first trusted deploy: it downloads the pinned typst release tarball for TYPST_VERSION,
-# computes its sha256, writes the digest here (replacing TBD), and prints a notice asking
-# the operator to commit this file. From then on every build verifies the tarball against
-# this pinned digest (see Dockerfile ARG TYPST_SHA256) instead of trusting the network.
+59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea
+# sha256 of typst-x86_64-unknown-linux-musl.tar.xz for typst v0.15.0, computed inside Cloud Build on 2026-07-21T14:12:48Z.
