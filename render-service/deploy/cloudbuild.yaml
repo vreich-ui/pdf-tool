@@ -1,22 +1,42 @@
 # Cloud Build config for render-service/Dockerfile. `gcloud builds submit` does not accept
 # --build-arg directly, so the typst version/sha256 pin travels in as substitutions instead
 # (see deploy/cloud-run.sh, which passes --substitutions=_TYPST_VERSION=...,_TYPST_SHA256=...).
+#
+# Step 0 downloads the typst release tarball inside Cloud Build (Google egress) and either
+# VERIFIES it against the pinned _TYPST_SHA256, or — when the pin is "TBD" (first trusted
+# deploy, possibly from a machine that cannot reach GitHub) — computes the digest and logs
+# it as `TYPST_TARBALL_SHA256=<sha>` so deploy/cloud-run.sh can pin it in typst.sha256.
 steps:
-  - name: gcr.io/cloud-builders/docker
+  - id: resolve-typst-sha
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
     args:
-      - build
-      - --build-arg
-      - TYPST_VERSION=${_TYPST_VERSION}
-      - --build-arg
-      - TYPST_SHA256=${_TYPST_SHA256}
-      - -t
-      - ${_IMAGE_TAG}
-      - .
+      - -ceu
+      - |
+        curl -fsSL -o /workspace/typst.tar.xz \
+          "https://github.com/typst/typst/releases/download/v${_TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
+        ACTUAL="$$(sha256sum /workspace/typst.tar.xz | awk '{print $$1}')"
+        echo "TYPST_TARBALL_SHA256=$${ACTUAL}"
+        if [ "${_TYPST_SHA256}" != "TBD" ] && [ -n "${_TYPST_SHA256}" ] && [ "${_TYPST_SHA256}" != "$${ACTUAL}" ]; then
+          echo "ERROR: typst tarball sha256 mismatch: pinned ${_TYPST_SHA256}, got $${ACTUAL}" >&2
+          exit 1
+        fi
+        printf '%s' "$${ACTUAL}" > /workspace/typst.sha
+  - id: docker-build
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        docker build \
+          --build-arg TYPST_VERSION=${_TYPST_VERSION} \
+          --build-arg TYPST_SHA256="$$(cat /workspace/typst.sha)" \
+          -t ${_IMAGE_TAG} .
 images:
   - ${_IMAGE_TAG}
 substitutions:
   _TYPST_VERSION: "0.15.0"
-  _TYPST_SHA256: ""
+  _TYPST_SHA256: "TBD"
   _IMAGE_TAG: "pdf-tool-render:local"
 options:
   substitution_option: ALLOW_LOOSE
