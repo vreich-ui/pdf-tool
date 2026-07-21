@@ -81,21 +81,28 @@ fi
 SHA_FILE="${RENDER_SERVICE_DIR}/typst.sha256"
 CURRENT_SHA_LINE="$(head -n1 "${SHA_FILE}" 2>/dev/null || true)"
 if [[ -z "${CURRENT_SHA_LINE}" || "${CURRENT_SHA_LINE}" == "TBD" ]]; then
-  echo "== typst.sha256 is unset (TBD) — downloading typst v${TYPST_VERSION} to compute + pin it =="
+  echo "== typst.sha256 is unset (TBD) — trying to download typst v${TYPST_VERSION} to compute + pin it =="
   TARBALL_URL="https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz"
   TMP_TARBALL="$(mktemp)"
-  curl -fsSL -o "${TMP_TARBALL}" "${TARBALL_URL}"
-  COMPUTED_SHA="$(sha256sum "${TMP_TARBALL}" | awk '{print $1}')"
-  rm -f "${TMP_TARBALL}"
-  {
-    echo "${COMPUTED_SHA}"
-    echo "# sha256 of typst-x86_64-unknown-linux-musl.tar.xz for typst v${TYPST_VERSION}, pinned by deploy/cloud-run.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
-  } > "${SHA_FILE}"
-  echo "##############################################################################"
-  echo "# typst.sha256 was just filled in with a freshly computed digest."
-  echo "# >>> COMMIT render-service/typst.sha256 to source control now. <<<"
-  echo "##############################################################################"
-  TYPST_SHA256="${COMPUTED_SHA}"
+  if curl -fsSL -o "${TMP_TARBALL}" "${TARBALL_URL}"; then
+    COMPUTED_SHA="$(sha256sum "${TMP_TARBALL}" | awk '{print $1}')"
+    rm -f "${TMP_TARBALL}"
+    {
+      echo "${COMPUTED_SHA}"
+      echo "# sha256 of typst-x86_64-unknown-linux-musl.tar.xz for typst v${TYPST_VERSION}, pinned by deploy/cloud-run.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    } > "${SHA_FILE}"
+    echo "##############################################################################"
+    echo "# typst.sha256 was just filled in with a freshly computed digest."
+    echo "# >>> COMMIT render-service/typst.sha256 to source control now. <<<"
+    echo "##############################################################################"
+    TYPST_SHA256="${COMPUTED_SHA}"
+  else
+    rm -f "${TMP_TARBALL}"
+    echo "Download blocked/unavailable from this machine — Cloud Build's resolve-typst-sha step"
+    echo "will compute the digest inside Google's network (trust-on-first-use) and log it as"
+    echo "TYPST_TARBALL_SHA256=<sha>; this script pins it into typst.sha256 afterwards."
+    TYPST_SHA256="TBD"
+  fi
 else
   TYPST_SHA256="${CURRENT_SHA_LINE}"
   echo "== Using pinned typst sha256 from typst.sha256: ${TYPST_SHA256} =="
@@ -106,9 +113,34 @@ GIT_SHA="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD)"
 IMAGE_TAG="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPO}/${IMAGE_NAME}:${GIT_SHA}"
 
 echo "== Building + pushing ${IMAGE_TAG} via Cloud Build =="
+BUILD_LOG="$(mktemp)"
+# --gcs-log-dir: the DEFAULT logs bucket is outside the project and only streams for
+# project Viewers/Owners; a deploy service account with Storage Admin can stream from the
+# project's own staging bucket instead.
 gcloud builds submit "${RENDER_SERVICE_DIR}" \
   --config="${RENDER_SERVICE_DIR}/deploy/cloudbuild.yaml" \
-  --substitutions="_TYPST_VERSION=${TYPST_VERSION},_TYPST_SHA256=${TYPST_SHA256},_IMAGE_TAG=${IMAGE_TAG}"
+  --gcs-log-dir="gs://${GCP_PROJECT_ID}_cloudbuild/logs" \
+  --substitutions="_TYPST_VERSION=${TYPST_VERSION},_TYPST_SHA256=${TYPST_SHA256},_IMAGE_TAG=${IMAGE_TAG}" \
+  2>&1 | tee "${BUILD_LOG}"
+
+# When the pin was TBD, Cloud Build's resolve-typst-sha step computed the digest — pin it now.
+if [[ "${TYPST_SHA256}" == "TBD" ]]; then
+  COMPUTED_SHA="$(grep -oE 'TYPST_TARBALL_SHA256=[0-9a-f]{64}' "${BUILD_LOG}" | head -n1 | cut -d= -f2 || true)"
+  if [[ -n "${COMPUTED_SHA}" ]]; then
+    {
+      echo "${COMPUTED_SHA}"
+      echo "# sha256 of typst-x86_64-unknown-linux-musl.tar.xz for typst v${TYPST_VERSION}, computed inside Cloud Build on $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    } > "${SHA_FILE}"
+    echo "##############################################################################"
+    echo "# typst.sha256 pinned from the Cloud Build log: ${COMPUTED_SHA}"
+    echo "# >>> COMMIT render-service/typst.sha256 to source control now. <<<"
+    echo "##############################################################################"
+  else
+    echo "WARNING: could not extract TYPST_TARBALL_SHA256 from the build log (streaming may be" >&2
+    echo "CLOUD_LOGGING_ONLY); fetch it with: gcloud builds log <build-id> | grep TYPST_TARBALL_SHA256" >&2
+  fi
+fi
+rm -f "${BUILD_LOG}"
 
 # --- secret ---------------------------------------------------------------------------------
 SECRET="${RENDER_SERVICE_SECRET:-$(openssl rand -hex 32)}"
@@ -129,15 +161,17 @@ SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION
 echo "Service URL: ${SERVICE_URL}"
 
 # --- smoke test -------------------------------------------------------------------------------
-echo "== Smoke test: GET /healthz =="
-HEALTH_RESPONSE="$(curl -fsS "${SERVICE_URL}/healthz")"
+# /health, not /healthz: Google's frontend intercepts the exact path /healthz on *.run.app
+# and answers 404 before the container is reached.
+echo "== Smoke test: GET /health =="
+HEALTH_RESPONSE="$(curl -fsS "${SERVICE_URL}/health")"
 echo "${HEALTH_RESPONSE}"
 if ! grep -q '"ok":true' <<<"${HEALTH_RESPONSE}"; then
-  echo "ERROR: /healthz did not report ok:true" >&2
+  echo "ERROR: /health did not report ok:true" >&2
   exit 1
 fi
 if ! grep -q '"typst":{"available":true' <<<"${HEALTH_RESPONSE}"; then
-  echo "ERROR: /healthz reports typst engine unavailable" >&2
+  echo "ERROR: /health reports typst engine unavailable" >&2
   exit 1
 fi
 

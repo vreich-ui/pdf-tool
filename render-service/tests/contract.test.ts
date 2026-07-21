@@ -135,8 +135,10 @@ after(async () => {
   await server.close();
 });
 
-test("GET /healthz is unauthenticated and reports the expected shape", async () => {
-  const response = await server.inject({ method: "GET", url: "/healthz" });
+test("GET /health (and its /healthz alias) is unauthenticated and reports the expected shape", async () => {
+  const aliasResponse = await server.inject({ method: "GET", url: "/healthz" });
+  assert.equal(aliasResponse.statusCode, 200);
+  const response = await server.inject({ method: "GET", url: "/health" });
   assert.equal(response.statusCode, 200);
   const body = response.json();
   assert.equal(body.ok, true);

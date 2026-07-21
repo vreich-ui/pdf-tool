@@ -635,7 +635,7 @@ when a fal model is actually selected).
 
 - **Per-PR**: commands in each PR's DoD (`npm run check:eslint && npm test`, `test:service`,
   `docker build render-service`).
-- **Post-PR3/PR4 (deployed)**: `curl $RENDER_SERVICE_URL/healthz`; authenticated sample
+- **Post-PR3/PR4 (deployed)**: `curl $RENDER_SERVICE_URL/health`; authenticated sample
   renders for typst + chromium via the deploy script's smoke step.
 - **Live MCP smoke (after each engine PR, optional but recommended)**: against the deployed
   Netlify site with a real storage grant — `create_pdf_template(renderer=X)` →
