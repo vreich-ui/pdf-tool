@@ -26,6 +26,9 @@ export interface RenderDiagnostics {
   /** How requirements.margins were honored: applied by the engine, advisory because the
    * template overrides them, or not applicable (no margins requested / engine ignores them). */
   marginsApplied?: "engine" | "template-advisory" | "not-applicable";
+  /** Validation-mode layout overflow findings (chromium; best-effort). Surfaced by PR5's
+   * validate_pdf_template reports. */
+  overflows?: Array<Record<string, unknown>>;
   engineWarnings?: string[];
   engine: { id: PdfRendererId; executedIn: "netlify" | "render-service" };
 }

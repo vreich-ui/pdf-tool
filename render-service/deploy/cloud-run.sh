@@ -155,6 +155,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --cpu=1 \
   --timeout=300 \
   --max-instances=3 \
+  --concurrency=4 \
   --set-env-vars="RENDER_SERVICE_SECRET=${SECRET}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
@@ -174,6 +175,10 @@ if ! grep -q '"typst":{"available":true' <<<"${HEALTH_RESPONSE}"; then
   echo "ERROR: /health reports typst engine unavailable" >&2
   exit 1
 fi
+if ! grep -q '"chromium":{"available":true' <<<"${HEALTH_RESPONSE}"; then
+  echo "ERROR: /health reports chromium engine unavailable" >&2
+  exit 1
+fi
 
 echo "== Smoke test: authenticated sample typst render =="
 SMOKE_BODY_FILE="$(mktemp)"
@@ -190,7 +195,24 @@ if ! grep -q '"ok":true' <<<"${RENDER_RESPONSE}"; then
   echo "${RENDER_RESPONSE}" >&2
   exit 1
 fi
-echo "Sample render succeeded."
+echo "Sample typst render succeeded."
+
+echo "== Smoke test: authenticated sample chromium render =="
+CHROMIUM_SMOKE_BODY_FILE="$(mktemp)"
+cat > "${CHROMIUM_SMOKE_BODY_FILE}" <<'JSON'
+{"template":{"html":"<h1>Smoke</h1><p>{{ label }}</p>"},"data":{"label":"ok"}}
+JSON
+CHROMIUM_RENDER_RESPONSE="$(curl -fsS -X POST "${SERVICE_URL}/render/chromium" \
+  -H "content-type: application/json" \
+  -H "x-render-secret: ${SECRET}" \
+  --data @"${CHROMIUM_SMOKE_BODY_FILE}")"
+rm -f "${CHROMIUM_SMOKE_BODY_FILE}"
+if ! grep -q '"ok":true' <<<"${CHROMIUM_RENDER_RESPONSE}"; then
+  echo "ERROR: sample chromium render did not report ok:true" >&2
+  echo "${CHROMIUM_RENDER_RESPONSE}" >&2
+  exit 1
+fi
+echo "Sample chromium render succeeded."
 
 # --- persist secret locally (never echoed) ----------------------------------------------------
 LOCAL_DIR="${RENDER_SERVICE_DIR}/.local"

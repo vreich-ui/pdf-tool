@@ -141,7 +141,7 @@ test("MCP surface: create_pdf_template enum lists react-pdf and tools/call creat
   const tools = JSON.parse(listRes.body).result.tools as Array<{ name: string; inputSchema: { properties: { renderer?: { enum?: string[] } } } }>;
   const createTool = tools.find((tool) => tool.name === "create_pdf_template");
   assert.ok(createTool, "create_pdf_template must be listed");
-  assert.deepEqual(createTool!.inputSchema.properties.renderer?.enum, ["pdfme", "react-pdf", "typst"]);
+  assert.deepEqual(createTool!.inputSchema.properties.renderer?.enum, ["pdfme", "react-pdf", "typst", "chromium"]);
 
   const callRes = await mcpServerHandler({
     httpMethod: "POST",

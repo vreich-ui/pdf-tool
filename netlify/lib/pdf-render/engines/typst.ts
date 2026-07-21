@@ -10,8 +10,8 @@
  * reported as "template-advisory".
  */
 import { RenderError } from "../errors.js";
-import { callRenderService, type RenderServiceAsset } from "../render-service-client.js";
-import { DOC_TREE_LIMITS } from "../doc-tree/schema.js";
+import { callRenderService } from "../render-service-client.js";
+import { resolveJobAssetsForService } from "../job-assets.js";
 import type { PdfRendererEngine, RenderInput, RenderOutput, TemplateValidationResult } from "../types.js";
 
 const MAX_TYPST_SOURCE_BYTES = 2_000_000;
@@ -36,38 +36,6 @@ function validateTypstTemplate(templateJson: unknown): TemplateValidationResult 
   return { valid: issues.length === 0, issues };
 }
 
-interface JobImageAssetEntry {
-  assetId?: string;
-  name?: string;
-  id?: string;
-  dataUri?: string;
-}
-
-/**
- * Inlines job assets for the service. PR3 scope: dataUri entries only (blob-backed job
- * assets for typst land alongside the chromium asset pipeline in PR4).
- */
-function inlineJobAssets(assets: RenderInput["assets"]): RenderServiceAsset[] {
-  const entries: JobImageAssetEntry[] = Array.isArray(assets?.images) ? (assets.images as JobImageAssetEntry[]) : [];
-  const inlined: RenderServiceAsset[] = [];
-  for (const entry of entries) {
-    if (!entry || typeof entry !== "object") continue;
-    const name = entry.assetId ?? entry.name ?? entry.id;
-    if (!name || typeof entry.dataUri !== "string") continue;
-    const comma = entry.dataUri.indexOf(",");
-    if (comma < 0) continue;
-    const contentType = entry.dataUri.slice(entry.dataUri.indexOf(":") + 1, entry.dataUri.indexOf(";"));
-    const bytesBase64 = entry.dataUri.slice(comma + 1);
-    const decodedBytes = Math.floor((bytesBase64.length * 3) / 4);
-    if (decodedBytes > DOC_TREE_LIMITS.maxAssetBytes) {
-      throw new RenderError("ASSET_TOO_LARGE", `Job asset "${name}" exceeds ${DOC_TREE_LIMITS.maxAssetBytes} bytes`, { name, decodedBytes });
-    }
-    // Collapse dot runs too: the service rejects any name containing ".." outright.
-    inlined.push({ name: name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/\.{2,}/g, "."), contentType, bytesBase64 });
-  }
-  return inlined;
-}
-
 async function renderTypst(input: RenderInput): Promise<RenderOutput> {
   const validation = validateTypstTemplate(input.template.templateJson);
   if (!validation.valid) {
@@ -88,7 +56,7 @@ async function renderTypst(input: RenderInput): Promise<RenderOutput> {
           pageCount: input.requirements.pageCount,
         }
       : undefined,
-    assets: inlineJobAssets(input.assets),
+    assets: await resolveJobAssetsForService(input.projectId, input.assets),
     options: { mode: input.mode },
     ...(input.requirements?.maxBytes ? { maxOutputBytes: input.requirements.maxBytes } : {}),
   });
