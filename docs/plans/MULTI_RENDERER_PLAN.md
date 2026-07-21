@@ -7,8 +7,8 @@
 - [x] **PR1** — Renderer dimension, engine registry, legacy-path removal, error codes
 - [x] **PR2** — react-pdf engine + docTree schema + PDF inspection + requirements enforcement
 - [x] **PR3** — Cloud Run render service + typst 0.15 engine + auto deploy *(deployed 2026-07-21)*
-- [x] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy *(this PR — deployed + live-smoked)*
-- [ ] **PR5** — validate_pdf_template + publish gating + overflow diagnostics
+- [x] **PR4** — chromium engine (LiquidJS + closed-network sandbox) + service redeploy *(deployed + live-smoked)*
+- [x] **PR5** — validate_pdf_template + publish gating + overflow diagnostics *(this PR)*
 - [ ] **PR6** — fal.ai image adapters + usageContext routing policy + cost records
 
 Execution rules: root `npm run check:eslint && npm test` must pass on a plain checkout for every

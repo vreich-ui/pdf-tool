@@ -1,7 +1,7 @@
 import { getPdfTemplate, getPdfTemplateMeta, type PdfTemplateRecord } from "../pdf-template-store.js";
 import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements } from "../agent-artifact-jobs.js";
 import { RenderError } from "./errors.js";
-import { enforcePdfRequirements, inspectPdf } from "./inspect.js";
+import { enforcePdfRequirements, inspectPdf, type RequirementFailure } from "./inspect.js";
 import { getPdfRendererEngine, REGISTERED_RENDERERS } from "./registry.js";
 import { isKnownRendererId, type RenderDiagnostics } from "./types.js";
 
@@ -12,6 +12,8 @@ export interface RenderPdfArtifactOutput {
   template: { templateId: string; version: number; renderer: string };
   validation: { pageCount: number; sizeBytes: number };
   diagnostics: RenderDiagnostics;
+  /** Only with onRequirementFailure: "collect" — every failed requirement check (empty = passed). */
+  requirementFailures?: RequirementFailure[];
 }
 
 /**
@@ -30,6 +32,10 @@ export async function renderPdfArtifact(options: {
   assets?: { images?: unknown[] };
   requirements?: NormalizedArtifactJobRequirements;
   mode?: "final" | "validation";
+  /** "throw" (default): first requirement failure throws a RenderError. "collect": failures
+   * are returned in requirementFailures instead — used by pre-publish validation renders,
+   * which want the full failure list plus diagnostics rather than an exception. */
+  onRequirementFailure?: "throw" | "collect";
 }): Promise<RenderPdfArtifactOutput> {
   const { projectId, templateId, data, assets, requirements } = options;
   const mode = options.mode ?? "final";
@@ -79,7 +85,7 @@ export async function renderPdfArtifact(options: {
     orientation: pdfRequirements?.orientation,
     maxBytes: pdfRequirements?.maxBytes ?? requirements?.maxBytes,
   }, { maxBytesCeiling: MAX_PDF_OUTPUT_BYTES });
-  if (failures.length > 0) {
+  if (failures.length > 0 && (options.onRequirementFailure ?? "throw") === "throw") {
     const [first] = failures;
     throw new RenderError(first.code, first.message, { ...(first.detail ?? {}), failures });
   }
@@ -98,5 +104,6 @@ export async function renderPdfArtifact(options: {
     template: { templateId: record.templateId, version: record.version, renderer: record.renderer },
     validation: { pageCount: inspection.pageCount, sizeBytes: inspection.sizeBytes },
     diagnostics,
+    ...(options.onRequirementFailure === "collect" ? { requirementFailures: failures } : {}),
   };
 }

@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
 import { RenderError } from "./pdf-render/errors.js";
-import type { PdfRendererId } from "./pdf-render/types.js";
+import { getPdfRendererEngine } from "./pdf-render/registry.js";
+import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
 
 export type PdfTemplateStatus = "draft" | "active" | "disabled";
 
@@ -202,7 +203,55 @@ export async function getPdfTemplateMeta(projectId: string, templateId: string):
   return meta;
 }
 
-export async function publishPdfTemplate(projectId: string, templateId: string, version?: number): Promise<PdfTemplateRecord | null> {
+/** Pre-publish validation render report, colocated with the template it validates
+ * (`<ns>/<safeId>/validation/v<n>.json` in the templates store — NOT the artifact-jobs
+ * store, so the triple-synced job input schema stays untouched). */
+export interface PdfTemplateValidationReport {
+  validationId: string;
+  projectId: string;
+  templateId: string;
+  version: number;
+  renderer: PdfRendererId;
+  status: "running" | "passed" | "failed";
+  dataSha256: string;
+  /** Worst-case data used for the validation render. Stored so the background worker can
+   * read its own inputs; STRIPPED from get_pdf_template_validation responses. */
+  data?: unknown;
+  requirements?: unknown;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  diagnostics?: unknown;
+  requirementFailures?: Array<{ code: string; message: string; detail?: Record<string, unknown> }>;
+  error?: string;
+  errorCode?: string;
+}
+
+function validationKey(templateId: string, version: number): string {
+  return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/validation/v${version}.json`;
+}
+
+export async function readPdfTemplateValidation(projectId: string, templateId: string, version: number): Promise<PdfTemplateValidationReport | null> {
+  const store = await openTemplateStore(projectId);
+  const report = await store.get(validationKey(templateId, version), { type: "json" }).catch(() => null) as PdfTemplateValidationReport | null;
+  if (!report || report.projectId !== projectId) return null;
+  return report;
+}
+
+export async function writePdfTemplateValidation(projectId: string, report: PdfTemplateValidationReport): Promise<void> {
+  const store = await openTemplateStore(projectId);
+  await store.setJSON(validationKey(report.templateId, report.version), report);
+}
+
+export interface PublishPdfTemplateResult {
+  record: PdfTemplateRecord;
+  /** Present when a PASSED validation report backs this publish. */
+  validation?: { validationId: string; status: "passed"; completedAt?: string; dataSha256: string };
+  /** pdfme only (warn-gate): set when publishing without a passed validation report. */
+  validationWarning?: string;
+}
+
+export async function publishPdfTemplate(projectId: string, templateId: string, version?: number): Promise<PublishPdfTemplateResult | null> {
   const store = await openTemplateStore(projectId);
 
   const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
@@ -211,6 +260,45 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   const targetVersion = version ?? meta.latestVersion;
   const record = await store.get(versionKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
   if (!record || record.projectId !== projectId) return null;
+
+  // Publish gating: engines with publishGate "hard" (react-pdf, typst, chromium) require a
+  // PASSED validation render for the EXACT target version — no override in v1. pdfme is
+  // warn-only for back-compat with existing active templates.
+  const engine = isKnownRendererId(record.renderer) ? getPdfRendererEngine(record.renderer) : undefined;
+  const rawReport = await store.get(validationKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateValidationReport | null;
+  const report = rawReport && rawReport.projectId === projectId ? rawReport : null;
+  let validation: PublishPdfTemplateResult["validation"];
+  let validationWarning: string | undefined;
+  if (engine?.publishGate === "hard") {
+    if (!report || report.status === "running") {
+      throw new RenderError(
+        "TEMPLATE_VALIDATION_REQUIRED",
+        `Publishing a ${record.renderer} template requires a passed validation render for version ${targetVersion}; run validate_pdf_template with worst-case data and poll get_pdf_template_validation first`,
+        { templateId, version: targetVersion, renderer: record.renderer, ...(report ? { validationId: report.validationId, status: report.status } : {}) }
+      );
+    }
+    if (report.status === "failed") {
+      throw new RenderError(
+        "TEMPLATE_VALIDATION_FAILED",
+        `Validation render for "${templateId}" v${targetVersion} failed; fix the template or worst-case data and re-run validate_pdf_template`,
+        {
+          templateId,
+          version: targetVersion,
+          validationId: report.validationId,
+          ...(report.requirementFailures?.length ? { requirementFailures: report.requirementFailures } : {}),
+          ...(report.errorCode ? { errorCode: report.errorCode } : {}),
+          ...(report.error ? { error: report.error } : {}),
+        }
+      );
+    }
+    validation = { validationId: report.validationId, status: "passed", completedAt: report.completedAt, dataSha256: report.dataSha256 };
+  } else if (report?.status === "passed") {
+    validation = { validationId: report.validationId, status: "passed", completedAt: report.completedAt, dataSha256: report.dataSha256 };
+  } else if (report?.status === "failed") {
+    validationWarning = `The validation render for "${templateId}" v${targetVersion} FAILED (${report.errorCode ?? report.requirementFailures?.[0]?.code ?? "see report"}); ${record.renderer} publishes are warn-only, but this template likely misrenders — check get_pdf_template_validation`;
+  } else {
+    validationWarning = `No passed validation render exists for "${templateId}" v${targetVersion}; ${record.renderer} publishes are warn-only — consider validate_pdf_template before relying on this template`;
+  }
 
   const now = new Date().toISOString();
   const updatedRecord: PdfTemplateRecord = { ...record, status: "active", updatedAt: now };
@@ -224,5 +312,5 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   await store.setJSON(versionKey(templateId, targetVersion), updatedRecord);
   await store.setJSON(metaKey(templateId), updatedMeta);
 
-  return updatedRecord;
+  return { record: updatedRecord, ...(validation ? { validation } : {}), ...(validationWarning ? { validationWarning } : {}) };
 }

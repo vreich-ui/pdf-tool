@@ -17,6 +17,7 @@ import { renderPdfArtifact } from "../netlify/lib/pdf-render/render.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { getProjectAdapter } from "../netlify/lib/agent-project-registry.js";
 import { inspectPdf } from "../netlify/lib/pdf-render/inspect.js";
+import { writePdfTemplateValidation } from "../netlify/lib/pdf-template-store.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -113,7 +114,28 @@ async function createReactPdfTemplate(templateId: string, templateJson: unknown 
   });
 }
 
-async function publishTemplate(templateId: string) {
+// PR5: react-pdf has a HARD publish gate (a passed validate_pdf_template report is required).
+// This suite tests ENGINE behavior, not gating, so seed a synthetic passed report before every
+// publish here — the dedicated validation suite (agent-artifact-template-validation.test.ts)
+// exercises the real validate → publish gating flows.
+async function seedPassedValidation(templateId: string, version = 1) {
+  const now = new Date().toISOString();
+  await writePdfTemplateValidation("dr-lurie", {
+    validationId: `seed-${templateId}-v${version}`,
+    projectId: "dr-lurie",
+    templateId,
+    version,
+    renderer: "react-pdf",
+    status: "passed",
+    dataSha256: "seeded",
+    createdAt: now,
+    updatedAt: now,
+    completedAt: now,
+  });
+}
+
+async function publishTemplate(templateId: string, version = 1) {
+  await seedPassedValidation(templateId, version);
   const res = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,

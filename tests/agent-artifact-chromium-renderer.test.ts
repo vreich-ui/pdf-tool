@@ -12,6 +12,7 @@ import { handler as createHandler } from "../netlify/functions/create-pdf-templa
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
+import { writePdfTemplateValidation } from "../netlify/lib/pdf-template-store.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -81,6 +82,26 @@ async function startMockService(respond: (request: CapturedRequest, callIndex: n
   };
 }
 
+// PR5: chromium has a HARD publish gate (a passed validate_pdf_template report is required).
+// This suite tests ENGINE behavior, not gating, so seed a synthetic passed report before every
+// publish here — the dedicated validation suite (agent-artifact-template-validation.test.ts)
+// exercises the real validate → publish gating flows.
+async function seedPassedValidation(templateId: string, version = 1) {
+  const now = new Date().toISOString();
+  await writePdfTemplateValidation("dr-lurie", {
+    validationId: `seed-${templateId}-v${version}`,
+    projectId: "dr-lurie",
+    templateId,
+    version,
+    renderer: "chromium",
+    status: "passed",
+    dataSha256: "seeded",
+    createdAt: now,
+    updatedAt: now,
+    completedAt: now,
+  });
+}
+
 async function buildPdfBase64(): Promise<string> {
   const { PDFDocument } = (await import("@pdfme/pdf-lib")) as unknown as {
     PDFDocument: { create(): Promise<{ addPage(size: [number, number]): unknown; save(): Promise<Uint8Array> }> };
@@ -140,6 +161,7 @@ test("chromium happy path: worker sends html/css/partials, data, mode, requireme
       body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-e2e", templateJson: chromiumTemplate, renderer: "chromium" }),
     });
     assert.equal(created.statusCode, 201);
+    await seedPassedValidation("chromium-e2e");
     const published = await publishHandler({
       httpMethod: "POST",
       headers: AUTH,
@@ -209,6 +231,7 @@ test("chromium ok:false passthrough: service DATA_BINDING_ERROR surfaces as the 
       headers: AUTH,
       body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-binding", templateJson: chromiumTemplate, renderer: "chromium" }),
     });
+    await seedPassedValidation("chromium-binding");
     await publishHandler({
       httpMethod: "POST",
       headers: AUTH,
@@ -244,6 +267,7 @@ test("chromium without service env fails with RENDER_SERVICE_UNCONFIGURED", asyn
     headers: AUTH,
     body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-unconf", templateJson: chromiumTemplate, renderer: "chromium" }),
   });
+  await seedPassedValidation("chromium-unconf");
   await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
