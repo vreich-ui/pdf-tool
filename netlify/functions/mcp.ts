@@ -10,11 +10,12 @@ import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.j
 import { recordInvocation } from "../lib/instance-metrics.js";
 import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
 import { getPdfTemplateValidation, startPdfTemplateValidation, type GetPdfTemplateValidationInput, type ValidatePdfTemplateInput } from "../lib/pdf-template-validation.js";
+import { loadProjectImageModelPolicy, saveProjectImageModelPolicy, validateImageModelPolicyPatch } from "../lib/image-routing/policy.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "validate_pdf_template" | "get_pdf_template_validation" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "import_image_from_url" | "import_images_from_url";
+type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "validate_pdf_template" | "get_pdf_template_validation" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "get_image_model_policy" | "set_image_model_policy" | "import_image_from_url" | "import_images_from_url";
 
 // Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
 // to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds none.
@@ -134,8 +135,8 @@ const baseTools = [
               type: "object",
               additionalProperties: false,
               properties: {
-                size: { type: "string", enum: ["1024x1024"] },
-                outputFormat: { type: "string", enum: ["png", "webp"] },
+                size: { type: "string", enum: ["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"] },
+                outputFormat: { type: "string", enum: ["png", "webp", "jpeg"] },
                 role: { type: "string", enum: ["featured"] },
                 usageContext: { type: "string", enum: ["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"] }
               }
@@ -433,6 +434,31 @@ const baseTools = [
         policy: { type: "object", additionalProperties: true, description: "Partial ImageSourcingPolicy JSON" }
       }
     }
+  },
+  {
+    name: "get_image_model_policy",
+    description: "Read the project's effective image MODEL routing policy (stored policy merged over defaults): which generation model each requirements.image.usageContext routes to when a job omits `model`. Defaults route article_header/article_body/category_page to fal-ai/flux-2/klein/9b; text-in-image contexts fall back to the project default backend. An explicit job `model` always wins.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId"],
+      properties: {
+        projectId: { type: "string" }
+      }
+    }
+  },
+  {
+    name: "set_image_model_policy",
+    description: "Replace the project's stored image model routing policy with the given partial policy (validated, merged over defaults). Entries map usageContext to { model } (null clears an entry back to the project default backend). Models must be routable (gpt-image*, dall-e*, fal-ai/*, or a known alias like flux-2 / qwen-image) AND in the project's allowedModels.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["projectId", "policy"],
+      properties: {
+        projectId: { type: "string" },
+        policy: { type: "object", additionalProperties: true, description: "Partial ImageModelPolicy JSON: { byUsageContext: { article_header: { model: \"flux-2\" }, ... } }" }
+      }
+    }
   }
 ] as const;
 
@@ -684,6 +710,28 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
       const result = await setImageSearchPolicy(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+    }
+    case "get_image_model_policy": {
+      const input = args as { projectId?: string };
+      if (!input.projectId) return { isError: true, ...toolContent({ error: "projectId is required" }) };
+      try {
+        const policy = await loadProjectImageModelPolicy(input.projectId);
+        return toolContent({ policy });
+      } catch (error) {
+        return { isError: true, ...toolContent({ error: error instanceof Error ? error.message : "Failed to load image model policy" }) };
+      }
+    }
+    case "set_image_model_policy": {
+      const input = args as { projectId?: string; policy?: unknown };
+      if (!input.projectId) return { isError: true, ...toolContent({ error: "projectId is required" }) };
+      const issues = validateImageModelPolicyPatch(input.policy);
+      if (issues.length > 0) return { isError: true, ...toolContent({ error: "Invalid image model policy", issues }) };
+      try {
+        const policy = await saveProjectImageModelPolicy(input.projectId, input.policy);
+        return toolContent({ policy });
+      } catch (error) {
+        return { isError: true, ...toolContent({ error: error instanceof Error ? error.message : "Failed to save image model policy" }) };
+      }
     }
     default:
       return undefined;

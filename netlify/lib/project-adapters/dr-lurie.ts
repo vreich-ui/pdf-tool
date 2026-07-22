@@ -60,7 +60,22 @@ export const drLurieAdapter: ProjectArtifactAdapter = {
     allowedArtifactKinds: ["image", "pdf"],
     artifactReferenceAdapter: "dr-lurie",
     defaultModel: "gpt-image-1",
-    allowedModels: ["gpt-image-1", "test-image-model", "alternate-test-image-model"],
+    allowedModels: [
+      "gpt-image-1",
+      "test-image-model",
+      "alternate-test-image-model",
+      // fal.ai backends (PR6) — canonical names plus the friendly aliases the registry
+      // resolves (flux-2 → klein/9b default tier).
+      "fal-ai/flux-2/klein/4b",
+      "fal-ai/flux-2/klein/9b",
+      "fal-ai/flux-2-pro",
+      "fal-ai/flux-2-flex",
+      "fal-ai/qwen-image",
+      "fal-ai/qwen-image-edit",
+      "flux-2",
+      "qwen-image",
+      "qwen-image-edit",
+    ],
     adapterVersion: "dr-lurie-v1"
   },
   parseArtifactBlobKey(blobKey) {
