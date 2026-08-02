@@ -195,13 +195,18 @@ test("MCP initialize degrades to a stateless session when the session store fail
 
   const { response, body } = await rpc("initialize", { protocolVersion: "2025-06-18", clientInfo: { name: "curl" } });
   assert.equal(response.statusCode, 200, "initialize must not 502 when session persistence fails");
-  assert.equal(response.headers["mcp-session-id"], undefined, "no session id is issued in stateless fallback");
+  const sessionId = response.headers["mcp-session-id"];
+  assert.match(sessionId, /^stateless-[0-9a-f-]{36}$/, "strict clients still receive a transport session id");
   assert.equal(body.result.protocolVersion, "2025-06-18");
 
-  // The connector can still operate statelessly.
-  const listed = await rpc("tools/list");
+  // The connector can operate with the advertised fallback id, even in strict mode.
+  process.env.MCP_REQUIRE_SESSION = "1";
+  const listed = await rpc("tools/list", undefined, { headers: { ...AUTH, "mcp-session-id": sessionId } });
   assert.equal(listed.response.statusCode, 200);
   assert.ok(Array.isArray(listed.body.result.tools));
+
+  const deleted = await mcpHandler({ httpMethod: "DELETE", headers: { ...AUTH, "mcp-session-id": sessionId }, body: null });
+  assert.equal(deleted.statusCode, 204);
 });
 
 // ── Robustness: a tool write failure returns a clean tool error, never a 5xx crash ──
