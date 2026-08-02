@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { jobRecordBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
-import { getProjectAdapter, resolveProjectModel, supportedProjectIds, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
+import { getProjectAdapter, resolveProjectModel, supportedProjectIds, unsupportedProjectIdError, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
 
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_IMAGE_OUTPUT_BYTES = 5_000_000;
@@ -229,7 +229,11 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
       }).optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
       if (!supportedProjectIds().has(value.projectId)) {
-        ctx.addIssue({ code: "custom", path: ["projectId"], message: `Unsupported projectId: ${value.projectId}` });
+        ctx.addIssue({ code: "custom", path: ["projectId"], message: unsupportedProjectIdError(value.projectId) });
+        // Project configuration owns artifact-kind and model policy. Once
+        // resolution failed, secondary errors from an absent adapter only
+        // obscure the one provisioning/mapping action the caller needs.
+        return;
       }
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
@@ -431,7 +435,8 @@ export const artifactJobRequestSchema = {
     const approvalAction = typeof value.approvalAction === "string" && value.approvalAction.trim() ? value.approvalAction.trim() : undefined;
 
     if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
-    if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
+    const projectSupported = Boolean(projectId && supportedProjectIds().has(projectId));
+    if (projectId && !projectSupported) issues.push({ path: ["projectId"], message: unsupportedProjectIdError(projectId) });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
     if (artifactKind === "image" && !prompt) issues.push({ path: ["prompt"], message: "prompt is required for image jobs" });
     if (operation === "edit") {
@@ -466,10 +471,10 @@ export const artifactJobRequestSchema = {
       if (!ok) issues.push({ path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
     }
     if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
-    const kindIssue = validateProjectArtifactKind(projectId, artifactKind as ArtifactKind);
-    if (projectId && kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
-    const resolvedModel = projectId ? resolveProjectModel(projectId, model) : undefined;
-    const modelIssue = projectId ? validateProjectModel(projectId, resolvedModel) : undefined;
+    const kindIssue = projectSupported ? validateProjectArtifactKind(projectId, artifactKind as ArtifactKind) : undefined;
+    if (kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
+    const resolvedModel = projectSupported ? resolveProjectModel(projectId, model) : undefined;
+    const modelIssue = projectSupported ? validateProjectModel(projectId, resolvedModel) : undefined;
     if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
 
     if (issues.length > 0) return { success: false, error: { issues } };

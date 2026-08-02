@@ -13,6 +13,10 @@ function adapters(): Map<string, ProjectArtifactAdapter> {
 export function getProjectAdapter(projectId: string): ProjectArtifactAdapter | undefined { return adapters().get(projectId); }
 export function supportedProjectIds(): Set<string> { return new Set(adapters().keys()); }
 
+export function unsupportedProjectIdError(projectId: string): string {
+  return `Unsupported projectId: ${projectId}. Resolve the site through its Platform artifact bridge, or provision the canonical project adapter in netlify/lib/agent-project-registry.ts.`;
+}
+
 export function resolveProjectOpenAIKey(projectId: string): string | undefined {
   const adapter = getProjectAdapter(projectId);
   if (!adapter) return undefined;
@@ -68,7 +72,7 @@ export function validateProjectModel(projectId: string, model: string | undefine
 
 export function validateProjectArtifactKind(projectId: string, artifactKind: ArtifactKind): string | undefined {
   const adapter = getProjectAdapter(projectId);
-  if (!adapter) return `Unsupported projectId: ${projectId}`;
+  if (!adapter) return unsupportedProjectIdError(projectId);
   if (!adapter.config.allowedArtifactKinds.includes(artifactKind)) return `Unsupported artifactKind for ${projectId}: ${artifactKind}`;
   return undefined;
 }

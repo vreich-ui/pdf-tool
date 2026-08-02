@@ -65,6 +65,13 @@ test("extractStorageGrant: absent storage is not an error; invalid is", () => {
   assert.ok(extractStorageGrant({ storage: { token: "t" } }).error);
 });
 
+test("extractStorageGrant: rejects cross-project grant replay before storage access", () => {
+  const extracted = extractStorageGrant({ projectId: "other-project", storage: grant() });
+  assert.match(extracted.error ?? "", /projectId mismatch/);
+  assert.equal(extracted.grant, undefined);
+  assert.ok(!(extracted.error ?? "").includes(SECRET_TOKEN));
+});
+
 test("redactGrant masks the token", () => {
   const parsed = parseStorageGrant(grant());
   assert.ok(parsed.ok);
@@ -161,6 +168,21 @@ test("create_agent_artifact_job with an expired grant returns a clean tool error
   const result = JSON.parse(response.body).result;
   assert.equal(result.isError, true);
   assert.match(result.structuredContent.error, /expired/);
+});
+
+test("create_agent_artifact_job rejects a mismatched project grant without creating a job", async () => {
+  const response = await mcpHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    queryStringParameters: null,
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_agent_artifact_job", arguments: { projectId: "other-project", requestId: "req-scope", artifactKind: "image", prompt: "x", filename: "x.png", storage: grant() } } })
+  });
+  const result = JSON.parse(response.body).result;
+  assert.equal(result.isError, true);
+  assert.match(result.structuredContent.error, /projectId mismatch/);
+  assert.ok(!response.body.includes(SECRET_TOKEN));
+  const clientJobStore = await projectBlobStore("pdf-tool-jobs", {});
+  assert.deepEqual(await clientJobStore.list?.({ prefix: "projects/" }), { blobs: [] });
 });
 
 test("tools/list advertises the storage grant on every tool", async () => {

@@ -113,10 +113,21 @@ export interface ExtractStorageGrantResult {
  * error (env fallback); a present-but-invalid grant returns a precise error. */
 export function extractStorageGrant(args: unknown): ExtractStorageGrantResult {
   if (!args || typeof args !== "object" || Array.isArray(args)) return {};
-  const storage = (args as Record<string, unknown>).storage;
+  const value = args as Record<string, unknown>;
+  const storage = value.storage;
   if (storage === undefined || storage === null) return {};
   const parsed = parseStorageGrant(storage);
-  return parsed.ok ? { grant: parsed.grant } : { error: parsed.error };
+  if (!parsed.ok) return { error: parsed.error };
+
+  // A grant is a tenant capability, not merely a set of Blob credentials.
+  // Bind it to the request's project before any job/index read or write.
+  const requestProjectId = asString(value.projectId) ?? asString(value.project_id);
+  if (parsed.grant.projectId && requestProjectId && parsed.grant.projectId !== requestProjectId) {
+    return {
+      error: `storage grant projectId mismatch: grant is scoped to ${parsed.grant.projectId}, request targets ${requestProjectId}`,
+    };
+  }
+  return { grant: parsed.grant };
 }
 
 /** Extracts the grant from a raw HTTP request body (JSON with a top-level `storage` field).

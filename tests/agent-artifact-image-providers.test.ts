@@ -17,7 +17,7 @@ import {
 import { createAgentArtifactJob, getAgentArtifactJobStatus } from "../netlify/lib/agent-artifact-mcp.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
-import { getProjectAdapter } from "../netlify/lib/agent-project-registry.js";
+import { getProjectAdapter, supportedProjectIds } from "../netlify/lib/agent-project-registry.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -43,6 +43,11 @@ const TINY_PNG = Buffer.from(TINY_PNG_B64, "base64");
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
+});
+
+test("supported-project resolution registers Dr. Lurie under the canonical dr-lurie id", () => {
+  assert.ok(supportedProjectIds().has("dr-lurie"));
+  assert.equal(getProjectAdapter("site_drlurie"), undefined);
 });
 
 // --- registry ------------------------------------------------------------------------------
@@ -202,6 +207,28 @@ test("routing: omitted model + article_header routes to klein/9b with a USD cost
     assert.equal(body.costEstimate?.estimatedTotalUsd, 0.006294);
     assert.equal(body.costEstimate?.source, "config");
   });
+});
+
+test("unknown projects return one actionable primary cause without model or artifactKind cascades", async () => {
+  const result = await createAgentArtifactJob(
+    {
+      projectId: "site_drlurie",
+      requestId: "req-primary-cause",
+      artifactKind: "image",
+      prompt: "hero",
+      filename: "hero.webp",
+      model: "fal-ai/flux-2/klein/9b",
+      requirements: { image: { outputFormat: "webp", size: "1536x1024" } },
+    },
+    CREATE_OPTS
+  );
+
+  assert.equal(result.ok, false);
+  const issues = (result as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? [];
+  assert.deepEqual(issues.map((issue) => issue.path), [["projectId"]]);
+  assert.match(issues[0]?.message ?? "", /Resolve the site through its Platform artifact bridge/);
+  assert.ok(!JSON.stringify(issues).includes("Unsupported model"));
+  assert.ok(!JSON.stringify(issues).includes("Unsupported artifactKind"));
 });
 
 test("routing: explicit model wins over policy; newsletter falls back to project default; aliases canonicalize", async () => {
