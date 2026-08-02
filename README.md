@@ -133,6 +133,36 @@ A fourth path — the revocable **URL connector key** `https://pdf-x.netlify.app
 that can only put a secret in the URL. An unauthenticated MCP request returns 401 with a
 `WWW-Authenticate: Bearer resource_metadata="…"` header so OAuth-capable clients auto-start
 discovery.
+
+##### Connecting ChatGPT as a custom app
+
+ChatGPT must use the OAuth flow, just like the claude.ai connector; the ChatGPT custom-app
+form does not provide a place to send `AGENT_RUN_TOKEN` as an arbitrary request header.
+
+1. Set `MCP_OAUTH_PASSWORD` and `MCP_OAUTH_SIGNING_SECRET` in the Netlify site's environment,
+   then redeploy. Keep both values server-side and use different random values. The signing
+   secret prevents rotating `AGENT_RUN_TOKEN` from invalidating existing OAuth grants.
+2. If `MCP_OAUTH_ALLOWED_REDIRECT_HOSTS` is set, include `chatgpt.com` (and keep any existing
+   hosts such as `claude.ai`). If the variable is unset, any HTTPS callback host is allowed.
+3. In ChatGPT, enable developer mode for apps/connectors, create a custom app, choose OAuth,
+   and enter the **plain** server URL `https://pdf-x.netlify.app/mcp`. Do not append
+   `MCP_CONNECTOR_KEY` and do not use the Netlify function URL.
+4. Complete the browser authorization page using `MCP_OAUTH_PASSWORD`. ChatGPT should then
+   return to the app setup and fetch the tool list.
+
+If connection fails before the authorization page opens, check the deployed (not local)
+metadata URLs `/.well-known/oauth-protected-resource/mcp` and
+`/.well-known/oauth-authorization-server/mcp`, and confirm that an unauthenticated `POST /mcp`
+returns `401` with a `WWW-Authenticate` header. A `503 OAuth not configured` response from
+`/authorize` means neither owner secret is present in the deployed environment. If approval
+succeeds but ChatGPT reports an OAuth callback error, check the redirect-host allowlist and
+Netlify function logs for `/register`, `/authorize`, and `/token`.
+
+The transport does have **MCP session control**, independently of OAuth: `initialize` creates
+an `Mcp-Session-Id`, subsequent requests refresh its idle lifetime, and `DELETE /mcp` ends it.
+This is transport lifecycle state (client identity and negotiated protocol version), not a
+ChatGPT conversation or artifact-job session. ChatGPT controls conversation state; artifact
+jobs remain durable and are resumed by their `projectId`/`jobId`, not by the MCP session id.
   - `tools/list` exposes `create_agent_artifact_job`, `get_agent_artifact_job_status`, `get_agent_artifact_by_slot`, `get_agent_artifact_by_filename`, `verify_agent_artifact`, and `resume_agent_artifact_job`.
   - Tool calls dispatch to the existing shared artifact facade logic in `netlify/lib/agent-artifact-mcp.ts`; artifact generation, OpenAI usage, Blob storage, and project-native `ArtifactReference` shapes are unchanged.
   - Tool results return structured JSON metadata only. They never return image/PDF bytes, base64, Buffers, or upload chunks.
