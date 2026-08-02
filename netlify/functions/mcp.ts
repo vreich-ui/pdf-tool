@@ -4,7 +4,7 @@ import type { ResumeArtifactJobInput } from "../lib/agent-artifact-approval.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
-import { createMcpSession, deleteMcpSession, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
+import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
@@ -569,7 +569,7 @@ function unauthorizedResponse(event: FunctionEvent, id: JsonRpcRequest["id"]) {
   return response;
 }
 
-const SERVER_INSTRUCTIONS = "Session-aware Netlify Streamable-HTTP MCP endpoint for server-side artifact generation (images, PDFs, templates, image search/import). On initialize the server issues an Mcp-Session-Id header; send it on every subsequent request and send an HTTP DELETE with it to end the session. All tool results are metadata-only ArtifactReferences; binary bytes never travel through MCP.";
+const SERVER_INSTRUCTIONS = "Session-aware Netlify Streamable-HTTP MCP endpoint for server-side artifact generation (images, PDFs, templates, image search/import). On initialize the server issues an Mcp-Session-Id header; send it on every subsequent request and send an HTTP DELETE with it to end the session. If durable session storage is unavailable, the issued session is stateless but remains usable. All tool results are metadata-only ArtifactReferences; binary bytes never travel through MCP.";
 
 type SessionCheck = { ok: true; session?: McpSessionRecord } | { ok: false; response: ReturnType<typeof rpcError> };
 
@@ -581,6 +581,9 @@ async function checkSession(event: FunctionEvent, request: JsonRpcRequest): Prom
     }
     return { ok: true };
   }
+  // A fallback id is issued only when the durable store failed during initialize. Session
+  // ids are transport correlation, not authentication; authorization was checked above.
+  if (isStatelessMcpSessionId(sessionId)) return { ok: true };
   const session = await readMcpSession(sessionId);
   if (!session) {
     // 404 tells Streamable-HTTP clients the session expired: start a new one via initialize.
@@ -761,6 +764,7 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
     if (!isAuthorizedMcpRequest(event)) return unauthorizedResponse(event, null);
     const sessionId = getHeader(event.headers, "mcp-session-id");
     if (!sessionId) return rpcError(null, -32000, "Mcp-Session-Id header is required to end a session", undefined, 400);
+    if (isStatelessMcpSessionId(sessionId)) return emptyResponse(204);
     const deleted = await deleteMcpSession(sessionId);
     if (!deleted) return rpcError(null, -32001, "Session not found or expired", undefined, 404);
     return emptyResponse(204);
@@ -794,12 +798,13 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
     // Session persistence is an enhancement, not a hard dependency: if the session store is
     // unavailable (e.g. Blobs misconfigured), degrade to a stateless session rather than
     // failing the whole connection with a 502. The endpoint already supports sessionless use.
-    let sessionHeaders: Record<string, string> = {};
+    let sessionHeaders: Record<string, string>;
     try {
       const session = await createMcpSession(protocolVersion, clientInfo);
       sessionHeaders = { "mcp-session-id": session.sessionId };
     } catch (error) {
       console.error("MCP session creation failed; continuing statelessly:", error instanceof Error ? error.message : error);
+      sessionHeaders = { "mcp-session-id": createStatelessMcpSessionId() };
     }
     return rpcResult(request.id, {
       protocolVersion,

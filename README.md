@@ -85,7 +85,7 @@ Artifact destinations are explicit metadata contracts containing `projectId`, `r
 
 ##### Session control
 
-- `initialize` issues an `Mcp-Session-Id` response header and persists the session (client info, negotiated protocol version) in the pdf-tool Blob store. Send the header on every subsequent request.
+- `initialize` issues an `Mcp-Session-Id` response header and normally persists the session (client info, negotiated protocol version) in the pdf-tool Blob store. Send the header on every subsequent request. If Blobs is unavailable, initialization logs the storage error and issues a stateless fallback id so strict Streamable-HTTP clients can still finish connecting; restore Blobs for expiry and durable deletion semantics.
 - Supported protocol versions: `2024-11-05`, `2025-03-26`, `2025-06-18` (the client's requested version is echoed when supported; otherwise the latest is offered).
 - Requests carrying an unknown or expired session id get HTTP 404 (`-32001`), the Streamable-HTTP signal to re-initialize. Sessions expire after `MCP_SESSION_TTL_SECONDS` (default 86400) of inactivity and are refreshed on every request.
 - HTTP `DELETE` with the `Mcp-Session-Id` header ends the session (204).

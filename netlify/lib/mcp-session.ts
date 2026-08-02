@@ -5,6 +5,7 @@ export const MCP_SESSION_STORE = "mcp-sessions";
 export const SUPPORTED_MCP_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18"] as const;
 export const LATEST_MCP_PROTOCOL_VERSION = "2025-06-18";
 const DEFAULT_SESSION_TTL_SECONDS = 86_400;
+const STATELESS_SESSION_PREFIX = "stateless-";
 
 export interface McpSessionRecord {
   sessionId: string;
@@ -17,6 +18,20 @@ export interface McpSessionRecord {
 /** Session ids are server-issued UUIDs; reject anything else before it reaches a blob key. */
 export function isValidMcpSessionId(value: string): boolean {
   return /^[A-Za-z0-9-]{8,128}$/.test(value);
+}
+
+/**
+ * Issues a transport-compatible session id when durable session storage is unavailable.
+ * The id carries no authority (MCP authentication is checked separately), but lets strict
+ * Streamable-HTTP clients continue the handshake instead of rejecting initialize because
+ * its advertised Mcp-Session-Id header is missing.
+ */
+export function createStatelessMcpSessionId(): string {
+  return `${STATELESS_SESSION_PREFIX}${randomUUID()}`;
+}
+
+export function isStatelessMcpSessionId(value: string): boolean {
+  return value.startsWith(STATELESS_SESSION_PREFIX) && isValidMcpSessionId(value);
 }
 
 function sessionKey(sessionId: string): string {
