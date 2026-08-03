@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "check:eslint": "tsc --noEmit",
-    "test": "npm run test:netlify",
+    "test": "npm run test:netlify && npm run test:service",
     "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js",
     "test:service": "npm --prefix render-service run test"
   },
