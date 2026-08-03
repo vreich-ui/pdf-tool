@@ -33,6 +33,8 @@ function env() {
   process.env.CLIENT_BLOBS_TOKEN = "dr-token";
   process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
   process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
+  // F4: request-derived hosts resolve only against this allowlist.
+  process.env.WORKER_ORIGIN_ALLOWLIST = "example.netlify.app,example.test,example.com";
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
 }
@@ -985,19 +987,24 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
   const glyphRuns = [...editedStreams.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)].map((match) => match[1].length);
   assert.ok(glyphRuns.includes("Updated".length * 4), `expected a ${"Updated".length * 4}-hex glyph run for "Updated", got runs: ${glyphRuns.join(",")}`);
 
+  // F2: pdf_overlay / pdf_transform have no real implementation. They used to fabricate a
+  // "success" (source bytes + appended comment); they now fail honestly with a typed code.
   const overlay = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-overlay-ok", operation: "edit", artifactKind: "pdf", filename: "overlay.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
   response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: overlay.jobId }) });
-  assert.equal(response.statusCode, 200);
-  edited = JSON.parse(response.body).artifactReference;
-  assert.notEqual(edited.blobKey, source.blobKey);
-  assert.equal(edited.metadata.derivedFrom.sha256, source.sha256);
+  assert.equal(response.statusCode, 500);
+  assert.equal(JSON.parse(response.body).errorCode, "EDIT_MODE_UNSUPPORTED");
+  let storedOverlay = await readArtifactJob("dr-lurie", overlay.jobId);
+  assert.equal(storedOverlay?.status, "failed");
+  assert.equal(storedOverlay?.errorCode, "EDIT_MODE_UNSUPPORTED");
+  assert.equal(storedOverlay?.artifactReference, undefined, "no fabricated artifact may be produced");
 
   const transform = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-transform-ok", operation: "edit", artifactKind: "pdf", filename: "transform.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_transform", transformInstructions: { metadata: { title: "Updated title" } } });
   response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: transform.jobId }) });
-  assert.equal(response.statusCode, 200);
-  edited = JSON.parse(response.body).artifactReference;
-  assert.notEqual(edited.blobKey, source.blobKey);
-  assert.equal(edited.contentType, "application/pdf");
+  assert.equal(response.statusCode, 500);
+  assert.equal(JSON.parse(response.body).errorCode, "EDIT_MODE_UNSUPPORTED");
+  storedOverlay = await readArtifactJob("dr-lurie", transform.jobId);
+  assert.equal(storedOverlay?.status, "failed");
+  assert.equal(storedOverlay?.artifactReference, undefined, "no fabricated artifact may be produced");
 });
 
 test("image edit job validation requires source lock, image kind, supported mode, and preservation constraints", async () => {
