@@ -7,8 +7,10 @@
  */
 import { randomUUID } from "node:crypto";
 import { sha256Hex } from "./artifact-core/index.js";
-import { getHeader, safeError, type NormalizedArtifactJobRequirements } from "./agent-artifact-jobs.js";
-import { currentStorageGrant } from "./storage-grant.js";
+import { safeError, type NormalizedArtifactJobRequirements } from "./agent-artifact-jobs.js";
+import { artifactWorkerBaseUrl } from "./agent-artifact-worker-trigger.js";
+import { currentStorageGrant, forwardableGrant } from "./storage-grant.js";
+import { currentProjectDescriptor } from "./project-descriptor.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { RenderError, structuredError } from "./pdf-render/errors.js";
 import {
@@ -42,13 +44,11 @@ export interface GetPdfTemplateValidationInput {
 
 type TriggerEvent = { headers?: Record<string, string | undefined> };
 
+/** F4-aligned: request-derived hosts resolve only against the WORKER_ORIGIN_ALLOWLIST —
+ * this trigger carries the bearer token and the storage grant, exactly like the artifact
+ * worker's, so it uses the same guarded resolver. */
 function workerBaseUrl(event?: TriggerEvent): string | undefined {
-  if (process.env.DEPLOY_PRIME_URL) return process.env.DEPLOY_PRIME_URL;
-  if (process.env.URL) return process.env.URL;
-  const origin = getHeader(event?.headers, "origin");
-  if (origin) return origin;
-  const host = getHeader(event?.headers, "host");
-  return host ? `https://${host}` : undefined;
+  return artifactWorkerBaseUrl(event);
 }
 
 /** Mirrors triggerWorker (grant forwarding, bearer auth, fire-once POST) with the
@@ -59,10 +59,11 @@ async function triggerValidationWorker(baseUrl: string | undefined, token: strin
   if (typeof fetch !== "function") throw new Error("fetch is unavailable for worker trigger");
   const url = new URL(`/.netlify/functions/${VALIDATION_WORKER_FUNCTION}`, baseUrl);
   const grant = currentStorageGrant();
+  const descriptor = currentProjectDescriptor();
   const response = await fetch(url, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ ...body, ...(grant ? { storage: grant } : {}) }),
+    body: JSON.stringify({ ...body, ...(grant ? { storage: forwardableGrant(grant) } : {}), ...(descriptor ? { descriptor } : {}) }),
   });
   if (response && typeof response === "object" && "ok" in response && (response as { ok: boolean }).ok === false) {
     const status = "status" in response ? String((response as { status: unknown }).status) : "unknown";
