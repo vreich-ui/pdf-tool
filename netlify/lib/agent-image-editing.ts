@@ -1,6 +1,6 @@
 import { projectBlobStore } from "./blob-store.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "./project-descriptor.js";
 import { openAiClientOptions, type GeneratedImageBytes } from "./agent-image-generation.js";
 import type { ImageEditInstructions, ImageEditMode } from "./agent-artifact-jobs.js";
 
@@ -39,13 +39,11 @@ export function contentTypeForImageOutputFormat(format: string): GeneratedImageB
 }
 
 export async function readSourceArtifactBytes(projectId: string, source: { artifactReference: ArtifactReference; expectedSha256: string }): Promise<SourceArtifactBytes> {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  const storeName = adapter.config.artifactStoreName;
-  const storeOptions = adapter.config.siteIdEnv || adapter.config.blobsTokenEnv ? { siteID: process.env[adapter.config.siteIdEnv], token: process.env[adapter.config.blobsTokenEnv] } : {};
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
   const blobKey = source.artifactReference.blobKey;
   if (!blobKey) throw new Error("sourceArtifact.artifactReference.blobKey is required");
-  const value = await (await projectBlobStore(storeName, storeOptions)).get(blobKey, { type: "arrayBuffer" });
+  const value = await (await projectBlobStore(projectStoreNames().artifacts)).get(blobKey, { type: "arrayBuffer" });
   if (value == null) throw new Error(`Source artifact not found: ${blobKey}`);
   const bytes = value instanceof ArrayBuffer ? Buffer.from(value) : Buffer.isBuffer(value) ? value : value instanceof Uint8Array ? Buffer.from(value) : typeof value === "string" ? Buffer.from(value) : undefined;
   if (!bytes) throw new Error("Source artifact bytes could not be read from Blob store");

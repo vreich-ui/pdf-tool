@@ -1,5 +1,5 @@
 import { projectBlobStore } from "./blob-store.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "./project-descriptor.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { RenderError } from "./pdf-render/errors.js";
@@ -17,15 +17,14 @@ export interface PdfEditOutput {
   validation: { pageCount: number; sizeBytes: number };
 }
 
-function projectStoreOptions(projectId: string) {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  return { adapter, options: { siteID: process.env[adapter.config.siteIdEnv], token: process.env[adapter.config.blobsTokenEnv] } };
+function assertProjectAccess(projectId: string): void {
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
 }
 
 export async function readProjectArtifactBytes(projectId: string, reference: ArtifactReference): Promise<Buffer> {
-  const { adapter, options } = projectStoreOptions(projectId);
-  const store = await projectBlobStore(adapter.config.artifactStoreName, options);
+  assertProjectAccess(projectId);
+  const store = await projectBlobStore(projectStoreNames().artifacts);
   // F3: read binary explicitly. The default get() path decodes blobs as utf-8 text, which
   // corrupts real stored PDFs so every edit aborted on sha256 mismatch.
   const value = await store.get(reference.blobKey, { type: "arrayBuffer" });
@@ -38,8 +37,8 @@ export async function readProjectArtifactBytes(projectId: string, reference: Art
 }
 
 async function readJsonRef(projectId: string, ref: BlobJsonRef): Promise<unknown> {
-  const { options } = projectStoreOptions(projectId);
-  const store = await projectBlobStore(ref.storeName ?? "pdf-render-data", { ...options, consistency: "strong" });
+  assertProjectAccess(projectId);
+  const store = await projectBlobStore(ref.storeName ?? projectStoreNames().renderData, { consistency: "strong" });
   const value = await store.get(ref.blobKey, { type: "json" });
   if (value == null) throw new Error("Referenced PDF render data not found");
   return value;
@@ -120,9 +119,9 @@ export async function executePdfEditJob(job: ArtifactJobRecord): Promise<PdfEdit
 }
 
 export async function writePdfRenderData(projectId: string, jobId: string, data: unknown): Promise<BlobJsonRef> {
-  const { options } = projectStoreOptions(projectId);
-  const ref = { storeName: "pdf-render-data", blobKey: `render-data/${jobId}.json`, version: 1 };
-  const store = await projectBlobStore(ref.storeName, { ...options, consistency: "strong" });
+  assertProjectAccess(projectId);
+  const ref = { storeName: projectStoreNames().renderData, blobKey: `render-data/${jobId}.json`, version: 1 };
+  const store = await projectBlobStore(ref.storeName, { consistency: "strong" });
   await store.setJSON(ref.blobKey, data);
   return ref;
 }

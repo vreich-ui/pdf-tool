@@ -8,11 +8,10 @@
  * are intentionally absent from the defaults → the project default backend (gpt-image-1).
  */
 import { projectBlobStore } from "../blob-store.js";
-import { allowedProjectModels, getProjectAdapter } from "../agent-project-registry.js";
+import { allowedProjectModels, projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
 import { canonicalImageModel, findImageProvider } from "../image-providers/registry.js";
 
 export const IMAGE_MODEL_POLICY_KEY = "image-model-policy.json";
-const IMAGE_SEARCH_STORE_NAME = "image-search";
 
 export const IMAGE_USAGE_CONTEXTS = [
   "article_header",
@@ -95,13 +94,10 @@ export function mergeImageModelPolicy(base: ImageModelPolicy, patch: unknown): I
 }
 
 async function imageModelPolicyStore(projectId: string) {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  return projectBlobStore(IMAGE_SEARCH_STORE_NAME, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-    consistency: "strong",
-  });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
+  // The grant names the image-search store; credentials flow from the active grant context.
+  return projectBlobStore(projectStoreNames().imageSearch, { consistency: "strong" });
 }
 
 export async function loadProjectImageModelPolicy(projectId: string): Promise<ImageModelPolicy> {
