@@ -1,6 +1,6 @@
 const memoryStores = new Map<string, Map<string, unknown>>();
 const projectBlobStoreCalls: Array<{ name: string; consistency?: "strong" | "eventual"; siteID?: string; token?: string }> = [];
-import { currentStorageGrant } from "../storage-grant.js";
+import { currentStorageGrant, grantBlobCredentials } from "../storage-grant.js";
 
 const memoryListOverrides = new Map<string, ProjectBlobStore["list"]>();
 const memoryGetOverrides = new Map<string, ProjectBlobStore["get"]>();
@@ -91,19 +91,21 @@ export interface ProjectBlobStoreOptions {
 
 export async function projectBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
   // An active per-request storage grant is the caller's authoritative, short-lived
-  // credential for its own store, so it wins over a static env-var fallback
-  // (CLIENT_SITE_ID/CLIENT_BLOBS_TOKEN etc.) whenever one is present — not just when the
-  // caller passes no options at all. Static env vars are migration-era scaffolding that
-  // often lingers configured (and can go stale/revoked) long after callers start passing
-  // grants; if they kept winning unconditionally, a perfectly valid grant would be silently
-  // shadowed by a broken legacy credential (jobRecordBlobStore already special-cased this
-  // for job records — this generalizes the same precedence to every other blob opener:
-  // artifacts, templates, image-search bank/policy).
+  // credential for its own stores and always wins over caller-passed static options.
+  // grantBlobCredentials() is the grantType switch point (netlify-pat today; a future
+  // exchange type resolves its real credential there). With no grant, options credentials
+  // (if any) apply, else the platform's built-in same-site context — which, post-stateless
+  // refactor, is only ever pdf-tool's OWN state (sessions, OAuth, health probes): client
+  // data access without a grant is rejected at every entrypoint before reaching here.
   const grant = currentStorageGrant();
-  const siteID = grant?.siteID ?? options.siteID;
-  const token = grant?.token ?? options.token;
-  projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID, token });
+  const credentials = grant ? grantBlobCredentials(grant) : undefined;
+  const siteID = credentials?.siteID ?? options.siteID;
+  const token = credentials?.token ?? options.token;
   if (process.env.AGENT_ARTIFACT_MEMORY_BLOBS === "1") {
+    // Test-only call log. Never recorded in production: it would retain every caller's
+    // live Blobs token in a module-global array for the container's lifetime (the token
+    // is radioactive and must not outlive its request) and grow without bound.
+    projectBlobStoreCalls.push({ name, consistency: options.consistency, siteID, token });
     return memoryStore(name);
   }
   const { getStore } = await import("@netlify/blobs");
@@ -120,62 +122,13 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
   return getProjectStore(name);
 }
 
-function isAuthRejection(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b(401|403)\b/.test(message);
-}
-
 /**
- * Wraps a manually-credentialed store so a 401/403 on any operation (a stale or revoked
- * static token — the exact incident this guards: health.ts's diagnostic exists because of
- * it) retries once via the platform's own auto-rotating identity instead of failing
- * outright. The fallback store is created lazily and reused across retried operations.
+ * Store for pdf-tool's OWN operational state: MCP sessions, OAuth single-use tracking, and
+ * the health probe. Always the built-in same-site Blobs context — the PDF_TOOL_SITE_ID /
+ * PDF_TOOL_BLOBS_TOKEN manual-credential path was removed with the stateless refactor
+ * (client data lives exclusively behind per-request storage grants; pdf-tool's own state
+ * never needs a manual credential on its own site).
  */
-function withAuthFallback(primary: ProjectBlobStore, fallbackFactory: () => Promise<ProjectBlobStore>): ProjectBlobStore {
-  let fallback: Promise<ProjectBlobStore> | undefined;
-  function resolveFallback(): Promise<ProjectBlobStore> {
-    if (!fallback) fallback = fallbackFactory();
-    return fallback;
-  }
-  async function withRetry<T>(op: (store: ProjectBlobStore) => Promise<T>): Promise<T> {
-    try {
-      return await op(primary);
-    } catch (error) {
-      if (!isAuthRejection(error)) throw error;
-      console.error("Manual Blobs credentials rejected (401/403); retrying via the same-site platform identity:", error instanceof Error ? error.message : error);
-      return op(await resolveFallback());
-    }
-  }
-  return {
-    get: (key, options) => withRetry((store) => store.get(key, options)),
-    set: (key, value, options) => withRetry((store) => store.set(key, value, options)),
-    setJSON: (key, value, options) => withRetry((store) => store.setJSON(key, value, options)),
-    ...(primary.list ? { list: (options?: unknown) => withRetry((store) => store.list!(options)) } : {}),
-    ...(primary.delete ? { delete: (key: string) => withRetry((store) => store.delete!(key)) } : {})
-  };
-}
-
 export async function jobBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  // Manual credentials are for reaching the store from outside its own site. Use them only
-  // when BOTH are set; otherwise fall back to the built-in same-site context. A lone
-  // PDF_TOOL_SITE_ID (token unset/cleared) must not force a broken, unauthenticated request.
-  const siteID = process.env.PDF_TOOL_SITE_ID;
-  const token = process.env.PDF_TOOL_BLOBS_TOKEN;
-  if (!siteID || !token) return projectBlobStore(name, options);
-  const manual = await projectBlobStore(name, { ...options, siteID, token });
-  return withAuthFallback(manual, () => projectBlobStore(name, options));
-}
-
-/**
- * Store for artifact/image-search job records. Under a storage grant, records live in the
- * client's jobs store (grant.stores.jobs) so pdf-tool keeps no state of its own; without a
- * grant it falls back to the pdf-tool job store (env/same-site). Session and OAuth state do
- * NOT use this — they intentionally stay on pdf-tool's own store and degrade gracefully.
- */
-export async function jobRecordBlobStore(fallbackName: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  const grant = currentStorageGrant();
-  if (grant) {
-    return projectBlobStore(grant.stores.jobs, { ...options, siteID: grant.siteID, token: grant.token });
-  }
-  return jobBlobStore(fallbackName, options);
+  return projectBlobStore(name, options);
 }

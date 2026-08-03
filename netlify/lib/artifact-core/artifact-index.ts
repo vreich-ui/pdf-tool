@@ -1,7 +1,10 @@
 import { projectBlobStore, type ProjectBlobStore } from "./blob-store.js";
 import type { ArtifactKind, ArtifactReference } from "./artifacts.js";
 
-export const ARTIFACT_INDEX_STORE_NAME = "project-artifact-index";
+/** Last-resort default only — production paths always pass the store the grant names
+ * (resolveProjectArtifactIndexOptions). Matches CANONICAL_STORAGE_STORES.artifactIndex so a
+ * missed call site still reads/writes the canonical store rather than a phantom one. */
+export const ARTIFACT_INDEX_STORE_NAME = "artifact-index";
 
 export interface ArtifactPointer {
   requestId: string;

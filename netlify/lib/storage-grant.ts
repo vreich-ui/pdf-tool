@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
- * Per-request storage grant. Clients (e.g. Dr-Lurie) mint a short-lived grant carrying the
- * Netlify site id + Blobs token for their own store; agents forward it as the `storage`
- * argument on every storage-touching pdf-tool tool call. pdf-tool then reads/writes the
- * client's Blob stores under that grant and holds no credentials of its own.
+ * Per-request storage grant. Clients mint a short-lived grant carrying the Netlify site id +
+ * Blobs token for their own stores; agents forward it as the `storage` argument on every
+ * storage-touching pdf-tool call. pdf-tool then reads/writes the client's Blob stores under
+ * that grant and holds no storage credentials of its own — there is no server-side
+ * environment fallback (the CLIENT_* / PDF_TOOL_* migration-era fallbacks were removed).
  *
  * The token is treated as radioactive: it lives only in-request (tool args -> ALS ->
  * worker POST body -> worker local scope), is never persisted in a job record, and is
@@ -20,12 +21,22 @@ export interface StorageGrantStores {
   jobs: string;
 }
 
+/** Output-shaping defaults a grant may carry; jobs that omit `requirements` inherit them. */
+export interface StorageGrantLimits {
+  maxImageBytes?: number;
+  preferredImageFormat?: "png" | "webp" | "jpeg";
+}
+
 export interface StorageGrant {
   grantType: string;
   projectId?: string;
   siteID: string;
   token: string;
   stores: StorageGrantStores;
+  /** Only the store names the grant EXPLICITLY named (no canonical defaults applied) —
+   * lets descriptor-supplied storeNames fill gaps without shadowing what the grant said. */
+  explicitStores: Partial<StorageGrantStores>;
+  limits?: StorageGrantLimits;
   expiresAt?: string;
 }
 
@@ -39,6 +50,15 @@ export const CANONICAL_STORAGE_STORES: StorageGrantStores = {
   renderData: "pdf-render-data",
   jobs: "pdf-tool-jobs"
 };
+
+/**
+ * grantType is a SWITCH POINT, not an assumption. "netlify-pat" is the only implemented
+ * type today (the token is a Netlify Blobs PAT used directly). A future "exchange" type —
+ * same grant shape, but `token` holds an opaque short-lived value pdf-tool swaps for the
+ * real credential against a client-side exchange endpoint — plugs in here and in
+ * grantBlobCredentials() without touching any caller.
+ */
+export const SUPPORTED_GRANT_TYPES = ["netlify-pat"] as const;
 
 export type ParseStorageGrantResult =
   | { ok: true; grant: StorageGrant }
@@ -64,17 +84,47 @@ export function parseStorageGrant(input: unknown): ParseStorageGrantResult {
   if (!token) return { ok: false, error: "storage grant missing token" };
 
   const grantType = asString(value.grantType) ?? asString(value.grant_type) ?? "netlify-pat";
+  if (!(SUPPORTED_GRANT_TYPES as readonly string[]).includes(grantType)) {
+    return {
+      ok: false,
+      error: `Unsupported storage grantType "${grantType}"; supported types: ${SUPPORTED_GRANT_TYPES.join(", ")}. (grantType is a deliberate switch point — e.g. a future "exchange" grant would carry an opaque token pdf-tool swaps for the real credential — but only netlify-pat is implemented.)`
+    };
+  }
   const projectId = asString(value.projectId) ?? asString(value.project_id);
 
   const storesInput = value.stores && typeof value.stores === "object" && !Array.isArray(value.stores) ? value.stores as Record<string, unknown> : {};
-  const stores: StorageGrantStores = {
-    artifacts: asString(storesInput.artifacts) ?? CANONICAL_STORAGE_STORES.artifacts,
-    artifactIndex: asString(storesInput.artifactIndex) ?? asString(storesInput.artifact_index) ?? CANONICAL_STORAGE_STORES.artifactIndex,
-    templates: asString(storesInput.templates) ?? CANONICAL_STORAGE_STORES.templates,
-    imageSearch: asString(storesInput.imageSearch) ?? asString(storesInput.image_search) ?? CANONICAL_STORAGE_STORES.imageSearch,
-    renderData: asString(storesInput.renderData) ?? asString(storesInput.render_data) ?? CANONICAL_STORAGE_STORES.renderData,
-    jobs: asString(storesInput.jobs) ?? CANONICAL_STORAGE_STORES.jobs
+  const explicitStores: Partial<StorageGrantStores> = {};
+  const explicit = (key: keyof StorageGrantStores, ...aliases: string[]) => {
+    for (const alias of [key, ...aliases]) {
+      const parsed = asString(storesInput[alias]);
+      if (parsed) {
+        explicitStores[key] = parsed;
+        return parsed;
+      }
+    }
+    return undefined;
   };
+  const stores: StorageGrantStores = {
+    artifacts: explicit("artifacts") ?? CANONICAL_STORAGE_STORES.artifacts,
+    artifactIndex: explicit("artifactIndex", "artifact_index") ?? CANONICAL_STORAGE_STORES.artifactIndex,
+    templates: explicit("templates") ?? CANONICAL_STORAGE_STORES.templates,
+    imageSearch: explicit("imageSearch", "image_search") ?? CANONICAL_STORAGE_STORES.imageSearch,
+    renderData: explicit("renderData", "render_data") ?? CANONICAL_STORAGE_STORES.renderData,
+    jobs: explicit("jobs") ?? CANONICAL_STORAGE_STORES.jobs
+  };
+
+  // Optional output-shaping limits (tolerant): jobs that omit `requirements` inherit these.
+  let limits: StorageGrantLimits | undefined;
+  const limitsInput = value.limits && typeof value.limits === "object" && !Array.isArray(value.limits) ? value.limits as Record<string, unknown> : undefined;
+  if (limitsInput) {
+    const rawMax = limitsInput.maxImageBytes ?? limitsInput.max_image_bytes;
+    const rawFormat = asString(limitsInput.preferredImageFormat) ?? asString(limitsInput.preferred_image_format);
+    const maxImageBytes = typeof rawMax === "number" && Number.isInteger(rawMax) && rawMax > 0 ? rawMax : undefined;
+    const preferredImageFormat = rawFormat === "png" || rawFormat === "webp" || rawFormat === "jpeg" ? rawFormat : undefined;
+    if (maxImageBytes !== undefined || preferredImageFormat !== undefined) {
+      limits = { ...(maxImageBytes !== undefined ? { maxImageBytes } : {}), ...(preferredImageFormat ? { preferredImageFormat } : {}) };
+    }
+  }
 
   const expiresAt = asString(value.expiresAt) ?? asString(value.expires_at);
   if (expiresAt) {
@@ -84,18 +134,45 @@ export function parseStorageGrant(input: unknown): ParseStorageGrantResult {
     }
   }
 
-  return { ok: true, grant: { grantType, projectId, siteID, token, stores, expiresAt } };
+  return { ok: true, grant: { grantType, projectId, siteID, token, stores, explicitStores, ...(limits ? { limits } : {}), expiresAt } };
+}
+
+/**
+ * Serializes a grant for forwarding to another entrypoint (the worker trigger POST) so
+ * that RE-PARSING it reconstructs the original exactly. Critically, `stores` must carry
+ * only the names the caller EXPLICITLY granted: the parsed `stores` map has canonical
+ * defaults baked in, and forwarding those would make every store look caller-named on the
+ * far side — silently shadowing descriptor storeNames overrides inside the worker.
+ */
+export function forwardableGrant(grant: StorageGrant): Record<string, unknown> {
+  const { stores: _resolvedStores, explicitStores, ...rest } = grant;
+  return { ...rest, stores: explicitStores };
 }
 
 /** Safe-to-log view of a grant with the token masked. */
 export function redactGrant(grant: StorageGrant): Record<string, unknown> {
-  return { grantType: grant.grantType, projectId: grant.projectId, siteID: grant.siteID, token: "REDACTED", stores: grant.stores, expiresAt: grant.expiresAt };
+  return { grantType: grant.grantType, projectId: grant.projectId, siteID: grant.siteID, token: "REDACTED", stores: grant.stores, ...(grant.limits ? { limits: grant.limits } : {}), expiresAt: grant.expiresAt };
+}
+
+/**
+ * Resolves a grant to the Blob credentials it authorizes — THE grantType switch point.
+ * netlify-pat: the token IS the credential. A future exchange type would swap the opaque
+ * token for the real credential here (and only here).
+ */
+export function grantBlobCredentials(grant: StorageGrant): { siteID: string; token: string } {
+  switch (grant.grantType) {
+    case "netlify-pat":
+      return { siteID: grant.siteID, token: grant.token };
+    default:
+      throw new Error(`Unsupported storage grantType "${grant.grantType}"; supported types: ${SUPPORTED_GRANT_TYPES.join(", ")}`);
+  }
 }
 
 const storageGrantContext = new AsyncLocalStorage<StorageGrant>();
 
 /** Runs fn with the grant available to all downstream blob-store openers via
- * currentStorageGrant(). With no grant, fn runs unchanged (env-credential fallback path). */
+ * currentStorageGrant(). With no grant, fn runs unchanged (client-store access will fail
+ * loudly at the entrypoints; pdf-tool's own session/OAuth state stays same-site). */
 export function runWithStorageGrant<T>(grant: StorageGrant | undefined, fn: () => T): T {
   return grant ? storageGrantContext.run(grant, fn) : fn();
 }
@@ -110,7 +187,8 @@ export interface ExtractStorageGrantResult {
 }
 
 /** Pulls and parses the `storage` field from a tool-argument object. Absent grant is not an
- * error (env fallback); a present-but-invalid grant returns a precise error. */
+ * error HERE (presence is enforced per-entrypoint via extractRequestContext); a
+ * present-but-invalid grant returns a precise error. */
 export function extractStorageGrant(args: unknown): ExtractStorageGrantResult {
   if (!args || typeof args !== "object" || Array.isArray(args)) return {};
   const value = args as Record<string, unknown>;
@@ -131,7 +209,7 @@ export function extractStorageGrant(args: unknown): ExtractStorageGrantResult {
 }
 
 /** Extracts the grant from a raw HTTP request body (JSON with a top-level `storage` field).
- * A GET/empty body yields no grant (env fallback); malformed JSON is ignored. */
+ * A GET/empty body yields no grant; malformed JSON is ignored. */
 export function extractStorageGrantFromBody(body: string | null | undefined): ExtractStorageGrantResult {
   if (!body) return {};
   try {

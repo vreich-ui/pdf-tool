@@ -1,5 +1,6 @@
 import { getHeader } from "./agent-artifact-jobs.js";
-import { currentStorageGrant } from "./storage-grant.js";
+import { currentStorageGrant, forwardableGrant } from "./storage-grant.js";
+import { currentProjectDescriptor } from "./project-descriptor.js";
 
 type TriggerEvent = { headers?: Record<string, string | undefined> };
 
@@ -57,17 +58,19 @@ export async function triggerWorker(baseUrl: string | undefined, token: string |
   if (typeof fetch !== "function") throw new Error("fetch is unavailable for worker trigger");
 
   const url = new URL(`/.netlify/functions/${workerFunction}`, baseUrl);
-  // Forward the active storage grant so the background worker writes the artifact into the
-  // client's Blob store under the same credentials. Server-to-self over https; the grant
-  // (with token) travels only in this body and the worker's local scope.
+  // Forward the active storage grant (and project descriptor) so the background worker
+  // writes the artifact into the client's Blob store under the same credentials and policy.
+  // Server-to-self over https; the grant (with token) travels only in this body and the
+  // worker's local scope.
   const grant = currentStorageGrant();
+  const descriptor = currentProjectDescriptor();
   const response = await fetch(url, {
     method: "POST",
     headers: {
       "authorization": `Bearer ${token}`,
       "content-type": "application/json"
     },
-    body: JSON.stringify({ projectId, jobId, ...(grant ? { storage: grant } : {}) })
+    body: JSON.stringify({ projectId, jobId, ...(grant ? { storage: forwardableGrant(grant) } : {}), ...(descriptor ? { descriptor } : {}) })
   });
 
   if (response && typeof response === "object" && "ok" in response && response.ok === false) {
