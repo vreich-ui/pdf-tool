@@ -6,6 +6,7 @@
  * (weights are Apache-2.0). Timeouts modeled on image-search's fetchProviderJson.
  */
 import { RenderError } from "../pdf-render/errors.js";
+import { httpHeaderValue, parseRetryAfterMs } from "../worker-budget.js";
 import { optimizeImageBytes, type GeneratedImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
 import { unitPriceUsdPerMegapixel } from "./pricing.js";
@@ -37,7 +38,7 @@ function queueBase(model: string): string {
 }
 
 type FetchLike = (url: string, init?: Record<string, unknown>) => Promise<unknown>;
-type FetchResponse = { ok: boolean; status: number; json(): Promise<unknown>; arrayBuffer(): Promise<ArrayBuffer> };
+type FetchResponse = { ok: boolean; status: number; headers?: unknown; json(): Promise<unknown>; arrayBuffer(): Promise<ArrayBuffer> };
 
 function abortSignal(timeoutMs: number): unknown {
   const signalFactory = (globalThis as { AbortSignal?: { timeout?: (ms: number) => unknown } }).AbortSignal;
@@ -55,7 +56,14 @@ async function falFetch(fetchImpl: FetchLike, url: string, init: Record<string, 
     throw new RenderError("IMAGE_PROVIDER_ERROR", `fal.ai ${what} failed: ${error instanceof Error ? error.message : String(error)}`, { what });
   }
   if (!response.ok) {
-    throw new RenderError("IMAGE_PROVIDER_ERROR", `fal.ai ${what} failed with status ${response.status}`, { what, status: response.status });
+    // A 429 carries any Retry-After forward so the worker's rate-limit etiquette
+    // (worker-budget.ts) can decide whether one bounded wait fits the job budget.
+    const retryAfterMs = response.status === 429 ? parseRetryAfterMs(httpHeaderValue(response.headers, "retry-after")) : undefined;
+    throw new RenderError("IMAGE_PROVIDER_ERROR", `fal.ai ${what} failed with status ${response.status}`, {
+      what,
+      status: response.status,
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {})
+    });
   }
   return response;
 }

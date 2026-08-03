@@ -32,6 +32,7 @@ export const openAiImageProvider: ImageProvider = {
       size: input.size,
       outputFormat: input.outputFormat,
       maxBytes: input.maxBytes,
+      timeoutMs: input.timeoutMs,
     });
   },
   async edit(input: ImageProviderEditInput): Promise<GeneratedImageBytes> {
@@ -46,6 +47,7 @@ export const openAiImageProvider: ImageProvider = {
       size: input.size,
       outputFormat: input.outputFormat,
       maxBytes: input.maxBytes,
+      timeoutMs: input.timeoutMs,
     });
   },
 };
