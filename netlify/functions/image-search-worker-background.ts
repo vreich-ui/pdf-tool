@@ -19,7 +19,8 @@ export async function handler(event: FunctionEvent) {
   const { projectId, jobId, storage } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown }>(event.body) ?? {};
   if (!projectId || !jobId) return jsonResponse(400, { error: "projectId and jobId are required" });
 
-  const extracted = extractStorageGrant({ storage });
+  // F7: include projectId so the grant↔project cross-project guard runs on this entrypoint.
+  const extracted = extractStorageGrant({ storage, projectId });
   if (extracted.error) return jsonResponse(400, { error: extracted.error });
   return runWithStorageGrant(extracted.grant, () => runImageSearchWorker(projectId, jobId));
 }
