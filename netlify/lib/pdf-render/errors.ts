@@ -28,7 +28,10 @@ export type RenderErrorCode =
   | "TEMPLATE_VALIDATION_FAILED"
   | "IMAGE_MODEL_UNSUPPORTED"
   | "IMAGE_EDIT_MODE_UNSUPPORTED"
-  | "IMAGE_PROVIDER_ERROR";
+  | "IMAGE_PROVIDER_ERROR"
+  | "EDIT_MODE_UNSUPPORTED"
+  | "WORKER_TIMEOUT_APPROACHING"
+  | "PROVIDER_RATE_LIMITED";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;
