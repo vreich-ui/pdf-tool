@@ -261,10 +261,18 @@ This makes a double-fire impossible even if both merge in the same second. S5 le
 Three things were tested here on 2026-08-03 so no session has to rediscover them:
 
 - **`git push` does not work.** Anonymous `git clone` of this public repo succeeds and local commits succeed, but pushing fails with *"Invalid username or token. Password authentication is not supported for Git operations."* The `gh` CLI is not installed.
-- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."` So curl is good for *reading* repo state cheaply; it cannot commit.
+- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."* So curl is good for *reading* repo state cheaply; it cannot commit.
 - **The GitHub MCP tools are the only write path.** `create_branch`, `push_files` (multi-file commit — the workhorse), `create_or_update_file`, `create_pull_request`, `pull_request_read`, `merge_pull_request`. File contents travel as tool parameters, so batch related files into one `push_files` call rather than one call per file.
 
 **Practical loop:** clone anonymously → edit and run `npm run check:eslint && npm test` locally → `create_branch` → `push_files` with the finished tree → `create_pull_request` → poll checks → `merge_pull_request`. Test locally, publish deliberately.
+
+**If the GitHub MCP tools are missing — stop, don't improvise.** GitHub reaches this account through a user-connected MCP server (`https://api.githubcopilot.com/mcp`). Remote OAuth-connected MCP servers are not guaranteed to be present in a headless or scheduled run the way they are in an interactive one. If `ToolSearch` cannot find the `mcp__GitHub__*` tools, or they fail to authenticate:
+
+- Do **not** fall back to `git push`, `curl` against the REST API, or any other write path — all of them are blocked, and grinding on them wastes the session.
+- Do **not** fire the next trigger. An un-run session is recoverable; a half-published one is not.
+- Do the local work if it is useful (clone, implement, run the suite) so the next attempt starts warm, then report clearly that the session was blocked on connector availability rather than on the code, and reschedule yourself once for +2 hours in case it is transient.
+
+This distinction matters in the summary: "the GitHub connector wasn't there" and "the tests failed" need completely different responses from Wolf.
 - **Read/verify with `merged_at`, not `merged`.** `list_pull_requests` reports `merged: false` even for merged PRs in this repo; `pull_request_read` returns the truthful `merged_at`. Every precondition check must use the latter.
 - **Local clone for the work loop.** Clone anonymously, edit, run `npm run check:eslint && npm test` locally, then publish the finished tree with `push_files`. Test locally, publish deliberately — do not push a branch you have not run the suite against.
 
