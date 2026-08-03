@@ -270,7 +270,11 @@ These five sessions run unattended as scheduled tasks. Each firing is a **fresh 
 - **S2 builds directly** — no design-doc half-step.
 - **Key rotation is deferred to the end** (Wolf's call). S1 still deletes the two files carrying the leaked Dr. Lurie key; the dead string remains in git history until Wolf rotates. Do not treat this as a blocker and do not attempt to rotate anything.
 
-**Execution order** — `S1 → S2 → (S3 ∥ S4) → S5`.
+**Execution order** — ~~`S1 → S2 → (S3 ∥ S4) → S5`~~ → **`S1 → S2 → S4`, then stop.**
+
+> **Scope cut, 2026-08-03 (Wolf): the run ends after S4.** Sessions **S3** (cost receipts + sourcing intelligence) and **S5** (live tests + readme site) are **deferred** — their scheduled runs have been deleted, and the S3 ∥ S4 join described below is void. Their sections are kept in this document in full and unchanged, because the work is still wanted and this is where it will be picked up from; they are simply not scheduled. The reason is token budget, not a change of mind about the content.
+>
+> Worth knowing when this resumes: S3's cost receipt does not exist yet, so nothing in the system reports what a job costs. S5's live evidence pass never ran, so the readme cluster is unwritten and pdf-tool's behavior stays documented from source rather than from observation — including anything S4 built that S5 was meant to exercise, the coherent-set batch tool especially.
 
 ### The protocol, step by step
 
@@ -287,6 +291,8 @@ These five sessions run unattended as scheduled tasks. Each firing is a **fresh 
 7. **On any failure** — tests red, CI red, merge conflict, precondition stalled, anything unexpected — **do not chain.** Leave the PR open, post a comment explaining exactly what failed and what you tried, and end the run with a clear summary. A broken link stops the chain by design; Wolf would rather find four sessions un-run than four bad merges.
 
 ### The S3 ∥ S4 join
+
+**Void as of 2026-08-03 — S3 is not scheduled and S5 no longer exists. Kept for reference if the full program resumes. S4 chains to nothing.**
 
 S3 and S4 both need to be merged before S5 may run, and either could finish first. After a successful merge, each of them:
 
@@ -324,8 +330,8 @@ Scheduled tasks have no effort parameter, so effort is stated here as an instruc
 |---|---|---|---|---|
 | S1 | `claude/s1-p0-fixes` | `claude-opus-5` | medium | S2 |
 | S2 | `claude/s2-stateless` | `claude-opus-5` | **max** | S3 **and** S4 |
-| S3 | `claude/s3-cost-sourcing` | `claude-opus-5` | high | S5 (via join) |
-| S4 | `claude/s4-surface-tools` | `claude-opus-5` | high | S5 (via join) |
-| S5 | `claude/s5-live-readme` | `claude-opus-5` | high | — (terminal) |
+| S3 | `claude/s3-cost-sourcing` | `claude-opus-5` | high | — (deferred, not scheduled) |
+| S4 | `claude/s4-surface-tools` | `claude-opus-5` | high | — (terminal) |
+| S5 | `claude/s5-live-readme` | `claude-opus-5` | high | — (deferred, not scheduled) |
 
 S2 gets the highest effort because it is the one hard-to-reverse change and it is merging itself. S1 is mechanical. S5 spends real money and must respect the ~$5 ceiling with a running total.
