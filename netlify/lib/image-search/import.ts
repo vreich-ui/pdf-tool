@@ -1,4 +1,5 @@
-import { getProjectAdapter } from "../agent-project-registry.js";
+import { validateProjectAccess } from "../project-descriptor.js";
+import { saveArtifactBytes } from "../artifact-layout.js";
 import { sha256Hex, type ArtifactReference } from "../artifact-core/index.js";
 import { optimizeImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
@@ -210,17 +211,17 @@ export interface SaveImportedImageInput extends Omit<ImportImageFromUrlInput, "u
   entryName?: string;
 }
 
-/** Converts/optimizes pre-fetched image bytes and saves them through the project adapter. */
+/** Converts/optimizes pre-fetched image bytes and saves them under the canonical layout. */
 export async function saveImportedImageArtifact(input: SaveImportedImageInput, rawBytes: Buffer): Promise<ArtifactReference> {
-  const adapter = getProjectAdapter(input.projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${input.projectId}`);
+  const accessIssue = validateProjectAccess(input.projectId);
+  if (accessIssue) throw new Error(accessIssue);
   const maxBytes = Math.min(input.maxBytes ?? MAX_IMAGE_OUTPUT_BYTES, MAX_IMAGE_OUTPUT_BYTES);
 
   const normalized = await normalizeToSupportedFormat(rawBytes);
   const bytes = await optimizeImageBytes(normalized.bytes, { outputFormat: normalized.format, maxBytes, inputFormat: normalized.format });
   const contentType = contentTypeForImageOutputFormat(normalized.format);
 
-  return adapter.saveArtifactBytes({
+  return saveArtifactBytes({
     projectId: input.projectId,
     requestId: input.requestId,
     artifactKind: "image",
