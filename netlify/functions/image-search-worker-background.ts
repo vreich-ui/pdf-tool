@@ -2,7 +2,7 @@ import { getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError } from 
 import { readImageSearchJob, updateImageSearchJob } from "../lib/image-search/jobs.js";
 import { runImageSearch } from "../lib/image-search/orchestrator.js";
 import { runUrlImportBatch } from "../lib/image-search/url-import.js";
-import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
+import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
 
 export const config = { name: "image-search-worker-background" };
 
@@ -16,13 +16,14 @@ export async function handler(event: FunctionEvent) {
   if (event.httpMethod !== "POST") return jsonResponse(405, { error: "Method not allowed" });
   if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
 
-  const { projectId, jobId, storage } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown }>(event.body) ?? {};
+  const { projectId, jobId, storage, descriptor } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown }>(event.body) ?? {};
   if (!projectId || !jobId) return jsonResponse(400, { error: "projectId and jobId are required" });
 
-  // F7: include projectId so the grant↔project cross-project guard runs on this entrypoint.
-  const extracted = extractStorageGrant({ storage, projectId });
-  if (extracted.error) return jsonResponse(400, { error: extracted.error });
-  return runWithStorageGrant(extracted.grant, () => runImageSearchWorker(projectId, jobId));
+  // Grant REQUIRED + projectId included so the grant↔descriptor↔project binding runs on
+  // this entrypoint (a grantless run would silently read pdf-tool's own empty stores).
+  const extracted = extractRequestContext({ storage, descriptor, projectId });
+  if (extracted.error) return jsonResponse(400, { error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) });
+  return runWithRequestContext(extracted.ctx, () => runImageSearchWorker(projectId, jobId));
 }
 
 async function runImageSearchWorker(projectId: string, jobId: string) {

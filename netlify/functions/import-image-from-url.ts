@@ -1,4 +1,4 @@
-import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
+import { extractRequestContextFromBody, runWithRequestContext } from "../lib/project-descriptor.js";
 import { importImageFromUrl } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
@@ -14,10 +14,10 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
   if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
   const body = parseJsonBody<unknown>(event.body);
   if (!body) return jsonResponse(400, { error: "Invalid JSON body" });
-  const __grant = extractStorageGrantFromBody(event.body);
-  if (__grant.error) return jsonResponse(400, { error: __grant.error });
+  const __ctx = extractRequestContextFromBody(event.body);
+  if (__ctx.error) return jsonResponse(400, { error: __ctx.error, ...(__ctx.errorCode ? { errorCode: __ctx.errorCode } : {}) });
   const budgetMs = remainingBudgetMs(context, requestStartedAt);
-  const result = await runWithStorageGrant(__grant.grant, () => importImageFromUrl(body, { budgetMs }));
+  const result = await runWithRequestContext(__ctx.ctx, () => importImageFromUrl(body, { budgetMs }));
   const { statusCode, ok: _ok, ...responseBody } = result;
   return jsonResponse(statusCode, responseBody);
 }
