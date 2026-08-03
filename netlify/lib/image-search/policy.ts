@@ -1,7 +1,8 @@
 import { projectBlobStore } from "../blob-store.js";
-import { getProjectAdapter } from "../agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
 import type { ImageSourcingPolicy, LicenseClass } from "./types.js";
 
+/** Canonical default name; the effective store is always resolved from the grant. */
 export const IMAGE_SEARCH_STORE_NAME = "image-search";
 export const IMAGE_SEARCH_POLICY_KEY = "policy.json";
 /** Hard product limit: at most five non-discarded candidates per requestId. */
@@ -160,13 +161,10 @@ export function mergeImageSourcingPolicy(base: ImageSourcingPolicy, patch: unkno
 }
 
 async function imageSearchStore(projectId: string) {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  return projectBlobStore(IMAGE_SEARCH_STORE_NAME, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-    consistency: "strong"
-  });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
+  // The grant names the image-search store; credentials flow from the active grant context.
+  return projectBlobStore(projectStoreNames().imageSearch, { consistency: "strong" });
 }
 
 /** Loads the project policy from the project blob store, merged over defaults. */
