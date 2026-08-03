@@ -9,7 +9,7 @@
 - **Session 1 = P0 fixes**, shipped before anything else.
 - **Stateless refactor: full, now** — remove the project registry, all adapters, Dr. Lurie, `CLIENT_*` env; client brings a descriptor + grant per call.
 - **Readme site: wait for the bridge**, then build pages + generate all artifacts + write from observed behavior in one pass.
-- **Dr. Lurie: live, brief breakage acceptable.** S2 lands in one pass; the Dr. Lurie client is updated to the stateless call path immediately after merge — no compatibility window, but the two must be sequenced tight (deploy pdf-tool, then flip Dr. Lurie same session).
+- ~~**Dr. Lurie: live, brief breakage acceptable.**~~ **Superseded 2026-08-03 by the caller census in §S2.** The Platform bridge already sends a full grant + `projectId` per call, so Dr. Lurie does not break and needs no post-merge flip. The one caller that genuinely breaks is **CMS-Agent's direct read-only connection**, which passes no grant at all. Wolf's underlying decision — ship S2 in one pass, accept brief breakage rather than build a compatibility shim — still stands; only the identity of the affected caller changed.
 - **Secret cleanup: rotate + delete files, no history rewrite.** You rotate the key on the Dr. Lurie side; I delete both files in the S1 PR. The dead string stays in git history — harmless once rotated (revisit only if the repo ever goes public).
 - **Live-test AI budget: up to ~$5.** Richer evidence matrix (below); I keep a running total and stop if it approaches the cap.
 
@@ -104,7 +104,34 @@ I swept all three repos for existing dev plans, roadmaps, phase docs and unlande
 
 **Platform side (Kugel-Platform):** the bridge already mints grants server-side and owns request ids — extend it to send the descriptor. This is a **separate small PR on the Platform repo** (or config), sequenced with S2's merge so the two stay in lockstep.
 
-**Dr. Lurie coordination (per decision — brief breakage OK):** no compatibility shim. The Dr. Lurie client is updated to pass its own descriptor + grant *in the same session as* the S2 merge — deploy pdf-tool, then flip Dr. Lurie right after. Plan for a short window where Dr. Lurie artifact jobs would fail if it isn't flipped promptly; keep that window to minutes, not a session gap.
+### Caller census — corrected 2026-08-03, supersedes the earlier "flip Dr. Lurie" framing
+
+An earlier draft of this roadmap said Dr. Lurie must be updated to the stateless call path immediately after the S2 merge, with brief breakage accepted. **A direct read of the calling code shows that is wrong.** Here is what actually calls pdf-tool. Read this before designing the refactor — it changes which risks are real.
+
+| Caller | How it calls today | Effect of S2 |
+|---|---|---|
+| **Platform bridge → Dr. Lurie** (`packages/core/server/lib/pdf-tool-client.ts`) | Already sends a **full storage grant with `stores`, plus `projectId`, on every call**, minted server-side with a 1h TTL and never exposed to the agent | **Does not break.** It is already stateless-shaped. No client change is required to keep it working. |
+| **Platform bridge → Fernwell** (`sites/fernwell/`, `pdfToolProjectId: 'fernwell'`) | Same grant path, `projectId: 'fernwell'` | **Currently broken; S2 is the fix.** See below. |
+| **CMS-Agent → pdf-tool direct** (`src/agent/projects/pdfTool/definition.ts`, 8 read-only tools) | Bare JSON-RPC pass-through. Mints **no grant**, injects **no `projectId`** — it depends entirely on pdf-tool's server-side `CLIENT_SITE_ID` / `CLIENT_BLOBS_TOKEN` | **This is the real breakage.** Removing the env fallbacks removes the only thing making these reads resolve. |
+| CMS-Agent → pdf-tool *brokered via Dr. Lurie* | Allowlists `get_pdf_tool_storage_grant` | Already dead — Platform removed that tool and has a test asserting its absence. CMS-Agent's config and knowledge base still reference it. |
+
+No other repository calls pdf-tool. `monetizer`, `Promoter`, `KugelBrands`, `ambient-senses`, `nearwhisper`, `snoocle` and the rest have zero call sites.
+
+**Fernwell is the reason to do this refactor.** It is a fully scaffolded second tenant in `vreich-ui/platform` (`sites/fernwell/`, 64 files, `canonicalHost: https://kugel-fernwell.netlify.app`) whose MCP server already advertises the three bridge tools and already mints grants with `projectId: 'fernwell'`. pdf-tool rejects every one of them today, because `agent-project-registry.ts` registers exactly one adapter (`dr-lurie`) and `agent-artifact-jobs.ts` hard-gates job creation on `supportedProjectIds()`. The error even names the two escape hatches Fernwell cannot use. **S2 must therefore ship with an acceptance test that a job for `projectId: "fernwell"` succeeds end to end with no pdf-tool-side registration** — that test is the point of the session, not an afterthought.
+
+### Two traps that will silently produce wrong behavior — handle explicitly
+
+1. **The artifact-index store name comes from the adapter, not the grant.** `getAgentArtifactBySlot` / `ByFilename` call `resolveProjectArtifactIndexOptions(projectId)`, which returns `{}` for any unregistered project; `artifactIndexStore` then falls back to `ARTIFACT_INDEX_STORE_NAME = "project-artifact-index"`, while the grant's `stores.artifactIndex` is `"artifact-index"`. Delete the adapters without threading `grant.stores.*` into that resolver and **every slot and filename lookup silently reads an empty store** — including Dr. Lurie's. It surfaces as "artifact not found", not as an auth error, which makes it expensive to diagnose. Thread the grant's store names through every resolver, and add a test that a slot lookup reads the store the grant names.
+2. **Model and artifact-kind allowlists currently have no caller-side home.** Platform sends no `allowedModels` / `allowedKinds`; the entire Dr. Lurie allowlist — `gpt-image-1` plus the fal.ai flux/qwen entries and their aliases — exists only inside the adapter being deleted. If the descriptor simply defaults, that policy silently widens or narrows. Preserve the current allowlist as the descriptor's default and note in the PR body exactly what a caller now has to send to tighten it.
+
+Also note `DEFAULT_PROJECT_ID = "dr-lurie"` is exported from `agent-artifact-jobs.ts` and referenced nowhere else — do not let it quietly become the descriptor fallback.
+
+### What the humans actually have to do
+
+- **Dr. Lurie: nothing, to keep working.** The bridge already passes grant + projectId. There is no urgent post-merge flip and no breakage window. *(This reverses the earlier instruction; the earlier one was based on an assumption about the call path rather than a reading of it.)*
+- **Platform: one optional PR**, not a required one — to start sending `allowedModels` / `allowedKinds` in the descriptor so model policy lives with the caller instead of relying on pdf-tool's defaults. Worth doing, not blocking.
+- **CMS-Agent: one required change.** Its eight read-only pdf-tool tools must start passing a storage grant, or be re-brokered through Platform. Until then they stop resolving. This is the only genuinely breaking consequence of S2, and it belongs at the top of the S2 summary.
+- **Separately, unrelated to S2:** CMS-Agent still instructs its agents to call `get_pdf_tool_storage_grant`, which no longer exists on Platform. That is already-live dead config and worth cleaning up whenever CMS-Agent is next touched.
 
 **Added from the prior-plan sweep** — all three are grant/descriptor-shaped, which makes S2 the only sane place for them:
 
@@ -261,7 +288,7 @@ This makes a double-fire impossible even if both merge in the same second. S5 le
 Three things were tested here on 2026-08-03 so no session has to rediscover them:
 
 - **`git push` does not work.** Anonymous `git clone` of this public repo succeeds and local commits succeed, but pushing fails with *"Invalid username or token. Password authentication is not supported for Git operations."* The `gh` CLI is not installed.
-- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."` So curl is good for *reading* repo state cheaply; it cannot commit.
+- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."* So curl is good for *reading* repo state cheaply; it cannot commit.
 - **The GitHub MCP tools are the only write path.** `create_branch`, `push_files` (multi-file commit — the workhorse), `create_or_update_file`, `create_pull_request`, `pull_request_read`, `merge_pull_request`. File contents travel as tool parameters, so batch related files into one `push_files` call rather than one call per file.
 
 **Practical loop:** clone anonymously → edit and run `npm run check:eslint && npm test` locally → `create_branch` → `push_files` with the finished tree → `create_pull_request` → poll checks → `merge_pull_request`. Test locally, publish deliberately.
