@@ -3,13 +3,52 @@ import { currentStorageGrant } from "./storage-grant.js";
 
 type TriggerEvent = { headers?: Record<string, string | undefined> };
 
+/** Comma-separated hostnames (or full origins) that request-derived worker base URLs may
+ * resolve to when no deploy env URL is configured. */
+export const WORKER_ORIGIN_ALLOWLIST_ENV = "WORKER_ORIGIN_ALLOWLIST";
+
+function allowlistedHostnames(): Set<string> {
+  const raw = process.env[WORKER_ORIGIN_ALLOWLIST_ENV] ?? "";
+  const hostnames = new Set<string>();
+  for (const entry of raw.split(",")) {
+    const trimmed = entry.trim().toLowerCase();
+    if (!trimmed) continue;
+    if (trimmed.includes("://")) {
+      try {
+        hostnames.add(new URL(trimmed).hostname.toLowerCase());
+      } catch {
+        // Unparseable allowlist entry: skip rather than widen.
+      }
+    } else {
+      hostnames.add(trimmed);
+    }
+  }
+  return hostnames;
+}
+
+function allowlistedRequestOrigin(candidate: string | undefined): string | undefined {
+  if (!candidate) return undefined;
+  try {
+    const parsed = new URL(candidate.includes("://") ? candidate : `https://${candidate}`);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+    return allowlistedHostnames().has(parsed.hostname.toLowerCase()) ? parsed.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolves the base URL the worker POST (bearer token + storage grant in the body) is sent
+ * to. Configured deploy URLs are authoritative. F4: Origin/Host headers are
+ * attacker-controlled — trusting them let a crafted request redirect the worker trigger
+ * (token + grant included) to an arbitrary host. Request-derived values are honored only
+ * when their hostname appears in the WORKER_ORIGIN_ALLOWLIST env allowlist.
+ */
 export function artifactWorkerBaseUrl(event?: TriggerEvent): string | undefined {
   if (process.env.DEPLOY_PRIME_URL) return process.env.DEPLOY_PRIME_URL;
   if (process.env.URL) return process.env.URL;
-  const origin = getHeader(event?.headers, "origin");
-  if (origin) return origin;
-  const host = getHeader(event?.headers, "host");
-  return host ? `https://${host}` : undefined;
+  return allowlistedRequestOrigin(getHeader(event?.headers, "origin"))
+    ?? allowlistedRequestOrigin(getHeader(event?.headers, "host"));
 }
 
 export async function triggerWorker(baseUrl: string | undefined, token: string | undefined, projectId: string, jobId: string, workerFunction = "agent-artifact-worker-background"): Promise<void> {

@@ -7,6 +7,7 @@ import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfArtifact } from "../lib/pdf-render/render.js";
 import { structuredError } from "../lib/pdf-render/errors.js";
 import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
+import { assertWorkerBudget, startWorkerDeadline, type WorkerDeadline } from "../lib/worker-budget.js";
 
 export const config = { name: "agent-artifact-worker-background" };
 
@@ -33,12 +34,17 @@ export async function handler(event: FunctionEvent) {
     return jsonResponse(400, { error: "projectId and jobId are required" });
   }
 
-  const extracted = extractStorageGrant({ storage });
+  // F7: pass projectId alongside the grant so the cross-project guard (grant.projectId must
+  // match the request's projectId) actually runs on this entrypoint.
+  const extracted = extractStorageGrant({ storage, projectId });
   if (extracted.error) return jsonResponse(400, { error: extracted.error });
-  return runWithStorageGrant(extracted.grant, () => runWorker(projectId, jobId));
+  // Deadline-awareness: the clock starts at invocation; Netlify hard-kills background
+  // functions at 15 minutes with no signal, so the worker tracks its own budget.
+  const deadline = startWorkerDeadline();
+  return runWithStorageGrant(extracted.grant, () => runWorker(projectId, jobId, deadline));
 }
 
-async function runWorker(projectId: string, jobId: string) {
+async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadline) {
   const job = await readArtifactJob(projectId, jobId);
   if (!job) {
     return jsonResponse(404, { error: "Artifact job not found" });
@@ -54,9 +60,13 @@ async function runWorker(projectId: string, jobId: string) {
 
   let runningJob = job;
   try {
-    runningJob = await updateArtifactJob(job, { status: "running", error: undefined, errorCode: undefined, errorDetail: undefined });
+    runningJob = await updateArtifactJob(job, { status: "running", startedAt: new Date(deadline.startedAtMs).toISOString(), error: undefined, errorCode: undefined, errorDetail: undefined });
     const adapter = getProjectAdapter(runningJob.projectId);
     if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
+
+    // Fail cleanly with WORKER_TIMEOUT_APPROACHING instead of being silently killed at the
+    // platform background cap; the failure record persists via the catch below.
+    assertWorkerBudget(deadline, "artifact job execution");
 
     const route = await resolveOperationRoute(runningJob);
     // Persist route fields immediately so the stored record reflects the actual execution path.
@@ -75,7 +85,7 @@ async function runWorker(projectId: string, jobId: string) {
         // Route resolution already threw for templateRef-only / missing-template jobs, so
         // templateId is guaranteed here; the orchestrator dispatches on the stored renderer.
         : await renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, assets: runningJob.assets, requirements: runningJob.requirements, mode: "final" }))
-      : await executeAgentArtifactWorkflow(runningJob, { apiKey });
+      : await executeAgentArtifactWorkflow(runningJob, { apiKey, deadline });
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
       : undefined;

@@ -28,7 +28,8 @@ export async function handler(event: FunctionEvent) {
     return jsonResponse(400, { error: "projectId, templateId, version, and validationId are required" });
   }
 
-  const extracted = extractStorageGrant({ storage: input.storage });
+  // F7: include projectId so the grant↔project cross-project guard runs on this entrypoint.
+  const extracted = extractStorageGrant({ storage: input.storage, projectId: input.projectId });
   if (extracted.error) return jsonResponse(400, { error: extracted.error });
   return runWithStorageGrant(extracted.grant, async () => {
     const result = await runPdfTemplateValidation({

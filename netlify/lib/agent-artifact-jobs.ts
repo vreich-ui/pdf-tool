@@ -506,6 +506,9 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   executor?: string;
   requiresAI?: boolean;
   requiresModel?: boolean;
+  /** ISO timestamp recorded when a worker flips the job to `running` (deadline-awareness:
+   * lets operators and the future stale-job reaper spot jobs killed at the platform cap). */
+  startedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -563,7 +566,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,

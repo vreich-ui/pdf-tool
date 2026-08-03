@@ -129,13 +129,27 @@ export async function optimizeImageBytes(
   return currentBytes;
 }
 
-async function defaultOpenAIClient(providedKey?: string): Promise<ImageGenerationClient> {
+/** Explicit request timeout when the caller supplies no budget-derived one. */
+export const DEFAULT_OPENAI_TIMEOUT_MS = 120_000;
+
+/**
+ * F9: constructor options for the OpenAI client. `maxRetries: 0` — the SDK's silent default
+ * retries billed failed generations up to 3× per job; retry policy now lives exclusively in
+ * the worker's 429 etiquette (worker-budget.ts). The timeout is always explicit and, when a
+ * worker deadline is in scope, tied to the remaining job budget.
+ */
+export function openAiClientOptions(apiKey: string, timeoutMs?: number): { apiKey: string; maxRetries: 0; timeout: number } {
+  const timeout = typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_OPENAI_TIMEOUT_MS;
+  return { apiKey, maxRetries: 0, timeout };
+}
+
+async function defaultOpenAIClient(providedKey?: string, timeoutMs?: number): Promise<ImageGenerationClient> {
   const apiKey = providedKey ?? process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY is not configured");
   }
   const { default: OpenAI } = await import("openai");
-  return new OpenAI({ apiKey }) as ImageGenerationClient;
+  return new OpenAI(openAiClientOptions(apiKey, timeoutMs)) as ImageGenerationClient;
 }
 
 export async function generateImageArtifactBytes(options: {
@@ -146,6 +160,7 @@ export async function generateImageArtifactBytes(options: {
   size?: string;
   outputFormat?: "png" | "jpeg" | "webp";
   maxBytes?: number;
+  timeoutMs?: number;
 }): Promise<GeneratedImageBytes> {
   const outputFormat = options.outputFormat ?? "png";
   if (!options.client && process.env.NODE_ENV === "test" && process.env.AGENT_ARTIFACT_TEST_IMAGE_B64) {
@@ -159,7 +174,7 @@ export async function generateImageArtifactBytes(options: {
     return { bytes, contentType: contentTypeFromFormat(outputFormat) };
   }
 
-  const client = options.client ?? await defaultOpenAIClient(options.apiKey);
+  const client = options.client ?? await defaultOpenAIClient(options.apiKey, options.timeoutMs);
   const response = await client.images.generate(imageGenerationRequest({
     model: options.model,
     prompt: options.prompt,

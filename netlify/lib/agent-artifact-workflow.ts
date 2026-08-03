@@ -1,14 +1,29 @@
 import { sha256Hex } from "./artifact-core/index.js";
-import type { ArtifactJobRecord } from "./agent-artifact-jobs.js";
+import { MAX_IMAGE_OUTPUT_BYTES, type ArtifactJobRecord } from "./agent-artifact-jobs.js";
 import { generateImageArtifactBytes, type GeneratedImageBytes, type ImageGenerationClient } from "./agent-image-generation.js";
 import { editImageArtifactBytes, readSourceArtifactBytes, contentTypeForImageOutputFormat, type ImageEditingClient } from "./agent-image-editing.js";
 import { resolveImageProvider } from "./image-providers/registry.js";
 import { RenderError } from "./pdf-render/errors.js";
+import { assertWorkerBudget, remainingWorkerBudgetMs, withRateLimitEtiquette, type WorkerDeadline } from "./worker-budget.js";
 
 export interface AgentArtifactWorkflowOptions {
   imageClient?: ImageGenerationClient & ImageEditingClient;
   apiKey?: string;
   agentSdk?: AgentSdkModule;
+  /** Worker deadline: bounds provider timeouts and any honored Retry-After wait. */
+  deadline?: WorkerDeadline;
+  /** Injectable sleep for tests of the 429 etiquette; defaults to real setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Explicit provider timeout when no worker deadline is in scope (F9: no SDK default). */
+const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
+const MAX_PROVIDER_TIMEOUT_MS = 600_000;
+
+function providerTimeoutMs(deadline: WorkerDeadline | undefined): number {
+  const remaining = remainingWorkerBudgetMs(deadline);
+  if (!Number.isFinite(remaining)) return DEFAULT_PROVIDER_TIMEOUT_MS;
+  return Math.max(1, Math.min(remaining, MAX_PROVIDER_TIMEOUT_MS));
 }
 
 export type ImageOutputFormat = "png" | "jpeg" | "webp";
@@ -79,6 +94,12 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
   const agents = await loadAgentSdk(options.agentSdk);
   let generated: GeneratedImageBytes | undefined;
   const toolHandler = async () => {
+    // Deadline-awareness: a job that cannot start its provider work before the platform
+    // cap fails cleanly (WORKER_TIMEOUT_APPROACHING) instead of being killed silently.
+    assertWorkerBudget(options.deadline, "image artifact execution");
+    // F5: the image byte ceiling applies BY DEFAULT — a job that omits requirements.maxBytes
+    // must not receive an unbounded artifact (mirrors the PDF ceiling).
+    const maxBytes = job.requirements?.maxBytes ?? MAX_IMAGE_OUTPUT_BYTES;
     if ((job.operation ?? "generate") === "edit") {
       if (!job.sourceArtifact || !job.editMode) throw new Error("Image edit jobs require sourceArtifact and editMode");
       const source = await readSourceArtifactBytes(job.projectId, job.sourceArtifact);
@@ -95,7 +116,7 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
           apiKey: options.apiKey,
           size: job.requirements?.image?.size,
           outputFormat,
-          maxBytes: job.requirements?.maxBytes,
+          maxBytes,
           model: job.selectedModel
         });
       } else {
@@ -110,7 +131,9 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
             provider: provider.id,
           });
         }
-        generated = await provider.edit({
+        // F9/429 etiquette: no blind retries; at most one wait honoring a provider
+        // Retry-After that fits the remaining job budget, else a typed failure.
+        generated = await withRateLimitEtiquette("image edit", () => provider.edit!({
           mode: editFeature,
           model,
           sourceBytes: source.bytes,
@@ -121,21 +144,23 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
           apiKey: options.apiKey,
           size: job.requirements?.image?.size,
           outputFormat,
-          maxBytes: job.requirements?.maxBytes,
-        });
+          maxBytes,
+          timeoutMs: providerTimeoutMs(options.deadline),
+        }), { deadline: options.deadline, sleep: options.sleep });
       }
     } else {
       if (!job.prompt) throw new Error("Image generation jobs require prompt");
       const { provider, model } = resolveImageProvider(job.selectedModel);
-      generated = await provider.generate({
-        prompt: job.prompt,
+      generated = await withRateLimitEtiquette("image generation", () => provider.generate({
+        prompt: job.prompt!,
         model,
         client: options.imageClient,
         apiKey: options.apiKey,
         size: job.requirements?.image?.size,
         outputFormat: job.requirements?.image?.outputFormat ?? imageOutputFormatFromFilename(job.filename),
-        maxBytes: job.requirements?.maxBytes,
-      });
+        maxBytes,
+        timeoutMs: providerTimeoutMs(options.deadline),
+      }), { deadline: options.deadline, sleep: options.sleep });
     }
     return {
       ok: true as const,

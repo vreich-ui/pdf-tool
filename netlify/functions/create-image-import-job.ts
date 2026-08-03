@@ -1,17 +1,13 @@
 import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
 import { createImageImportJob } from "../lib/agent-image-search-mcp.js";
+import { artifactWorkerBaseUrl } from "../lib/agent-artifact-worker-trigger.js";
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null };
 
-function requestBaseUrl(event: FunctionEvent): string | undefined {
-  if (process.env.DEPLOY_PRIME_URL) return process.env.DEPLOY_PRIME_URL;
-  if (process.env.URL) return process.env.URL;
-  const origin = getHeader(event.headers, "origin");
-  if (origin) return origin;
-  const host = getHeader(event.headers, "host");
-  return host ? `https://${host}` : undefined;
-}
+// F4: request-derived base URLs (Origin/Host) feed the worker trigger, which carries the
+// bearer token and storage grant — resolution is centralized and allowlist-guarded.
+const requestBaseUrl = (event: FunctionEvent): string | undefined => artifactWorkerBaseUrl(event);
 
 /** Batch url-import job: accepts direct image URLs, zip archives, and folder/index pages. */
 export async function handler(event: FunctionEvent) {

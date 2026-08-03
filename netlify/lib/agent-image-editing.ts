@@ -1,7 +1,7 @@
 import { projectBlobStore } from "./blob-store.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
 import { getProjectAdapter } from "./agent-project-registry.js";
-import type { GeneratedImageBytes } from "./agent-image-generation.js";
+import { openAiClientOptions, type GeneratedImageBytes } from "./agent-image-generation.js";
 import type { ImageEditInstructions, ImageEditMode } from "./agent-artifact-jobs.js";
 
 export interface SourceArtifactBytes {
@@ -54,11 +54,12 @@ export async function readSourceArtifactBytes(projectId: string, source: { artif
   return { reference: source.artifactReference, bytes, sha256: actualSha256 };
 }
 
-async function defaultOpenAIClient(providedKey?: string): Promise<ImageEditingClient> {
+async function defaultOpenAIClient(providedKey?: string, timeoutMs?: number): Promise<ImageEditingClient> {
   const apiKey = providedKey ?? process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is not configured");
   const { default: OpenAI } = await import("openai");
-  return new OpenAI({ apiKey }) as ImageEditingClient;
+  // F9: no blind SDK retries, explicit timeout (see openAiClientOptions).
+  return new OpenAI(openAiClientOptions(apiKey, timeoutMs)) as ImageEditingClient;
 }
 
 export async function editImageArtifactBytes(options: {
@@ -72,6 +73,7 @@ export async function editImageArtifactBytes(options: {
   size?: string;
   outputFormat?: "png" | "jpeg" | "webp";
   maxBytes?: number;
+  timeoutMs?: number;
 }): Promise<GeneratedImageBytes> {
   const outputFormat = options.outputFormat ?? "png";
   if (options.mode === "deterministic_transform") {
@@ -88,7 +90,7 @@ export async function editImageArtifactBytes(options: {
     }
     return { bytes, contentType: contentTypeFromFormat(outputFormat) };
   }
-  const client = options.client ?? await defaultOpenAIClient(options.apiKey);
+  const client = options.client ?? await defaultOpenAIClient(options.apiKey, options.timeoutMs);
   const prompt = options.instructions?.change;
   if (!prompt) throw new Error("generative image edits require editInstructions.change");
   const common = { model: options.model, prompt, image: options.sourceBytes, size: options.size ?? "1024x1024", output_format: outputFormat };

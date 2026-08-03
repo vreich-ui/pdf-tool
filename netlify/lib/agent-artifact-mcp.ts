@@ -38,6 +38,10 @@ export interface CreateAgentArtifactJobInput {
   promptId?: string;
   model?: string;
   requirements?: ArtifactJobRequirements;
+  /** F6: part of the public input schema — a strict client that strips unknown properties
+   * must not silently drop the human-approval gate. */
+  requireApproval?: boolean;
+  approvalAction?: string;
 }
 
 export interface GetAgentArtifactJobStatusInput { projectId: string; jobId: string }
