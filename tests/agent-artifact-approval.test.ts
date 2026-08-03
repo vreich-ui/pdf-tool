@@ -24,6 +24,8 @@ function env() {
   process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
   process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   process.env.MCP_OAUTH_PASSWORD = "operator-approve-me";
+  // F4: request-derived hosts resolve only against this allowlist.
+  process.env.WORKER_ORIGIN_ALLOWLIST = "example.netlify.app";
   delete process.env.ARTIFACT_APPROVAL_SECRET;
   delete process.env.AGENT_ARTIFACT_APPROVAL_REQUIRED;
   delete process.env.ARTIFACT_ATTESTATION_SECRET;
