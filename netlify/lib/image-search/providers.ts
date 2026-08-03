@@ -1,6 +1,6 @@
 import { artifactIndexStore, requestArtifactReferenceKey, readArtifactIndexKeys } from "../artifact-core/artifact-index.js";
 import type { ArtifactReference } from "../artifact-core/index.js";
-import { resolveProjectArtifactIndexOptions } from "../agent-project-registry.js";
+import { resolveProjectArtifactIndexOptions } from "../project-descriptor.js";
 import type { ImageLicenseInfo, ImageSearchProvider, ImageSearchProviderContext, ImageSearchResult } from "./types.js";
 
 /** Test hook, mirroring AGENT_ARTIFACT_TEST_IMAGE_B64: a JSON map of provider id -> normalized
