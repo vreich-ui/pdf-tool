@@ -18,8 +18,21 @@ import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-arti
 import { handler as mcpBySlotHandler } from "../netlify/functions/get-agent-artifact-by-slot.js";
 import { handler as mcpByFilenameHandler } from "../netlify/functions/get-agent-artifact-by-filename.js";
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
+import { saveArtifactBytes as saveCanonicalArtifactBytes } from "../netlify/lib/artifact-layout.js";
 
 const pngBytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFklEQVQYlWP4z8DQQAxmGFX4n67BAwAg+JWdtW1ttQAAAABJRU5ErkJggg==", "base64");
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store deliberately matches the no-grant fallback name so lib-level test
+// setup (createArtifactJob & co.) and grant-scoped entrypoint calls resolve the same
+// memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 const webpBytes = Buffer.from("UklGRmAAAABXRUJQVlA4WAoAAAAQAAAACQAACQAAQUxQSAoAAAABB1DAiAhERP8DVlA4IDAAAADQAQCdASoKAAoAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=", "base64");
 
 function env() {
@@ -29,10 +42,6 @@ function env() {
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
-  process.env.CLIENT_SITE_ID = "dr-site";
-  process.env.CLIENT_BLOBS_TOKEN = "dr-token";
-  process.env.PDF_TOOL_SITE_ID = "pdf-tool-site";
-  process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-token";
   // F4: request-derived hosts resolve only against this allowlist.
   process.env.WORKER_ORIGIN_ALLOWLIST = "example.netlify.app,example.test,example.com";
   delete process.env.URL;
@@ -64,12 +73,12 @@ test("status auth failure returns 401", async () => {
 });
 
 test("worker auth failure returns 401", async () => {
-  const response = await workerHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ projectId: "dr-lurie", jobId: "missing" }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: "missing" }) });
   assert.equal(response.statusCode, 401);
 });
 
 test("worker rejects GET trigger", async () => {
-  const response = await workerHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: "missing" }) });
+  const response = await workerHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: "missing" }) });
   assert.equal(response.statusCode, 405);
 });
 
@@ -80,7 +89,7 @@ test("job endpoint creates pending job", async () => {
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: ["hero"], label: "Hero" })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: ["hero"], label: "Hero" })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -125,7 +134,7 @@ test("job endpoint awaits worker trigger", async () => {
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-awaited", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-awaited", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
     });
     assert.equal(response.statusCode, 202);
     assert.equal(workerCalled, true);
@@ -143,7 +152,7 @@ test("triggerWorker fetch failure marks job failed from job endpoint", async () 
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-fail-trigger", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-fail-trigger", artifactKind: "image", prompt: "make image", filename: "hero.png", tags: [], label: "Hero" })
     });
     assert.equal(response.statusCode, 502);
     const body = JSON.parse(response.body);
@@ -156,16 +165,16 @@ test("triggerWorker fetch failure marks job failed from job endpoint", async () 
 
 test("status endpoint returns pending, complete, and failed jobs", async () => {
   const pending = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
-  let response = await statusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: pending.jobId } });
+  let response = await statusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: pending.jobId }) });
   assert.equal(JSON.parse(response.body).status, "pending");
 
   await updateArtifactJob(pending, { status: "complete", artifact: { projectId: "dr-lurie", requestId: "req-1", artifactId: "image-1", artifactKind: "image", filename: "x.png", contentType: "image/png", size: 12, sha256: "abc", blobKey: "k", tags: [], createdAt: new Date().toISOString() } });
-  response = await statusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: pending.jobId }) });
+  response = await statusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: pending.jobId }) });
   assert.equal(JSON.parse(response.body).status, "complete");
 
   const failed = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-2", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
   await updateArtifactJob(failed, { status: "failed", error: "boom" });
-  response = await statusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: failed.jobId } });
+  response = await statusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: failed.jobId }) });
   assert.equal(JSON.parse(response.body).status, "failed");
 });
 
@@ -251,6 +260,7 @@ test("structured image requirements are validated, persisted, and passed to gene
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-requirements",
         artifactKind: "image",
@@ -289,7 +299,7 @@ test("structured image requirements reject unsupported values and enforce maxByt
   let response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-format", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requirements: { image: { outputFormat: "bad" } } })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-bad-format", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requirements: { image: { outputFormat: "bad" } } })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["requirements", "image", "outputFormat"]);
@@ -297,7 +307,7 @@ test("structured image requirements reject unsupported values and enforce maxByt
   response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-bad-ext", artifactKind: "image", prompt: "x", filename: "hero.jpg", tags: [], requirements: { image: { outputFormat: "png" } } })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-bad-ext", artifactKind: "image", prompt: "x", filename: "hero.jpg", tags: [], requirements: { image: { outputFormat: "png" } } })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["filename"]);
@@ -327,13 +337,13 @@ test("structured image role and usageContext are stored as artifact metadata", a
     label: undefined,
     requirements: { image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "newsletter" } }
   });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.deepEqual(body.artifactReference.metadata, { imageRole: "featured", usageContext: "newsletter" });
 });
 
-test("model resolution uses explicit input, adapter default, and rejects unsupported models", async () => {
+test("model resolution uses explicit input, descriptor default, and rejects unsupported models", async () => {
   const explicit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-explicit", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined, model: "alternate-test-image-model" });
   assert.equal(explicit.selectedModel, "alternate-test-image-model");
 
@@ -347,7 +357,7 @@ test("model resolution uses explicit input, adapter default, and rejects unsuppo
   const response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-bad", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "unsupported-model" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-model-bad", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "unsupported-model" })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["model"]);
@@ -358,7 +368,7 @@ test("model resolution uses explicit input, adapter default, and rejects unsuppo
     const gptImageResponse = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-model-gpt-image", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "gpt-image-1" })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-model-gpt-image", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], model: "gpt-image-1" })
     });
     assert.equal(gptImageResponse.statusCode, 202);
     assert.equal(JSON.parse(gptImageResponse.body).selectedModel, "gpt-image-1");
@@ -384,14 +394,14 @@ test("generic code does not reference Dr. Lurie-specific environment names", asy
 
 test("worker saves image artifact and retained index is updated", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "x", filename: "hero.png", tags: ["hero"], label: "Hero" });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.status, "complete");
   assert.equal(stored?.artifact?.artifactKind, "image");
   assert.equal(stored?.artifact?.tags[0], "hero");
 
-  const index = await readArtifactIndex("dr-lurie");
+  const index = await readArtifactIndex({ storeName: "artifact-index" });
   assert.equal(index.length, 1);
   assert.equal(index[0].artifactId, stored?.artifact?.artifactId);
 
@@ -412,9 +422,9 @@ test("worker saves image artifact and retained index is updated", async () => {
 });
 
 
-test("Dr. Lurie adapter uses target stores, cross-site config, and canonical ArtifactReference", async () => {
+test("canonical layout writes grant-named stores under grant credentials with canonical ArtifactReference", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-store", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: "Hero" });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.projectId, "dr-lurie");
@@ -440,7 +450,7 @@ test(".webp filename requests WebP and saves WebP content type/blob key", async 
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-webp", artifactKind: "image", prompt: "x", filename: "cellular-biology-hero.webp", tags: [], label: undefined });
   const result = await executeAgentArtifactWorkflow(job);
   assert.equal(result.contentType, "image/webp");
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.artifactReference.contentType, "image/webp");
@@ -459,7 +469,7 @@ test("compatibility files re-export artifact-core behavior", async () => {
   const compatBlobStore = await import("../netlify/lib/blob-store.js");
   const coreBlobStore = await import("../netlify/lib/artifact-core/blob-store.js");
 
-  assert.equal(compatArtifacts.saveArtifactBytes, coreArtifacts.saveArtifactBytes);
+  assert.equal(compatArtifacts.readArtifactIndex, coreArtifacts.readArtifactIndex);
   assert.equal(compatArtifacts.sha256Hex, coreArtifacts.sha256Hex);
   assert.equal(compatBlobStore.projectBlobStore, coreBlobStore.projectBlobStore);
 });
@@ -468,7 +478,7 @@ test("failed generation updates job as failed", async () => {
   delete process.env.AGENT_ARTIFACT_TEST_IMAGE_B64;
   delete process.env.OPENAI_API_KEY;
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-1", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.status, "failed");
@@ -488,7 +498,7 @@ test("MCP create_agent_artifact_job returns metadata only and no bytes", async (
     const response = await mcpCreateHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-mcp", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], agentName: "content-agent" })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], agentName: "content-agent" })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -510,15 +520,15 @@ test("MCP create_agent_artifact_job returns metadata only and no bytes", async (
 
 test("MCP get_agent_artifact_job_status handles states and returns ArtifactReference only on complete", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-status", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
-  let response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId } });
+  let response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(JSON.parse(response.body).status, "pending");
   await updateArtifactJob(job, { status: "running" });
-  response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(JSON.parse(response.body).status, "running");
   const artifact = { projectId: "dr-lurie", requestId: "req-status", artifactId: "image-1", artifactKind: "image" as const, filename: "x.png", contentType: "image/png", size: 12, sha256: "abc", blobKey: "k", tags: [], createdAt: new Date().toISOString() };
   const running = await readArtifactJob("dr-lurie", job.jobId);
   await updateArtifactJob(running!, { status: "complete", artifact });
-  response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId } });
+  response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   const complete = JSON.parse(response.body);
   assert.equal(complete.status, "complete");
   assert.deepEqual(complete.artifact, artifact);
@@ -526,7 +536,7 @@ test("MCP get_agent_artifact_job_status handles states and returns ArtifactRefer
   assert.equal("b64_json" in complete, false);
   const failed = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-failed", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
   await updateArtifactJob(failed, { status: "failed", error: "safe failure" });
-  response = await mcpStatusHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", jobId: failed.jobId } });
+  response = await mcpStatusHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: failed.jobId }) });
   assert.equal(JSON.parse(response.body).error, "safe failure");
 });
 
@@ -539,15 +549,15 @@ test("MCP artifact endpoints require auth", async () => {
 
 test("workflow integration is disabled and always returns skipped_by_design", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-workflow", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined, agentName: "content-agent" });
-  assert.equal(job.adapterVersion, "dr-lurie-v1");
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(job.adapterVersion, "descriptor-v1");
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.workflowPatchStatus, "skipped_by_design");
 });
 
 test("readArtifactIndexKeys handles AsyncIterable Netlify paginated list output", async () => {
-  setMemoryBlobStoreList("project-artifact-index", async () => ({
+  setMemoryBlobStoreList("artifact-index", async () => ({
     async *[Symbol.asyncIterator]() {
       yield { blobs: [{ key: "request-artifacts/a/1.json" }, { key: "request-artifacts/a/ignore.txt" }] };
       yield { blobs: [{ key: "request-artifacts/a/2.json" }] };
@@ -564,7 +574,8 @@ test("job store uses strong consistency for mutable job state", async () => {
   const calls = projectBlobStoreCallLog().filter((call) => call.name === "agent-artifact-jobs");
   assert.ok(calls.length >= 3);
   assert.ok(calls.every((call) => call.consistency === "strong"));
-  assert.ok(calls.every((call) => call.siteID === "pdf-tool-site" && call.token === "pdf-tool-token"));
+  // No grant in scope: lib-level job records use the same-site fallback store.
+  assert.ok(calls.every((call) => call.siteID === undefined && call.token === undefined));
 });
 
 test("Agent SDK tool output returns metadata only and not Buffer/base64 bytes", async () => {
@@ -591,7 +602,7 @@ test("slot is accepted and invalid slot is rejected", async () => {
   const response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-slot-invalid", artifactKind: "image", prompt: "x", filename: "slot.png", slot: "../bad", tags: [] })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-slot-invalid", artifactKind: "image", prompt: "x", filename: "slot.png", slot: "../bad", tags: [] })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["slot"]);
@@ -599,7 +610,7 @@ test("slot is accepted and invalid slot is rejected", async () => {
 
 test("slot and filename indexes are written and lookup endpoints return ArtifactReference only", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-lookup", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   const artifact = stored?.artifact;
@@ -620,13 +631,13 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
   assert.deepEqual(latestBySlotKeys, [latestArtifactSlotPointerKey("dr-lurie", "req-lookup", "hero")]);
 
   const serializedArtifact = JSON.parse(JSON.stringify(artifact));
-  let lookup = await mcpBySlotHandler({ httpMethod: "GET", headers: { authorization: "Bearer test-token" }, queryStringParameters: { projectId: "dr-lurie", requestId: "req-lookup", slot: "hero" } });
+  let lookup = await mcpBySlotHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-lookup", slot: "hero" }) });
   let body = JSON.parse(lookup.body);
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
   assert.equal("b64_json" in body, false);
 
-  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-lookup", filename: artifact.originalFilename }) });
+  lookup = await mcpByFilenameHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-lookup", filename: artifact.originalFilename }) });
   body = JSON.parse(lookup.body);
   assert.deepEqual(body.artifact, serializedArtifact);
   assert.equal("bytes" in body, false);
@@ -635,7 +646,7 @@ test("slot and filename indexes are written and lookup endpoints return Artifact
 
 test("legacy lookup fallback works for slot and filename", async () => {
   const artifact = { projectId: "dr-lurie", requestId: "req-legacy", artifactId: "image-legacy", artifactKind: "image" as const, filename: "legacy.png", contentType: "image/png", size: 12, sha256: "legacy-sha", blobKey: "legacy-k", tags: [], createdAt: new Date().toISOString() };
-  const store = await projectBlobStore("project-artifact-index");
+  const store = await projectBlobStore("artifact-index");
 
   // Write legacy keys (simulating old data)
   await store.setJSON(legacyArtifactSlotPointerKey("req-legacy", "legacy-slot"), artifact);
@@ -648,7 +659,7 @@ test("legacy lookup fallback works for slot and filename", async () => {
   assert.deepEqual(byFilename, artifact);
 });
 
-test("adapterVersion comes from selected adapter and is returned in responses", async () => {
+test("adapterVersion is the descriptor-model version and is returned in responses", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
@@ -656,21 +667,21 @@ test("adapterVersion comes from selected adapter and is returned in responses", 
     const internalResponse = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-v", artifactKind: "image", prompt: "p", filename: "v.png", tags: [] })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-v", artifactKind: "image", prompt: "p", filename: "v.png", tags: [] })
     });
     const internalBody = JSON.parse(internalResponse.body);
-    assert.equal(internalBody.adapterVersion, "dr-lurie-v1");
+    assert.equal(internalBody.adapterVersion, "descriptor-v1");
 
     // MCP-facing endpoint
     const mcpResponse = await mcpCreateHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-v-mcp", artifactKind: "image", prompt: "p", filename: "v-mcp.png", tags: [] })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-v-mcp", artifactKind: "image", prompt: "p", filename: "v-mcp.png", tags: [] })
     });
     // The MCP handler currently doesn't return adapterVersion in the 202 body, but it is stored in the job.
     const mcpBody = JSON.parse(mcpResponse.body);
     const storedJob = await readArtifactJob("dr-lurie", mcpBody.jobId);
-    assert.equal(storedJob?.adapterVersion, "dr-lurie-v1");
+    assert.equal(storedJob?.adapterVersion, "descriptor-v1");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -724,7 +735,7 @@ test("MCP JSON-RPC create_agent_artifact_job creates a pending metadata-only job
   process.env.URL = "https://example.netlify.app";
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
-    const response = await mcpRpc("tools/call", { name: "create_agent_artifact_job", arguments: { projectId: "dr-lurie", requestId: "req-rpc", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], promptId: "prompt-1" } });
+    const response = await mcpRpc("tools/call", { name: "create_agent_artifact_job", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-rpc", artifactKind: "image", prompt: "make image", filename: "hero.png", slot: "hero", tags: ["hero"], promptId: "prompt-1" } });
     assert.equal(response.statusCode, 200);
     const result = JSON.parse(response.body).result.structuredContent;
     assert.equal(result.status, "pending");
@@ -742,12 +753,12 @@ test("MCP JSON-RPC create_agent_artifact_job creates a pending metadata-only job
 
 test("MCP JSON-RPC get_agent_artifact_job_status returns pending complete and failed", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-status", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
-  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: job.jobId } });
+  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId } });
   assert.equal(JSON.parse(response.body).result.structuredContent.status, "pending");
 
   const artifact = { projectId: "dr-lurie", requestId: "req-rpc-status", artifactId: "image-1", artifactKind: "image" as const, filename: "x.png", contentType: "image/png", size: 12, sha256: "abc", blobKey: "k", tags: [], createdAt: new Date().toISOString() };
   await updateArtifactJob(job, { status: "complete", artifact });
-  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: job.jobId } });
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId } });
   const complete = JSON.parse(response.body).result.structuredContent;
   assert.equal(complete.status, "complete");
   assert.deepEqual(complete.artifactReference, artifact);
@@ -755,7 +766,7 @@ test("MCP JSON-RPC get_agent_artifact_job_status returns pending complete and fa
 
   const failed = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-failed", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
   await updateArtifactJob(failed, { status: "failed", error: "safe failure" });
-  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { projectId: "dr-lurie", jobId: failed.jobId } });
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_job_status", arguments: { storage: STORAGE, projectId: "dr-lurie", jobId: failed.jobId } });
   const failedResult = JSON.parse(response.body).result.structuredContent;
   assert.equal(failedResult.status, "failed");
   assert.equal(failedResult.error, "safe failure");
@@ -763,17 +774,17 @@ test("MCP JSON-RPC get_agent_artifact_job_status returns pending complete and fa
 
 test("MCP JSON-RPC lookup tools return artifactReference only", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-rpc-lookup", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: [], label: undefined });
-  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   const artifact = JSON.parse(JSON.stringify(stored?.artifact));
 
-  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_slot", arguments: { projectId: "dr-lurie", requestId: "req-rpc-lookup", slot: "hero" } });
+  let response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_slot", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-rpc-lookup", slot: "hero" } });
   let result = JSON.parse(response.body).result.structuredContent;
   assert.deepEqual(result.artifactReference, artifact);
   assert.equal("artifact" in result, false);
   assert.equal(noBinaryPayload(result), true);
 
-  response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_filename", arguments: { projectId: "dr-lurie", requestId: "req-rpc-lookup", filename: artifact.originalFilename } });
+  response = await mcpRpc("tools/call", { name: "get_agent_artifact_by_filename", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-rpc-lookup", filename: artifact.originalFilename } });
   result = JSON.parse(response.body).result.structuredContent;
   assert.deepEqual(result.artifactReference, artifact);
   assert.equal("artifact" in result, false);
@@ -823,7 +834,7 @@ test("PDF job validation requires templateId or templateRef and .pdf filename", 
   let response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-invalid", artifactKind: "pdf", prompt: "export", filename: "article.pdf", tags: [], data: {} })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-invalid", artifactKind: "pdf", prompt: "export", filename: "article.pdf", tags: [], data: {} })
   });
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["templateId"]);
@@ -831,7 +842,7 @@ test("PDF job validation requires templateId or templateRef and .pdf filename", 
   response = await jobHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-bad-filename", artifactKind: "pdf", prompt: "export", filename: "article.png", templateId: "article_export_v1", tags: [], data: {} })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-bad-filename", artifactKind: "pdf", prompt: "export", filename: "article.png", templateId: "article_export_v1", tags: [], data: {} })
   });
   assert.equal(response.statusCode, 400);
   assert.ok(JSON.parse(response.body).issues.some((issue: { path: string[] }) => issue.path[0] === "filename"));
@@ -846,7 +857,7 @@ test("PDF job can omit prompt when template data is provided", async () => {
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.test" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-no-prompt", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" } })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-no-prompt", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" } })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -867,7 +878,7 @@ test("PDF job requirements are persisted", async () => {
     const response = await jobHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
-      body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-reqs", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" }, requirements })
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-reqs", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", tags: [], data: { title: "Hello" }, requirements })
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
@@ -882,7 +893,7 @@ test("PDF job requirements are persisted", async () => {
 test("PDF worker renders the active pdfme template version and stores application/pdf", async () => {
   await writePdfmeTemplate();
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ok", artifactKind: "pdf", filename: "article.pdf", templateId: "article_export_v1", data: { title: "<Unsafe>" }, tags: ["pdf"], label: undefined, requirements: { pdf: { pageCount: { min: 1, max: 1 } } } });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.executor, "pdfme");
@@ -897,7 +908,7 @@ test("PDF worker renders the active pdfme template version and stores applicatio
 
 test("PDF worker fails with machine-readable codes for missing and unpublished templates", async () => {
   const missing = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-missing", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "article_export_v1", data: { title: "Hello" }, tags: [], label: undefined });
-  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: missing.jobId }) });
+  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: missing.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /template not found/i);
   assert.equal(JSON.parse(response.body).errorCode, "TEMPLATE_NOT_FOUND");
@@ -906,7 +917,7 @@ test("PDF worker fails with machine-readable codes for missing and unpublished t
 
   await writePdfmeTemplate("draft-only-export", { publish: false });
   const draftOnly = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-draft-only", artifactKind: "pdf", prompt: "export", filename: "article.pdf", templateId: "draft-only-export", data: { title: "Hello" }, tags: [], label: undefined });
-  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: draftOnly.jobId }) });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: draftOnly.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /no published version/i);
   stored = await readArtifactJob("dr-lurie", draftOnly.jobId);
@@ -919,7 +930,7 @@ test("PDF worker fails clearly when template meta names an unsupported renderer"
   const now = new Date().toISOString();
   await store.setJSON("pdfme/bogus-renderer-tmpl/meta.json", { templateId: "bogus-renderer-tmpl", projectId: "dr-lurie", renderer: "html_chromium", latestVersion: 1, latestActiveVersion: 1, status: "active", createdAt: now, updatedAt: now });
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-renderer", artifactKind: "pdf", filename: "article.pdf", templateId: "bogus-renderer-tmpl", data: { title: "Hello" }, tags: [], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /unsupported renderer/i);
   assert.equal(JSON.parse(response.body).errorCode, "RENDERER_NOT_AVAILABLE");
@@ -927,7 +938,7 @@ test("PDF worker fails clearly when template meta names an unsupported renderer"
 
 test("PDF worker fails templateRef-only jobs with TEMPLATE_REF_UNSUPPORTED instead of stub output", async () => {
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-ref-only", artifactKind: "pdf", filename: "article.pdf", templateRef: { blobKey: "templates/article_export_v1.json" }, data: { title: "Hello" }, tags: [], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.equal(JSON.parse(response.body).errorCode, "TEMPLATE_REF_UNSUPPORTED");
   const stored = await readArtifactJob("dr-lurie", job.jobId);
@@ -938,40 +949,39 @@ test("PDF worker fails templateRef-only jobs with TEMPLATE_REF_UNSUPPORTED inste
 
 
 test("PDF edit job validation requires source lock, supported mode, and mode inputs", async () => {
-  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-missing", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] }) });
+  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-edit-missing", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] }) });
   assert.equal(missingSource.statusCode, 400);
   assert.ok(JSON.parse(missingSource.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "sourceArtifact.artifactReference"));
 
-  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-mode", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
+  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-edit-mode", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
   assert.equal(unsupportedMode.statusCode, 400);
   assert.ok(JSON.parse(unsupportedMode.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
 
-  const missingPatch = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-patch", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", currentData: { title: "Original" } }) });
+  const missingPatch = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-edit-patch", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", currentData: { title: "Original" } }) });
   assert.equal(missingPatch.statusCode, 400);
   const issues = JSON.parse(missingPatch.body).issues.map((issue: { path: string[] }) => issue.path.join("."));
   assert.ok(issues.includes("dataPatch"));
   assert.ok(issues.includes("templateId"));
 
-  const missingData = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-pdf-edit-data", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", templateId: "article_export_v1", dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] }) });
+  const missingData = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-pdf-edit-data", operation: "edit", artifactKind: "pdf", filename: "edit.pdf", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "template_data_patch", templateId: "article_export_v1", dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] }) });
   assert.equal(missingData.statusCode, 400);
   assert.ok(JSON.parse(missingData.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "baseDataRef"));
 });
 
 test("PDF edit execution source-locks and creates derived artifacts", async () => {
   await writePdfmeTemplate();
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
   const sourceJob = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-src", artifactKind: "pdf", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
-  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: sourceJob.jobId }) });
+  await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: sourceJob.jobId }) });
   const source = (await readArtifactJob("dr-lurie", sourceJob.jobId))!.artifactReference!;
   assert.ok(source.metadata?.renderDataRef);
 
   const mismatch = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-mismatch", operation: "edit", artifactKind: "pdf", filename: "edited.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: "bad" }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
-  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: mismatch.jobId }) });
+  let response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: mismatch.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /sha256 mismatch/i);
 
   const patch = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-patch-ok", operation: "edit", artifactKind: "pdf", filename: "edited.pdf", templateId: "article_export_v1", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "template_data_patch", baseDataRef: source.metadata!.renderDataRef as { storeName: string; blobKey: string; version: number }, dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] });
-  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: patch.jobId }) });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: patch.jobId }) });
   assert.equal(response.statusCode, 200);
   let edited = JSON.parse(response.body).artifactReference;
   assert.notEqual(edited.blobKey, source.blobKey);
@@ -981,7 +991,7 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
 
   // The re-render carries the patched value: "Updated" is 7 chars → one 28-hex-digit glyph
   // run (4 hex digits per CID glyph); the original 8-char "Original" would be 32.
-  const artifactsStore = await projectBlobStore(adapter.config.artifactStoreName, { siteID: "dr-site", token: "dr-token" });
+  const artifactsStore = await projectBlobStore("artifacts");
   const editedBytes = Buffer.from(await artifactsStore.get(edited.blobKey) as Uint8Array);
   const editedStreams = decompressPdfStreams(editedBytes).join("\n");
   const glyphRuns = [...editedStreams.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)].map((match) => match[1].length);
@@ -990,7 +1000,7 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
   // F2: pdf_overlay / pdf_transform have no real implementation. They used to fabricate a
   // "success" (source bytes + appended comment); they now fail honestly with a typed code.
   const overlay = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-overlay-ok", operation: "edit", artifactKind: "pdf", filename: "overlay.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_overlay", overlayInstructions: [{ page: 1, type: "text", text: "Approved", x: 40, y: 760 }] });
-  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: overlay.jobId }) });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: overlay.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.equal(JSON.parse(response.body).errorCode, "EDIT_MODE_UNSUPPORTED");
   let storedOverlay = await readArtifactJob("dr-lurie", overlay.jobId);
@@ -999,7 +1009,7 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
   assert.equal(storedOverlay?.artifactReference, undefined, "no fabricated artifact may be produced");
 
   const transform = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-pdf-edit-transform-ok", operation: "edit", artifactKind: "pdf", filename: "transform.pdf", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "pdf_transform", transformInstructions: { metadata: { title: "Updated title" } } });
-  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", jobId: transform.jobId }) });
+  response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: transform.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.equal(JSON.parse(response.body).errorCode, "EDIT_MODE_UNSUPPORTED");
   storedOverlay = await readArtifactJob("dr-lurie", transform.jobId);
@@ -1008,35 +1018,33 @@ test("PDF edit execution source-locks and creates derived artifacts", async () =
 });
 
 test("image edit job validation requires source lock, image kind, supported mode, and preservation constraints", async () => {
-  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], editMode: "deterministic_transform" }) });
+  const missingSource = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-edit-missing", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], editMode: "deterministic_transform" }) });
   assert.equal(missingSource.statusCode, 400);
   assert.deepEqual(JSON.parse(missingSource.body).issues[0].path, ["sourceArtifact", "artifactReference"]);
 
-  const pdfEdit = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-pdf", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edit.pdf", templateId: "article_export_v1", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform" }) });
+  const pdfEdit = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-edit-pdf", operation: "edit", artifactKind: "pdf", prompt: "edit", filename: "edit.pdf", templateId: "article_export_v1", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform" }) });
   assert.equal(pdfEdit.statusCode, 400);
   assert.ok(JSON.parse(pdfEdit.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
 
-  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
+  const unsupportedMode = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-edit-mode", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "unsupported" }) });
   assert.equal(unsupportedMode.statusCode, 400);
   assert.ok(JSON.parse(unsupportedMode.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editMode"));
 
-  const missingPreserve = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-preserve", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "image_variation", editInstructions: { change: "make it brighter" } }) });
+  const missingPreserve = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-edit-preserve", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "image_variation", editInstructions: { change: "make it brighter" } }) });
   assert.equal(missingPreserve.statusCode, 400);
   assert.ok(JSON.parse(missingPreserve.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "editInstructions.preserve"));
 });
 
 test("image edit source sha256 mismatch fails before edit execution", async () => {
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-mismatch", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.png", tags: [], sourceArtifact: { artifactReference: source, expectedSha256: "bad-sha" }, editMode: "deterministic_transform", editInstructions: { change: "", preserve: [], negativeInstructions: [] } });
   await assert.rejects(() => executeAgentArtifactWorkflow(job), /sha256 mismatch/);
 });
 
 test("successful deterministic image edit writes a new artifact with lineage metadata and strips metadata", async () => {
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-ok", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "metadata-only deterministic transform", preserve: ["composition"], negativeInstructions: [] } });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.notEqual(body.artifactReference.blobKey, source.blobKey);
@@ -1053,8 +1061,7 @@ test("successful deterministic image edit writes a new artifact with lineage met
 });
 
 test("deterministic compression to WebP", async () => {
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-webp", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-webp", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({
     projectId: "dr-lurie",
     requestId: "req-edit-webp",
@@ -1067,7 +1074,7 @@ test("deterministic compression to WebP", async () => {
     editMode: "deterministic_transform",
     requirements: { image: { outputFormat: "webp", size: "1024x1024", role: "featured" } }
   });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.artifactReference.contentType, "image/webp");
@@ -1075,8 +1082,7 @@ test("deterministic compression to WebP", async () => {
 });
 
 test("maxBytes is enforced in deterministic_transform", async () => {
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-max", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-max", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({
     projectId: "dr-lurie",
     requestId: "req-edit-max",
@@ -1089,12 +1095,12 @@ test("maxBytes is enforced in deterministic_transform", async () => {
     editMode: "deterministic_transform",
     requirements: { maxBytes: 10 }
   });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
 });
 
-test("Dr. Lurie republish 175KB maxBytes is NOT stripped and is enforced", async () => {
+test("explicit 175KB maxBytes is NOT stripped and is enforced", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
   try {
@@ -1102,6 +1108,7 @@ test("Dr. Lurie republish 175KB maxBytes is NOT stripped and is enforced", async
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.com" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-republish",
         artifactKind: "image",
@@ -1120,6 +1127,7 @@ test("Dr. Lurie republish 175KB maxBytes is NOT stripped and is enforced", async
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.com" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-other-val",
         artifactKind: "image",
@@ -1139,11 +1147,10 @@ test("Dr. Lurie republish 175KB maxBytes is NOT stripped and is enforced", async
   }
 });
 
-test("Dr. Lurie edited artifacts use consistent blob keys without /edits/ segment", async () => {
-  const adapter = (await import("../netlify/lib/agent-project-registry.js")).getProjectAdapter("dr-lurie")!;
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
+test("edited artifacts use consistent canonical blob keys without /edits/ segment", async () => {
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-edit-consistent", operation: "edit", artifactKind: "image", prompt: "preserve composition", filename: "edit.png", tags: ["edited"], sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "deterministic_transform", editInstructions: { change: "transform", preserve: ["composition"], negativeInstructions: [] } });
-  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.artifactReference.blobKey.includes("/edits/"), false);
@@ -1151,7 +1158,7 @@ test("Dr. Lurie edited artifacts use consistent blob keys without /edits/ segmen
 });
 
 test("image edit filename outputFormat and contentType consistency is enforced", async () => {
-  const badFilename = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-edit-bad-ext", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.jpg", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform", requirements: { image: { outputFormat: "png" } } }) });
+  const badFilename = await jobHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-edit-bad-ext", operation: "edit", artifactKind: "image", prompt: "edit", filename: "edit.jpg", tags: [], sourceArtifact: { artifactReference: { blobKey: "source", sha256: "abc" }, expectedSha256: "abc" }, editMode: "deterministic_transform", requirements: { image: { outputFormat: "png" } } }) });
   assert.equal(badFilename.statusCode, 400);
   assert.ok(JSON.parse(badFilename.body).issues.some((issue: { path: string[] }) => issue.path.join(".") === "filename"));
 
@@ -1219,6 +1226,7 @@ test("PDF job requirements can be submitted via top-level or nested fields and n
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-pdf-top",
         artifactKind: "pdf",
@@ -1248,6 +1256,7 @@ test("PDF job requirements can be submitted via top-level or nested fields and n
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-pdf-nested",
         artifactKind: "pdf",
@@ -1279,6 +1288,7 @@ test("PDF job requirements can be submitted via top-level or nested fields and n
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token", host: "example.netlify.app" },
       body: JSON.stringify({
+        storage: STORAGE,
         projectId: "dr-lurie",
         requestId: "req-pdf-mixed",
         artifactKind: "pdf",
