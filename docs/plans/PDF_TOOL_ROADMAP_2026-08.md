@@ -261,7 +261,7 @@ This makes a double-fire impossible even if both merge in the same second. S5 le
 Three things were tested here on 2026-08-03 so no session has to rediscover them:
 
 - **`git push` does not work.** Anonymous `git clone` of this public repo succeeds and local commits succeed, but pushing fails with *"Invalid username or token. Password authentication is not supported for Git operations."* The `gh` CLI is not installed.
-- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."* So curl is good for *reading* repo state cheaply; it cannot commit.
+- **The REST API is read-only through the sandbox proxy.** `$GITHUB_TOKEN` authenticates fine (`GET /user` returns `vreich-ui`), but any write returns `"Write access to this GitHub API path is not permitted through this proxy."` So curl is good for *reading* repo state cheaply; it cannot commit.
 - **The GitHub MCP tools are the only write path.** `create_branch`, `push_files` (multi-file commit — the workhorse), `create_or_update_file`, `create_pull_request`, `pull_request_read`, `merge_pull_request`. File contents travel as tool parameters, so batch related files into one `push_files` call rather than one call per file.
 
 **Practical loop:** clone anonymously → edit and run `npm run check:eslint && npm test` locally → `create_branch` → `push_files` with the finished tree → `create_pull_request` → poll checks → `merge_pull_request`. Test locally, publish deliberately.
