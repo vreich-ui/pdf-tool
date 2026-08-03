@@ -1,5 +1,5 @@
 import { savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate } from "./pdf-template-store.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { validateProjectAccess } from "./project-descriptor.js";
 import { REGISTERED_RENDERERS, isRegisteredRenderer, validateTemplateJsonForRenderer } from "./pdf-render/registry.js";
 import { RenderError } from "./pdf-render/errors.js";
 
@@ -31,7 +31,8 @@ export interface PublishPdfTemplateInput {
 export async function createPdfTemplate(input: CreatePdfTemplateInput) {
   if (!input.projectId) return { ok: false as const, statusCode: 400, error: "projectId is required" };
   if (!input.templateJson) return { ok: false as const, statusCode: 400, error: "templateJson is required" };
-  if (!getProjectAdapter(input.projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${input.projectId}` };
+  const accessIssue = validateProjectAccess(input.projectId);
+  if (accessIssue) return { ok: false as const, statusCode: 400, error: accessIssue };
   const renderer = input.renderer ?? "pdfme";
   if (!isRegisteredRenderer(renderer)) {
     return { ok: false as const, statusCode: 400, error: `Unsupported renderer: ${renderer}. Supported renderers: ${REGISTERED_RENDERERS.join(", ")}` };
