@@ -12,6 +12,7 @@ import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
 import { getPdfTemplateValidation, startPdfTemplateValidation, type GetPdfTemplateValidationInput, type ValidatePdfTemplateInput } from "../lib/pdf-template-validation.js";
 import { loadProjectImageModelPolicy, saveProjectImageModelPolicy, validateImageModelPolicyPatch } from "../lib/image-routing/policy.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
+import { artifactWorkerBaseUrl } from "../lib/agent-artifact-worker-trigger.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
@@ -100,6 +101,8 @@ const baseTools = [
         agentName: { type: "string" },
         promptId: { type: "string" },
         model: { type: "string" },
+        requireApproval: { type: "boolean", description: "Hold the job in a resumable blocked state until an operator approves it via resume_agent_artifact_job." },
+        approvalAction: { type: "string", description: "Human-readable description of the action awaiting approval; defaults from kind/operation." },
         requirements: {
           type: "object",
           additionalProperties: false,
@@ -471,14 +474,9 @@ const tools = baseTools.map((tool) => ({
   }
 }));
 
-function requestBaseUrl(event: FunctionEvent): string | undefined {
-  if (process.env.DEPLOY_PRIME_URL) return process.env.DEPLOY_PRIME_URL;
-  if (process.env.URL) return process.env.URL;
-  const origin = getHeader(event.headers, "origin");
-  if (origin) return origin;
-  const host = getHeader(event.headers, "host");
-  return host ? `https://${host}` : undefined;
-}
+// F4: request-derived base URLs (Origin/Host) feed the worker trigger, which carries the
+// bearer token and storage grant — resolution is centralized and allowlist-guarded.
+const requestBaseUrl = (event: FunctionEvent): string | undefined => artifactWorkerBaseUrl(event);
 
 // CORS enables browser-based MCP clients (e.g. MCP Inspector); auth is still enforced.
 const CORS_HEADERS = {
