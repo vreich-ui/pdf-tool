@@ -15,6 +15,8 @@ export interface ImageProviderGenerateInput {
   size?: string;
   outputFormat?: "png" | "jpeg" | "webp";
   maxBytes?: number;
+  /** Explicit per-request provider timeout, budget-derived by the worker (F9). */
+  timeoutMs?: number;
   /** Test/DI seams: OpenAI-style client object, explicit API key, fetch override. */
   client?: unknown;
   apiKey?: string;

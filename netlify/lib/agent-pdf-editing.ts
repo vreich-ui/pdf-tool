@@ -3,8 +3,7 @@ import { getProjectAdapter } from "./agent-project-registry.js";
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { RenderError } from "./pdf-render/errors.js";
-import { countPdfPagesHeuristic } from "./pdf-render/inspect.js";
-import { MAX_PDF_OUTPUT_BYTES, type ArtifactJobRecord, type NormalizedArtifactJobRequirements, type PdfTemplateRef } from "./agent-artifact-jobs.js";
+import type { ArtifactJobRecord, NormalizedArtifactJobRequirements, PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface BlobJsonRef { storeName?: string; blobKey: string; version?: number }
 export type PdfEditMode = "template_data_patch" | "pdf_overlay" | "pdf_transform";
@@ -27,8 +26,11 @@ function projectStoreOptions(projectId: string) {
 export async function readProjectArtifactBytes(projectId: string, reference: ArtifactReference): Promise<Buffer> {
   const { adapter, options } = projectStoreOptions(projectId);
   const store = await projectBlobStore(adapter.config.artifactStoreName, options);
-  const value = await store.get(reference.blobKey);
+  // F3: read binary explicitly. The default get() path decodes blobs as utf-8 text, which
+  // corrupts real stored PDFs so every edit aborted on sha256 mismatch.
+  const value = await store.get(reference.blobKey, { type: "arrayBuffer" });
   if (value == null) throw new Error("Source artifact not found");
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
   if (Buffer.isBuffer(value)) return value;
   if (value instanceof Uint8Array) return Buffer.from(value);
   if (typeof value === "string") return Buffer.from(value);
@@ -81,25 +83,6 @@ function applyPatch(data: unknown, patches: JsonPatchOperation[]): unknown {
   return root;
 }
 
-function appendPdfComment(bytes: Buffer, comment: string): Buffer {
-  const suffix = Buffer.from(`\n% pdf-tool edit: ${comment.replace(/[\r\n%]+/g, " ").slice(0, 500)}\n`);
-  const out = Buffer.alloc(bytes.byteLength + suffix.byteLength);
-  out.set(bytes, 0);
-  out.set(suffix, bytes.byteLength);
-  return out;
-}
-
-function validatePdfOutput(bytes: Buffer, requirements?: NormalizedArtifactJobRequirements): { pageCount: number; sizeBytes: number } {
-  if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("Edited PDF bytes are invalid");
-  const pageCount = countPdfPagesHeuristic(bytes);
-  const pdfReq = requirements?.pdf ?? requirements;
-  if (pdfReq?.pageCount?.min !== undefined && pageCount < pdfReq.pageCount.min) throw new Error("Edited PDF page count is below minimum");
-  if (pdfReq?.pageCount?.max !== undefined && pageCount > pdfReq.pageCount.max) throw new Error("Edited PDF page count exceeds maximum");
-  const maxBytes = requirements?.maxBytes ?? pdfReq?.maxBytes ?? MAX_PDF_OUTPUT_BYTES;
-  if (bytes.byteLength > maxBytes) throw new Error(`Edited PDF exceeds maximum size of ${maxBytes} bytes`);
-  return { pageCount, sizeBytes: bytes.byteLength };
-}
-
 export async function executePdfEditJob(job: ArtifactJobRecord): Promise<PdfEditOutput> {
   if (!job.sourceArtifact?.artifactReference || !job.sourceArtifact.expectedSha256) throw new Error("PDF edit jobs require a source artifact lock");
   const sourceBytes = await readProjectArtifactBytes(job.projectId, job.sourceArtifact.artifactReference);
@@ -125,12 +108,15 @@ export async function executePdfEditJob(job: ArtifactJobRecord): Promise<PdfEdit
     };
   }
 
-  const summary = mode === "pdf_overlay"
-    ? `Applied ${(job.overlayInstructions ?? []).length} PDF overlay instruction${(job.overlayInstructions ?? []).length === 1 ? "" : "s"}`
-    : "Applied deterministic PDF transform";
-  const editedBytes = appendPdfComment(sourceBytes, JSON.stringify(mode === "pdf_overlay" ? job.overlayInstructions : job.transformInstructions));
-  const validation = validatePdfOutput(editedBytes, job.requirements);
-  return { bytes: editedBytes, contentType: "application/pdf", requirements: job.requirements, validation, metadata: { operation: "edit", artifactKind: "pdf", derivedFrom, editMode: mode, editSummary: summary, preservation: job.preservation ?? {}, ...(mode === "pdf_overlay" ? { overlaySummary: summary } : { transformSummary: summary }), pageCount: validation.pageCount } };
+  // F2: pdf_overlay / pdf_transform have no real implementation. They used to append a PDF
+  // comment to the source bytes and report success — an "edit" that verified clean but
+  // changed nothing visible. Fail honestly with a typed code until a real implementation
+  // exists; template_data_patch above is the only PDF edit mode that performs a real edit.
+  throw new RenderError("EDIT_MODE_UNSUPPORTED", `PDF edit mode ${mode} is not implemented; use template_data_patch`, {
+    editMode: mode,
+    supportedModes: ["template_data_patch"],
+    derivedFrom
+  });
 }
 
 export async function writePdfRenderData(projectId: string, jobId: string, data: unknown): Promise<BlobJsonRef> {
