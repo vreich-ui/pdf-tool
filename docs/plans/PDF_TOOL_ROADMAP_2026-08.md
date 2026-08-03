@@ -119,6 +119,19 @@ No other repository calls pdf-tool. `monetizer`, `Promoter`, `KugelBrands`, `amb
 
 **Fernwell is the reason to do this refactor.** It is a fully scaffolded second tenant in `vreich-ui/platform` (`sites/fernwell/`, 64 files, `canonicalHost: https://kugel-fernwell.netlify.app`) whose MCP server already advertises the three bridge tools and already mints grants with `projectId: 'fernwell'`. pdf-tool rejects every one of them today, because `agent-project-registry.ts` registers exactly one adapter (`dr-lurie`) and `agent-artifact-jobs.ts` hard-gates job creation on `supportedProjectIds()`. The error even names the two escape hatches Fernwell cannot use. **S2 must therefore ship with an acceptance test that a job for `projectId: "fernwell"` succeeds end to end with no pdf-tool-side registration** — that test is the point of the session, not an afterthought.
 
+### The front door stays open — direct callers are first-class  *(Wolf, 2026-08-03)*
+
+Decision: **keep pdf-tool's direct entry point, but require a grant from everyone.** There are real use cases for calling pdf-tool directly rather than through Platform's bridge, so the door is not being closed — it is being made to obey the same rule as every other caller.
+
+Concretely, for S2:
+
+- **Do not remove or gate the OAuth 2.1 authorization server or the public `/mcp` endpoint.** `oauth-authorize`, `oauth-token`, `oauth-register`, the `.well-known` metadata routes and the `/mcp` redirects all stay exactly as they are. A direct MCP client (a Claude connector, MCP Inspector, CMS-Agent) must still be able to connect and authenticate.
+- **Freeze the front door's design this session.** Do not redesign it, do not fold in the session-scoped grant work — `set_storage_grant` belongs to S4. The only change here is what a request must carry once it is through the door.
+- **What changes:** a direct caller authenticates as itself and passes a descriptor + grant like anyone else. Removing the `CLIENT_*` / `PDF_TOOL_*` fallbacks means no caller gets to borrow pdf-tool's own server-side credentials any more. A direct caller sending a valid grant and no descriptor is fine — defaults apply.
+- **Make the new failure loud and self-explaining.** CMS-Agent's eight read-only tools will start hitting this path the moment S2 merges. A call arriving without a grant must fail with a typed error that names what is missing and how to supply it — never a silent empty read, and never a generic 500. Getting this message right is most of the difference between a five-minute fix and an afternoon of confusion; it interacts directly with trap 1 below, where the wrong-store failure mode also disguises itself as "not found".
+
+**Tests this requires:** a direct MCP call carrying grant + descriptor succeeds without going through the bridge; the same call with a grant and no descriptor succeeds on defaults; the same call with no grant fails with the typed, self-explaining error; and the OAuth routes still serve their metadata unchanged.
+
 ### Two traps that will silently produce wrong behavior — handle explicitly
 
 1. **The artifact-index store name comes from the adapter, not the grant.** `getAgentArtifactBySlot` / `ByFilename` call `resolveProjectArtifactIndexOptions(projectId)`, which returns `{}` for any unregistered project; `artifactIndexStore` then falls back to `ARTIFACT_INDEX_STORE_NAME = "project-artifact-index"`, while the grant's `stores.artifactIndex` is `"artifact-index"`. Delete the adapters without threading `grant.stores.*` into that resolver and **every slot and filename lookup silently reads an empty store** — including Dr. Lurie's. It surfaces as "artifact not found", not as an auth error, which makes it expensive to diagnose. Thread the grant's store names through every resolver, and add a test that a slot lookup reads the store the grant names.
@@ -130,7 +143,7 @@ Also note `DEFAULT_PROJECT_ID = "dr-lurie"` is exported from `agent-artifact-job
 
 - **Dr. Lurie: nothing, to keep working.** The bridge already passes grant + projectId. There is no urgent post-merge flip and no breakage window. *(This reverses the earlier instruction; the earlier one was based on an assumption about the call path rather than a reading of it.)*
 - **Platform: one optional PR**, not a required one — to start sending `allowedModels` / `allowedKinds` in the descriptor so model policy lives with the caller instead of relying on pdf-tool's defaults. Worth doing, not blocking.
-- **CMS-Agent: one required change.** Its eight read-only pdf-tool tools must start passing a storage grant, or be re-brokered through Platform. Until then they stop resolving. This is the only genuinely breaking consequence of S2, and it belongs at the top of the S2 summary.
+- **CMS-Agent: one required change.** Its eight read-only pdf-tool tools must start passing a storage grant, or be re-brokered through Platform. Until then they stop resolving. This is the only genuinely breaking consequence of S2, and it belongs at the top of the S2 summary. Per the front-door decision above, direct connection remains fully supported — CMS-Agent does not have to move behind the bridge, it just has to bring a grant.
 - **Separately, unrelated to S2:** CMS-Agent still instructs its agents to call `get_pdf_tool_storage_grant`, which no longer exists on Platform. That is already-live dead config and worth cleaning up whenever CMS-Agent is next touched.
 
 **Added from the prior-plan sweep** — all three are grant/descriptor-shaped, which makes S2 the only sane place for them:
