@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
+import { parseStorageGrant, runWithStorageGrant } from "../netlify/lib/storage-grant.js";
 import { resetMemoryBlobStores, setMemoryBlobStoreGet } from "../netlify/lib/blob-store.js";
 import { handler as createHandler } from "../netlify/functions/create-pdf-template.js";
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
@@ -32,6 +33,18 @@ const singleFieldTemplate = {
   ]]
 };
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -41,7 +54,7 @@ async function createTemplate(templateId: string) {
   const res = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: singleFieldTemplate })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: singleFieldTemplate })
   });
   assert.equal(res.statusCode, 201, `createTemplate failed: ${res.body}`);
 }
@@ -50,7 +63,7 @@ async function publishTemplate(templateId: string) {
   const res = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId })
   });
   assert.equal(res.statusCode, 200, `publishTemplate failed: ${res.body}`);
 }
@@ -229,8 +242,8 @@ test("operation router: pdfme meta (even draft) routes to pdfme executor", async
 // ── Infrastructure error during routing propagates — does NOT silently fall through ──
 
 test("operation router: infrastructure error from getPdfTemplateMeta propagates instead of falling through to html-chromium", async () => {
-  // "unknown-project" is not in the adapter registry, so openTemplateStore() throws
-  // "Unsupported projectId: unknown-project" before any blob read happens.
+  // "unknown-project" contradicts the active grant's projectId, so openTemplateStore()
+  // throws the binding error before any blob read happens.
   // resolveOperationRoute must NOT swallow this and return html-chromium.
   const job = {
     projectId: "unknown-project",
@@ -239,12 +252,14 @@ test("operation router: infrastructure error from getPdfTemplateMeta propagates 
     templateId: "some-template",
   } as unknown as ArtifactJobRecord;
 
+  const parsed = parseStorageGrant(STORAGE);
+  assert.ok(parsed.ok);
   await assert.rejects(
-    () => resolveOperationRoute(job),
+    () => runWithStorageGrant(parsed.ok ? parsed.grant : undefined, () => resolveOperationRoute(job)),
     (err: Error) => {
       assert.ok(
-        err.message.includes("Unsupported projectId"),
-        `expected "Unsupported projectId" in error, got: ${err.message}`
+        err.message.includes("projectId mismatch"),
+        `expected the grant-binding error, got: ${err.message}`
       );
       return true;
     }
@@ -309,7 +324,7 @@ test("worker: pdfme job stores executor=pdfme, requiresAI=false, selectedModel=u
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 200, `worker failed: ${workerRes.body}`);
 
@@ -321,9 +336,9 @@ test("worker: pdfme job stores executor=pdfme, requiresAI=false, selectedModel=u
 
   // Verify the stored job record (what status endpoint reads) matches — not just the inline response
   const statusRes = await mcpStatusHandler({
-    httpMethod: "GET",
+    httpMethod: "POST",
     headers: { authorization: "Bearer test-token" },
-    queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(statusRes.statusCode, 200);
   const statusBody = JSON.parse(statusRes.body);
@@ -365,13 +380,13 @@ test("worker: image job retains selectedModel and stores requiresAI=true in job 
     const workerRes = await workerHandler({
       httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
     });
 
     const statusRes = await mcpStatusHandler({
-      httpMethod: "GET",
+      httpMethod: "POST",
       headers: { authorization: "Bearer test-token" },
-      queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
     });
     const statusBody = JSON.parse(statusRes.body);
 
