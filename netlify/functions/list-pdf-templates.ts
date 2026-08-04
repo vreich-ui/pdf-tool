@@ -4,9 +4,12 @@ import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/age
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; queryStringParameters?: Record<string, string | undefined> | null; body?: string | null };
 
-function parseInput(event: FunctionEvent): { projectId?: string } {
-  if (event.httpMethod === "GET") return { projectId: event.queryStringParameters?.projectId };
-  return parseJsonBody<{ projectId?: string }>(event.body) ?? {};
+function parseInput(event: FunctionEvent): { projectId?: string; includeArchived?: boolean } {
+  if (event.httpMethod === "GET") {
+    const params = event.queryStringParameters ?? {};
+    return { projectId: params.projectId, ...(params.includeArchived !== undefined ? { includeArchived: params.includeArchived === "true" } : {}) };
+  }
+  return parseJsonBody<{ projectId?: string; includeArchived?: boolean }>(event.body) ?? {};
 }
 
 export async function handler(event: FunctionEvent) {

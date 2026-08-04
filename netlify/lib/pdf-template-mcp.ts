@@ -1,4 +1,4 @@
-import { savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate } from "./pdf-template-store.js";
+import { savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate, archivePdfTemplate } from "./pdf-template-store.js";
 import { validateProjectAccess } from "./project-descriptor.js";
 import { REGISTERED_RENDERERS, isRegisteredRenderer, validateTemplateJsonForRenderer } from "./pdf-render/registry.js";
 import { RenderError } from "./pdf-render/errors.js";
@@ -22,12 +22,23 @@ export interface ListPdfTemplatesInput {
   projectId: string;
   limit?: number;
   cursor?: string;
+  /** Operator/admin escape hatch: includes disabled (archived) templates, which are
+   * otherwise hidden from the default listing. */
+  includeArchived?: boolean;
 }
 
 export interface PublishPdfTemplateInput {
   projectId: string;
   templateId: string;
   version?: number;
+}
+
+export interface ArchivePdfTemplateInput {
+  projectId: string;
+  templateId: string;
+  version?: number;
+  /** Optional caller-supplied rationale; not persisted to storage, logged for audit only. */
+  reason?: string;
 }
 
 export async function createPdfTemplate(input: CreatePdfTemplateInput) {
@@ -81,7 +92,7 @@ export async function listPdfTemplatesResult(input: ListPdfTemplatesInput) {
     return { ok: false as const, statusCode: 400, error: "projectId is required" };
   }
   try {
-    const page = await listPdfTemplates(input.projectId, { limit: input.limit, cursor: input.cursor });
+    const page = await listPdfTemplates(input.projectId, { limit: input.limit, cursor: input.cursor, includeArchived: input.includeArchived });
     return { ok: true as const, statusCode: 200, templates: page.templates, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list templates";
@@ -109,12 +120,41 @@ export async function publishPdfTemplateRecord(input: PublishPdfTemplateInput) {
       ...(result.validationWarning ? { validationWarning: result.validationWarning } : {}),
     };
   } catch (error) {
-    if (error instanceof RenderError && (error.code === "TEMPLATE_VALIDATION_REQUIRED" || error.code === "TEMPLATE_VALIDATION_FAILED")) {
-      // 409: the publish is blocked by validation state the caller can change (run/fix a
-      // validation render), not by a malformed request.
+    if (error instanceof RenderError && (error.code === "TEMPLATE_VALIDATION_REQUIRED" || error.code === "TEMPLATE_VALIDATION_FAILED" || error.code === "TEMPLATE_ARCHIVED")) {
+      // 409: the publish is blocked by state the caller can (deliberately) change — a
+      // validation render to run/fix, or an archive decision to reverse — not by a
+      // malformed request.
       return { ok: false as const, statusCode: 409, error: error.message, errorCode: error.code, ...(error.detail ? { detail: error.detail } : {}) };
     }
     const message = error instanceof Error ? error.message : "Failed to publish template";
+    return { ok: false as const, statusCode: 500, error: message };
+  }
+}
+
+export async function archivePdfTemplateRecord(input: ArchivePdfTemplateInput) {
+  if (!input.projectId || !input.templateId) {
+    return { ok: false as const, statusCode: 400, error: "projectId and templateId are required" };
+  }
+  try {
+    const result = await archivePdfTemplate(input.projectId, input.templateId, input.version);
+    if (!result) return { ok: false as const, statusCode: 404, error: "Template or version not found" };
+    const { record } = result;
+    if (input.reason) {
+      // Audit trail only — never persisted with the record, never contains storage
+      // credentials (reason is a caller-supplied free-text string, not the grant).
+      console.log(JSON.stringify({ event: "pdf_template_archived", projectId: record.projectId, templateId: record.templateId, version: record.version, reason: input.reason }));
+    }
+    return {
+      ok: true as const,
+      statusCode: 200,
+      projectId: record.projectId,
+      templateId: record.templateId,
+      version: record.version,
+      status: record.status,
+      renderer: record.renderer,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to archive template";
     return { ok: false as const, statusCode: 500, error: message };
   }
 }

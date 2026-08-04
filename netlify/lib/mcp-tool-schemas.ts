@@ -82,13 +82,21 @@ export const MCP_TOOL_SCHEMAS = {
   list_pdf_templates: z.object({
     projectId: z.string().min(1),
     limit: z.number().int().positive().max(200).optional().describe("Max entries to return (default 50, max 200)"),
-    cursor: z.string().optional().describe("Opaque pagination cursor from a previous response's nextCursor")
+    cursor: z.string().optional().describe("Opaque pagination cursor from a previous response's nextCursor"),
+    includeArchived: z.boolean().optional().describe("Include disabled (archived) templates, which are hidden from the default listing")
   }).strict(),
 
   publish_pdf_template: z.object({
     projectId: z.string().min(1),
     templateId: z.string().min(1),
     version: z.number().int().positive().optional().describe("Specific version to publish; omit to publish the latest version")
+  }).strict(),
+
+  delete_pdf_template: z.object({
+    projectId: z.string().min(1),
+    templateId: z.string().min(1),
+    version: z.number().int().positive().optional().describe("Specific version to deactivate; omit to deactivate the latest version"),
+    reason: z.string().optional().describe("Optional caller-supplied rationale, logged for audit; not persisted with the record")
   }).strict(),
 
   validate_pdf_template: z.object({

@@ -239,7 +239,7 @@ function parseListCursor(cursor: string | undefined): number {
  * once per project — for any project that has templates predating this index — and its
  * result is persisted immediately so every later call is back to a single read.
  */
-export async function listPdfTemplates(projectId: string, options: { limit?: number; cursor?: string } = {}): Promise<ListPdfTemplatesPage> {
+export async function listPdfTemplates(projectId: string, options: { limit?: number; cursor?: string; includeArchived?: boolean } = {}): Promise<ListPdfTemplatesPage> {
   let store: ProjectBlobStoreLike;
   try {
     store = await openTemplateStore(projectId);
@@ -258,7 +258,12 @@ export async function listPdfTemplates(projectId: string, options: { limit?: num
     await store.setJSON(indexKey(projectId), { projectId, entries, updatedAt: new Date().toISOString() } satisfies PdfTemplateIndex).catch(() => {});
   }
 
-  const sorted = [...entries].sort((a, b) => a.templateId.localeCompare(b.templateId));
+  // Archived (disabled) templates are hidden from the default listing — they stop being
+  // "in use" without becoming invisible forever: an operator/admin call passes
+  // includeArchived to see them (e.g. for audit/recovery).
+  const visible = options.includeArchived ? entries : entries.filter((entry) => entry.status !== "disabled");
+
+  const sorted = [...visible].sort((a, b) => a.templateId.localeCompare(b.templateId));
   const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIST_PDF_TEMPLATES_PAGE_SIZE, 1), MAX_LIST_PDF_TEMPLATES_PAGE_SIZE);
   const offset = parseListCursor(options.cursor);
   const page = sorted.slice(offset, offset + limit);
@@ -327,6 +332,17 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
   if (!meta) return null;
 
+  // Archived templates cannot be silently resurrected by publishing a version: the caller
+  // must go through an explicit reactivation path (not offered in v1) rather than have
+  // publish_pdf_template quietly undo an archive decision.
+  if (meta.status === "disabled") {
+    throw new RenderError(
+      "TEMPLATE_ARCHIVED",
+      `Template "${templateId}" is disabled (archived) and cannot be published/activated; its stored data is preserved but it will not resume serving renders`,
+      { templateId }
+    );
+  }
+
   const targetVersion = version ?? meta.latestVersion;
   const record = await store.get(versionKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
   if (!record || record.projectId !== projectId) return null;
@@ -384,4 +400,52 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
 
   return { record: updatedRecord, ...(validation ? { validation } : {}), ...(validationWarning ? { validationWarning } : {}) };
+}
+
+export interface ArchivePdfTemplateResult {
+  record: PdfTemplateRecord;
+}
+
+/**
+ * SOFT, REVERSIBLE deactivation — sets status "disabled", never deletes stored bytes. Same
+ * three-write update sequence as publishPdfTemplate (version record + meta.json + project
+ * index), writing "disabled" instead of "active":
+ *   - the target version record's status flips to "disabled"
+ *   - meta.json's status flips to "disabled" (this is what listPdfTemplates and
+ *     publishPdfTemplate check to treat the WHOLE template as archived)
+ *   - the project index entry is refreshed so listPdfTemplates' default (hidden) view
+ *     updates without a second read
+ * latestActiveVersion is left untouched: get_pdf_template's no-version lookup still resolves
+ * to this version so the archived record (with its "disabled" status plainly visible) stays
+ * fetchable for audit/recovery — see getPdfTemplate, which does no status filtering. The
+ * render-dispatch path (pdf-render/render.ts) is what actually stops new renders, by
+ * rejecting a "disabled" record with TEMPLATE_DISABLED.
+ *
+ * Idempotent: archiving an already-disabled template is a no-op success, not an error.
+ */
+export async function archivePdfTemplate(projectId: string, templateId: string, version?: number): Promise<ArchivePdfTemplateResult | null> {
+  const store = await openTemplateStore(projectId);
+
+  const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+  if (!meta) return null;
+
+  const targetVersion = version ?? meta.latestVersion;
+  const record = await store.get(versionKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
+  if (!record || record.projectId !== projectId) return null;
+
+  // Idempotent no-op: both the version record and the template-level meta are already
+  // disabled, so there is nothing new to write.
+  if (record.status === "disabled" && meta.status === "disabled") {
+    return { record };
+  }
+
+  const now = new Date().toISOString();
+  const updatedRecord: PdfTemplateRecord = { ...record, status: "disabled", updatedAt: now };
+  const updatedMeta: PdfTemplateMeta = { ...meta, status: "disabled", updatedAt: now };
+
+  await store.setJSON(versionKey(templateId, targetVersion), updatedRecord);
+  await store.setJSON(metaKey(templateId), updatedMeta);
+  await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
+
+  return { record: updatedRecord };
 }

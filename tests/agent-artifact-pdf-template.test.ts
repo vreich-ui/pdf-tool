@@ -6,7 +6,9 @@ import { handler as createHandler } from "../netlify/functions/create-pdf-templa
 import { handler as getHandler } from "../netlify/functions/get-pdf-template.js";
 import { handler as listHandler } from "../netlify/functions/list-pdf-templates.js";
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
+import { handler as deleteHandler } from "../netlify/functions/delete-pdf-template.js";
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
+import { renderPdfArtifact } from "../netlify/lib/pdf-render/render.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -444,4 +446,177 @@ test("MCP list_pdf_templates returns template list", async () => {
   const entry = result.templates.find((t: { templateId: string }) => t.templateId === "mcp-list-t");
   assert.ok(entry);
   assert.equal(entry.status, "draft");
+});
+
+// --- delete-pdf-template (soft archive / deactivation) ---
+
+test("delete-pdf-template requires POST", async () => {
+  const response = await deleteHandler({ httpMethod: "GET", headers: AUTH });
+  assert.equal(response.statusCode, 405);
+});
+
+test("delete-pdf-template requires auth", async () => {
+  const response = await deleteHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "x" }) });
+  assert.equal(response.statusCode, 401);
+});
+
+test("delete-pdf-template returns 404 for nonexistent template", async () => {
+  const response = await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "nonexistent" }) });
+  assert.equal(response.statusCode, 404);
+});
+
+test("delete-pdf-template flips status to disabled on record, meta, and index", async () => {
+  const templateId = "archive-lifecycle";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  const response = await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.templateId, templateId);
+  assert.equal(body.version, 1);
+  assert.equal(body.status, "disabled");
+
+  // get_pdf_template: NO filtering — the disabled template is still fetchable, with its
+  // status plainly visible (audit/recovery).
+  const getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
+  assert.equal(getResp.statusCode, 200);
+  const getBody = JSON.parse(getResp.body);
+  assert.equal(getBody.status, "disabled");
+  assert.equal(getBody.version, 1);
+
+  // Explicit version fetch also reflects "disabled".
+  const getVResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId, version: "1" }, body: JSON.stringify({ storage: STORAGE }) });
+  assert.equal(JSON.parse(getVResp.body).status, "disabled");
+});
+
+test("delete-pdf-template is idempotent: archiving twice succeeds without error", async () => {
+  const templateId = "archive-idempotent";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  const first = await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  assert.equal(first.statusCode, 200);
+  assert.equal(JSON.parse(first.body).status, "disabled");
+
+  const second = await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  assert.equal(second.statusCode, 200, "archiving an already-disabled template must not error");
+  assert.equal(JSON.parse(second.body).status, "disabled");
+});
+
+test("list-pdf-templates excludes disabled templates by default; includeArchived surfaces them", async () => {
+  const templateId = "archive-list-filter";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  const defaultList = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
+  assert.equal(defaultList.statusCode, 200);
+  const defaultEntry = JSON.parse(defaultList.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
+  assert.equal(defaultEntry, undefined, "disabled template must not appear in the default listing");
+
+  const archivedList = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", includeArchived: "true" }, body: JSON.stringify({ storage: STORAGE }) });
+  assert.equal(archivedList.statusCode, 200);
+  const archivedEntry = JSON.parse(archivedList.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
+  assert.ok(archivedEntry, "includeArchived=true must surface the disabled template");
+  assert.equal(archivedEntry.status, "disabled");
+});
+
+test("publish-pdf-template refuses to publish a disabled (archived) template", async () => {
+  const templateId = "archive-then-publish";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  const response = await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+  assert.equal(response.statusCode, 409);
+  const body = JSON.parse(response.body);
+  assert.equal(body.errorCode, "TEMPLATE_ARCHIVED");
+  assert.ok(body.error);
+});
+
+test("render-dispatch refuses to render from a disabled template with TEMPLATE_DISABLED", async () => {
+  const templateId = "archive-then-render";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  // Sanity: renders fine while active.
+  const okRender = await renderPdfArtifact({ projectId: "dr-lurie", templateId });
+  assert.equal(okRender.contentType, "application/pdf");
+
+  await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  await assert.rejects(
+    () => renderPdfArtifact({ projectId: "dr-lurie", templateId }),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "TEMPLATE_DISABLED");
+      assert.match(err.message, /disabled/i);
+      return true;
+    }
+  );
+});
+
+test("no secret/grant/token leaks through the archive path (HTTP facade or MCP tool)", async () => {
+  const templateId = "archive-no-secret-leak";
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
+
+  const httpResponse = await deleteHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, reason: "superseded by v2 layout" }) });
+  assert.equal(httpResponse.statusCode, 200);
+  assert.ok(!httpResponse.body.includes(STORAGE.token), "delete-pdf-template response must not contain the storage grant token");
+
+  const mcpResponse = await mcpRpc("tools/call", { name: "delete_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId, reason: "superseded by v2 layout" } });
+  assert.equal(mcpResponse.statusCode, 200);
+  assert.ok(!mcpResponse.body.includes(STORAGE.token), "MCP delete_pdf_template response must not contain the storage grant token");
+});
+
+// --- MCP delete_pdf_template ---
+
+test("MCP tools/list includes delete_pdf_template", async () => {
+  const response = await mcpRpc("tools/list");
+  assert.equal(response.statusCode, 200);
+  const tools = JSON.parse(response.body).result.tools;
+  const tool = tools.find((t: { name: string }) => t.name === "delete_pdf_template");
+  assert.ok(tool, "delete_pdf_template must be advertised");
+  assert.match(tool.description, /deactivat/i);
+  assert.match(tool.description, /not deleted|preserved/i);
+});
+
+test("MCP delete_pdf_template deactivates a template; list/get reflect it", async () => {
+  const templateId = "mcp-archive-lifecycle";
+  const createRes = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate } });
+  assert.equal(JSON.parse(createRes.body).result.structuredContent.status, "draft");
+
+  await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId } });
+
+  const deleteRes = await mcpRpc("tools/call", { name: "delete_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId } });
+  assert.equal(deleteRes.statusCode, 200);
+  const deleteResult = JSON.parse(deleteRes.body).result;
+  assert.equal(deleteResult.isError, undefined);
+  assert.equal(deleteResult.structuredContent.status, "disabled");
+
+  // get_pdf_template still resolves it, status visible.
+  const getRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId } });
+  assert.equal(JSON.parse(getRes.body).result.structuredContent.status, "disabled");
+
+  // list_pdf_templates hides it by default, surfaces it with includeArchived.
+  const listRes = await mcpRpc("tools/call", { name: "list_pdf_templates", arguments: { storage: STORAGE, projectId: "dr-lurie" } });
+  const listedIds = JSON.parse(listRes.body).result.structuredContent.templates.map((t: { templateId: string }) => t.templateId);
+  assert.ok(!listedIds.includes(templateId));
+
+  const archivedListRes = await mcpRpc("tools/call", { name: "list_pdf_templates", arguments: { storage: STORAGE, projectId: "dr-lurie", includeArchived: true } });
+  const archivedListedIds = JSON.parse(archivedListRes.body).result.structuredContent.templates.map((t: { templateId: string }) => t.templateId);
+  assert.ok(archivedListedIds.includes(templateId));
+
+  // publish_pdf_template now fails with TEMPLATE_ARCHIVED.
+  const republishRes = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId } });
+  const republishResult = JSON.parse(republishRes.body).result;
+  assert.equal(republishResult.isError, true);
+  assert.equal(republishResult.structuredContent.errorCode, "TEMPLATE_ARCHIVED");
+});
+
+test("MCP delete_pdf_template returns isError for nonexistent templateId", async () => {
+  const response = await mcpRpc("tools/call", { name: "delete_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "does-not-exist" } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(JSON.parse(response.body).result.isError, true);
 });
