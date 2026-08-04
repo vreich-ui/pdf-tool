@@ -230,7 +230,8 @@ test("FRONT DOOR: the MCP transport itself (initialize, tools/list) needs no gra
   for (const tool of tools) {
     assert.ok(tool.inputSchema.properties.storage, `${tool.name} must advertise the storage grant`);
     assert.ok(tool.inputSchema.properties.descriptor, `${tool.name} must advertise the descriptor`);
-    if (tool.name !== "verify_agent_artifact") {
+    // S4: health is also grant-optional (a pre-credential liveness/capability check).
+    if (tool.name !== "verify_agent_artifact" && tool.name !== "health") {
       assert.ok(tool.inputSchema.required?.includes("storage"), `${tool.name} must require the storage grant`);
     }
   }

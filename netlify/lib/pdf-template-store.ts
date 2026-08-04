@@ -59,6 +59,47 @@ function metaKey(templateId: string): string {
   return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/meta.json`;
 }
 
+/**
+ * S4: per-project template index — the N+1 fix for listPdfTemplates. Previously listing
+ * did ONE list() call to find every `.../meta.json` key, then a SEPARATE get() per key (N
+ * reads for N templates). This index collapses that to a single read by maintaining one
+ * small JSON document per project, updated incrementally on every save/publish. Existing
+ * projects (indexed before this shipped) have no index file yet; listPdfTemplates()
+ * transparently falls back to the old N+1 scan exactly once per project and then persists
+ * the index it just built, so the fix applies without a migration step.
+ */
+interface PdfTemplateIndex {
+  projectId: string;
+  entries: PdfTemplateListEntry[];
+  updatedAt: string;
+}
+
+function indexKey(projectId: string): string {
+  return `${TEMPLATE_KEY_NAMESPACE}/_index/${safeSegment(projectId)}.json`;
+}
+
+function listEntryFromMeta(meta: PdfTemplateMeta): PdfTemplateListEntry {
+  return {
+    templateId: meta.templateId,
+    latestVersion: meta.latestVersion,
+    latestActiveVersion: meta.latestActiveVersion ?? null,
+    status: meta.status,
+    renderer: meta.renderer,
+    createdAt: meta.createdAt
+  };
+}
+
+async function upsertTemplateIndexEntry(store: ProjectBlobStoreLike, projectId: string, entry: PdfTemplateListEntry): Promise<void> {
+  const existing = await store.get(indexKey(projectId), { type: "json" }).catch(() => null) as PdfTemplateIndex | null;
+  const entries = (existing?.entries ?? []).filter((candidate) => candidate.templateId !== entry.templateId);
+  entries.push(entry);
+  entries.sort((a, b) => a.templateId.localeCompare(b.templateId));
+  const index: PdfTemplateIndex = { projectId, entries, updatedAt: new Date().toISOString() };
+  await store.setJSON(indexKey(projectId), index);
+}
+
+type ProjectBlobStoreLike = Awaited<ReturnType<typeof openTemplateStore>>;
+
 async function openTemplateStore(projectId: string) {
   const accessIssue = validateProjectAccess(projectId);
   if (accessIssue) throw new Error(accessIssue);
@@ -116,6 +157,7 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
 
   await store.setJSON(versionKey(templateId, version), record);
   await store.setJSON(metaKey(templateId), meta);
+  await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(meta));
 
   return record;
 }
@@ -163,13 +205,7 @@ async function collectMetaKeys(result: unknown): Promise<string[]> {
   return keys;
 }
 
-export async function listPdfTemplates(projectId: string): Promise<PdfTemplateListEntry[]> {
-  let store: Awaited<ReturnType<typeof openTemplateStore>>;
-  try {
-    store = await openTemplateStore(projectId);
-  } catch {
-    return [];
-  }
+async function scanTemplatesLegacy(store: ProjectBlobStoreLike, projectId: string): Promise<PdfTemplateListEntry[]> {
   if (!store.list) return [];
   const result = await store.list({ prefix: `${TEMPLATE_KEY_NAMESPACE}/`, paginate: true });
   const metaKeys = await collectMetaKeys(result);
@@ -177,18 +213,57 @@ export async function listPdfTemplates(projectId: string): Promise<PdfTemplateLi
   const entries: PdfTemplateListEntry[] = [];
   for (const key of metaKeys) {
     const meta = await store.get(key, { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
-    if (meta && meta.projectId === projectId) {
-      entries.push({
-        templateId: meta.templateId,
-        latestVersion: meta.latestVersion,
-        latestActiveVersion: meta.latestActiveVersion ?? null,
-        status: meta.status,
-        renderer: meta.renderer,
-        createdAt: meta.createdAt
-      });
-    }
+    if (meta && meta.projectId === projectId) entries.push(listEntryFromMeta(meta));
   }
   return entries;
+}
+
+export const DEFAULT_LIST_PDF_TEMPLATES_PAGE_SIZE = 50;
+export const MAX_LIST_PDF_TEMPLATES_PAGE_SIZE = 200;
+
+export interface ListPdfTemplatesPage {
+  templates: PdfTemplateListEntry[];
+  nextCursor?: string;
+}
+
+function parseListCursor(cursor: string | undefined): number {
+  if (!cursor) return 0;
+  const parsed = Number(cursor);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * S4: N+1 fix + pagination. Previously this always did 1 list() + N get()s (one per
+ * template) on every call, unpaginated. Now the common case is a single read of the
+ * project's template index (see upsertTemplateIndexEntry); the legacy N+1 scan runs only
+ * once per project — for any project that has templates predating this index — and its
+ * result is persisted immediately so every later call is back to a single read.
+ */
+export async function listPdfTemplates(projectId: string, options: { limit?: number; cursor?: string } = {}): Promise<ListPdfTemplatesPage> {
+  let store: ProjectBlobStoreLike;
+  try {
+    store = await openTemplateStore(projectId);
+  } catch {
+    return { templates: [] };
+  }
+
+  const existingIndex = await store.get(indexKey(projectId), { type: "json" }).catch(() => null) as PdfTemplateIndex | null;
+  let entries: PdfTemplateListEntry[];
+  if (existingIndex && existingIndex.projectId === projectId) {
+    entries = existingIndex.entries;
+  } else {
+    entries = await scanTemplatesLegacy(store, projectId);
+    // Self-healing: persist the index we just built (best-effort) so every subsequent call
+    // for this project is a single read, without requiring a separate migration step.
+    await store.setJSON(indexKey(projectId), { projectId, entries, updatedAt: new Date().toISOString() } satisfies PdfTemplateIndex).catch(() => {});
+  }
+
+  const sorted = [...entries].sort((a, b) => a.templateId.localeCompare(b.templateId));
+  const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIST_PDF_TEMPLATES_PAGE_SIZE, 1), MAX_LIST_PDF_TEMPLATES_PAGE_SIZE);
+  const offset = parseListCursor(options.cursor);
+  const page = sorted.slice(offset, offset + limit);
+  const nextOffset = offset + page.length;
+  return { templates: page, ...(nextOffset < sorted.length ? { nextCursor: String(nextOffset) } : {}) };
 }
 
 export async function getPdfTemplateMeta(projectId: string, templateId: string): Promise<PdfTemplateMeta | null> {
@@ -306,6 +381,7 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
 
   await store.setJSON(versionKey(templateId, targetVersion), updatedRecord);
   await store.setJSON(metaKey(templateId), updatedMeta);
+  await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
 
   return { record: updatedRecord, ...(validation ? { validation } : {}), ...(validationWarning ? { validationWarning } : {}) };
 }

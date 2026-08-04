@@ -10,7 +10,7 @@ import { loadProjectImageSourcingPolicy, saveProjectImageSourcingPolicy, validat
 export const IMAGE_SEARCH_WORKER_FUNCTION = "image-search-worker-background";
 
 export interface GetImageSearchJobStatusInput { projectId: string; jobId: string }
-export interface GetImageSearchBankInput { projectId: string; requestId: string }
+export interface GetImageSearchBankInput { projectId: string; requestId: string; limit?: number; cursor?: string }
 export interface GetImageSearchPolicyInput { projectId: string }
 export interface SetImageSearchPolicyInput { projectId: string; policy: unknown }
 
@@ -54,13 +54,35 @@ export async function getImageSearchJobStatus(input: GetImageSearchJobStatusInpu
   return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, query: job.query, status: job.status, result: job.result, error: job.error };
 }
 
+const MAX_BANK_PAGE_SIZE = 200;
+
+function parseBankCursor(cursor: string | undefined): number {
+  if (!cursor) return 0;
+  const parsed = Number(cursor);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 export async function getImageSearchBank(input: GetImageSearchBankInput) {
   if (!input.projectId || !input.requestId) return { ok: false as const, statusCode: 400, error: "projectId and requestId are required" };
   const bankAccessIssue = validateProjectAccess(input.projectId);
   if (bankAccessIssue) return { ok: false as const, statusCode: 400, error: bankAccessIssue };
   const bank = await readImageSearchBank(input.projectId, input.requestId);
   if (!bank) return { ok: false as const, statusCode: 404, error: "No image search bank found for request" };
-  return { ok: true as const, statusCode: 200, bank };
+  // S4: pagination on bank reads. The bank is already a single read (never N+1) and today's
+  // per-request candidate cap is small (HARD_MAX_CANDIDATES_PER_REQUEST=5), so this slices
+  // the already-fetched array rather than changing storage — cheap now, and it means a
+  // future higher cap doesn't need a second pagination pass added later.
+  if (input.limit === undefined && input.cursor === undefined) return { ok: true as const, statusCode: 200, bank };
+  const offset = parseBankCursor(input.cursor);
+  const limit = Math.min(Math.max(input.limit ?? bank.candidates.length, 1), MAX_BANK_PAGE_SIZE);
+  const candidates = bank.candidates.slice(offset, offset + limit);
+  const nextOffset = offset + candidates.length;
+  return {
+    ok: true as const,
+    statusCode: 200,
+    bank: { ...bank, candidates },
+    ...(nextOffset < bank.candidates.length ? { nextCursor: String(nextOffset) } : {})
+  };
 }
 
 export async function updateImageSearchCandidate(input: UpdateCandidateInput) {

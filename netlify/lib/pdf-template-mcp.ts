@@ -20,6 +20,8 @@ export interface GetPdfTemplateInput {
 
 export interface ListPdfTemplatesInput {
   projectId: string;
+  limit?: number;
+  cursor?: string;
 }
 
 export interface PublishPdfTemplateInput {
@@ -79,8 +81,8 @@ export async function listPdfTemplatesResult(input: ListPdfTemplatesInput) {
     return { ok: false as const, statusCode: 400, error: "projectId is required" };
   }
   try {
-    const templates = await listPdfTemplates(input.projectId);
-    return { ok: true as const, statusCode: 200, templates };
+    const page = await listPdfTemplates(input.projectId, { limit: input.limit, cursor: input.cursor });
+    return { ok: true as const, statusCode: 200, templates: page.templates, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to list templates";
     return { ok: false as const, statusCode: 500, error: message };
