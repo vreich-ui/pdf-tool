@@ -34,9 +34,21 @@ function env() {
 }
 
 async function mcpRpc(name: string, args: Record<string, unknown>) {
-  const response = await mcpServerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) });
+  const response = await mcpServerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: { storage: STORAGE, ...args } } }) });
   return JSON.parse(response.body).result;
 }
+
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
 
 test.beforeEach(() => {
   resetMemoryBlobStores();
@@ -86,7 +98,7 @@ test("a job requesting approval is created blocked and does not trigger the work
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => { workerTriggered = true; return { ok: true, status: 200 } as Response; }) as typeof fetch;
   try {
-    const response = await jobHandler({ httpMethod: "POST", headers: { ...AUTH, host: "example.netlify.app" }, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-block", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: [], requireApproval: true }) });
+    const response = await jobHandler({ httpMethod: "POST", headers: { ...AUTH, host: "example.netlify.app" }, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-block", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: [], requireApproval: true }) });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
     assert.equal(body.status, "blocked");
@@ -114,7 +126,7 @@ test("a job requesting approval is created blocked and does not trigger the work
 });
 
 test("status surfaces the blocked state while a job awaits approval", async () => {
-  const response = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-block-status", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const response = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-block-status", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
   const jobId = JSON.parse(response.body).jobId;
   const status = await getAgentArtifactJobStatus({ projectId: "dr-lurie", jobId });
   assert.ok(status.ok);
@@ -130,12 +142,12 @@ test("resume with a valid token and operator approval unblocks and completes the
   process.env.URL = "https://example.netlify.app";
   globalThis.fetch = (async () => { workerTriggered = true; return { ok: true, status: 200 } as Response; }) as typeof fetch;
   try {
-    const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-resume", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], requireApproval: true }) });
+    const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-resume", artifactKind: "image", prompt: "x", filename: "hero.png", slot: "hero", tags: ["hero"], requireApproval: true }) });
     const created = JSON.parse(create.body);
     assert.equal(workerTriggered, false, "creation must not trigger the worker while blocked");
     const resumeToken = created.blocked.resume.input.resumeToken;
 
-    const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
+    const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
     assert.equal(response.statusCode, 202, response.body);
     const body = JSON.parse(response.body);
     assert.equal(body.status, "pending");
@@ -143,7 +155,7 @@ test("resume with a valid token and operator approval unblocks and completes the
     assert.equal(workerTriggered, true, "resume must trigger the worker");
 
     // The job is now runnable; the worker completes it into a real artifact.
-    const worker = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId }) });
+    const worker = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId }) });
     assert.equal(worker.statusCode, 200);
     const stored = await readArtifactJob("dr-lurie", created.jobId);
     assert.equal(stored?.status, "complete");
@@ -157,21 +169,21 @@ test("resume with a valid token and operator approval unblocks and completes the
 // ── Resume rejections ──
 
 test("resume rejects a bad operator approval, a foreign token, and mismatched ids", async () => {
-  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-resume-bad", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-resume-bad", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
   const created = JSON.parse(create.body);
   const resumeToken = created.blocked.resume.input.resumeToken;
 
   // Wrong operator secret.
-  let response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "wrong-secret" }) });
+  let response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "wrong-secret" }) });
   assert.equal(response.statusCode, 403);
 
   // Missing operator approval entirely.
-  response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken }) });
+  response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken }) });
   assert.equal(response.statusCode, 403);
 
   // A resume token minted for a different job must not resume this one.
   const foreignToken = signResumeToken({ projectId: "dr-lurie", jobId: "some-other-job", requestId: "req-resume-bad" });
-  response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken: foreignToken, approvalToken: "operator-approve-me" }) });
+  response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken: foreignToken, approvalToken: "operator-approve-me" }) });
   assert.equal(response.statusCode, 400);
 
   // The job stays blocked after every failed attempt.
@@ -183,18 +195,18 @@ test("resume requires auth and rejects when operator approval is not configured"
   const unauth = await resumeHandler({ httpMethod: "POST", headers: {}, body: "{}" });
   assert.equal(unauth.statusCode, 401);
 
-  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-noconfig", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-noconfig", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
   const created = JSON.parse(create.body);
   delete process.env.MCP_OAUTH_PASSWORD;
   delete process.env.MCP_CONNECTOR_KEY;
-  const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken: created.blocked.resume.input.resumeToken, approvalToken: "operator-approve-me" }) });
+  const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken: created.blocked.resume.input.resumeToken, approvalToken: "operator-approve-me" }) });
   assert.equal(response.statusCode, 503);
 });
 
 test("the worker refuses to materialize a blocked job invoked directly", async () => {
-  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-worker-guard", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-worker-guard", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
   const jobId = JSON.parse(create.body).jobId;
-  const worker = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId }) });
+  const worker = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId }) });
   assert.equal(worker.statusCode, 409);
   const stored = await readArtifactJob("dr-lurie", jobId);
   assert.equal(stored?.status, "blocked");
@@ -207,9 +219,9 @@ test("SECURITY: MCP_CONNECTOR_KEY is not accepted as operator approval", async (
   delete process.env.ARTIFACT_APPROVAL_SECRET;
   delete process.env.MCP_OAUTH_PASSWORD;
   process.env.MCP_CONNECTOR_KEY = "url-connector-key";
-  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-connkey", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+  const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-connkey", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
   const created = JSON.parse(create.body);
-  const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken: created.blocked.resume.input.resumeToken, approvalToken: "url-connector-key" }) });
+  const response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken: created.blocked.resume.input.resumeToken, approvalToken: "url-connector-key" }) });
   // With no real operator secret configured, resume is refused (not silently approved).
   assert.equal(response.statusCode, 503);
   const stored = await readArtifactJob("dr-lurie", created.jobId);
@@ -222,12 +234,12 @@ test("resume reverts to blocked (recoverable) when the worker trigger fails tran
   let failTrigger = true;
   globalThis.fetch = (async () => { if (failTrigger) return { ok: false, status: 503 } as Response; return { ok: true, status: 200 } as Response; }) as typeof fetch;
   try {
-    const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-revert", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
+    const create = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-revert", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [], requireApproval: true }) });
     const created = JSON.parse(create.body);
     const resumeToken = created.blocked.resume.input.resumeToken;
 
     // First resume: trigger fails → job must remain resumable, not consumed as "failed".
-    let response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
+    let response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
     assert.equal(response.statusCode, 502);
     assert.equal(JSON.parse(response.body).status, "blocked");
     let stored = await readArtifactJob("dr-lurie", created.jobId);
@@ -236,7 +248,7 @@ test("resume reverts to blocked (recoverable) when the worker trigger fails tran
 
     // Retry with the same token now that the trigger works.
     failTrigger = false;
-    response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
+    response = await resumeHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: created.jobId, resumeToken, approvalToken: "operator-approve-me" }) });
     assert.equal(response.statusCode, 202);
     assert.equal(JSON.parse(response.body).status, "pending");
     stored = await readArtifactJob("dr-lurie", created.jobId);
@@ -273,7 +285,7 @@ test("MCP create → blocked → resume_agent_artifact_job round trip", async ()
 
 test("env policy gates jobs that never set requireApproval", async () => {
   process.env.AGENT_ARTIFACT_APPROVAL_REQUIRED = "image";
-  const response = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-policy", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [] }) });
+  const response = await jobHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-policy", artifactKind: "image", prompt: "x", filename: "hero.png", tags: [] }) });
   assert.equal(response.statusCode, 202);
   const body = JSON.parse(response.body);
   assert.equal(body.status, "blocked");
