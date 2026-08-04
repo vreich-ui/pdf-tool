@@ -49,11 +49,26 @@ export interface RenderOutput {
   diagnostics: RenderDiagnostics;
 }
 
-export interface PdfRendererEngine {
+/**
+ * The lightweight half of an engine: everything needed to advertise a renderer, validate a
+ * template against it, and gate publishing — but NOT render one. This is the shape reachable
+ * from mcp.ts's dependency graph (pdf-template-mcp.ts, mcp-tool-schemas.ts,
+ * pdf-template-store.ts's publish gating). Keeping it separate from PdfRendererEngine means an
+ * engine whose render() pulls a heavy dependency (e.g. pdfme's @pdfme/generator, react-pdf's
+ * @react-pdf/renderer) never gets bundled into the MCP function just because mcp.ts needs to
+ * validate or list templates for that renderer.
+ */
+export interface PdfRendererMetadata {
   id: PdfRendererId;
   executedIn: "netlify" | "render-service";
   /** Whether publish requires a passed validation render ("hard") or only warns ("warn"). */
   publishGate: "hard" | "warn";
   validateTemplate(templateJson: unknown): TemplateValidationResult;
+}
+
+/** The full engine, additionally capable of rendering. Only render.ts (and, transitively, the
+ * worker functions that call it) should import a module that constructs one of these for an
+ * engine whose render() is heavy — see pdf-render/render-registry.ts. */
+export interface PdfRendererEngine extends PdfRendererMetadata {
   render(input: RenderInput): Promise<RenderOutput>;
 }

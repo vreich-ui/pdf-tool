@@ -2,7 +2,8 @@ import { getPdfTemplate, getPdfTemplateMeta, type PdfTemplateRecord } from "../p
 import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements } from "../agent-artifact-jobs.js";
 import { RenderError } from "./errors.js";
 import { enforcePdfRequirements, inspectPdf, type RequirementFailure } from "./inspect.js";
-import { getPdfRendererEngine, REGISTERED_RENDERERS } from "./registry.js";
+import { REGISTERED_RENDERERS } from "./registry.js";
+import { getPdfRendererEngine } from "./render-registry.js";
 import { isKnownRendererId, type RenderDiagnostics } from "./types.js";
 
 export interface RenderPdfArtifactOutput {
