@@ -41,9 +41,6 @@ declare module "openai" {
     images: { generate(input: Record<string, unknown>): Promise<unknown> };
   }
 }
-declare module "zod" {
-  export const z: any;
-}
 declare module "react" {
   const React: { createElement: (type: unknown, props: unknown, ...children: unknown[]) => unknown };
   export default React;
