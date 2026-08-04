@@ -51,6 +51,16 @@ export async function renderPdfArtifact(options: {
       }
       throw new RenderError("TEMPLATE_NOT_FOUND", `PDF template not found: "${templateId}"`);
     }
+    // The point of archiving a template (delete_pdf_template) is that it stops being usable
+    // for NEW renders — already-materialized artifacts are untouched, but this dispatch
+    // point must refuse to start a fresh one from a disabled template.
+    if (activeRecord.status === "disabled") {
+      throw new RenderError(
+        "TEMPLATE_DISABLED",
+        `PDF template "${templateId}" (v${activeRecord.version}) is disabled (archived) and cannot be used to render new artifacts; its stored data is preserved and already-rendered artifacts are unaffected`,
+        { templateId, version: activeRecord.version }
+      );
+    }
     record = activeRecord;
   } else {
     const meta = await getPdfTemplateMeta(projectId, templateId);
