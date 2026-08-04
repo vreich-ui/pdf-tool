@@ -14,7 +14,7 @@ import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 import { artifactWorkerBaseUrl } from "../netlify/lib/agent-artifact-worker-trigger.js";
 import { executeAgentArtifactWorkflow } from "../netlify/lib/agent-artifact-workflow.js";
 import { readProjectArtifactBytes } from "../netlify/lib/agent-pdf-editing.js";
-import { getProjectAdapter } from "../netlify/lib/agent-project-registry.js";
+import { saveArtifactBytes as saveCanonicalArtifactBytes } from "../netlify/lib/artifact-layout.js";
 import { openAiClientOptions, DEFAULT_OPENAI_TIMEOUT_MS } from "../netlify/lib/agent-image-generation.js";
 import { sha256Hex } from "../netlify/lib/artifact-core/index.js";
 import { RenderError } from "../netlify/lib/pdf-render/errors.js";
@@ -46,6 +46,18 @@ function env() {
   delete process.env.WORKER_BACKGROUND_TIMEOUT_MS;
   delete process.env.WORKER_BACKGROUND_SAFETY_MARGIN_MS;
 }
+
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
 
 test.beforeEach(() => {
   resetMemoryBlobStores();
@@ -88,17 +100,16 @@ async function oversizedNoisePng(): Promise<Buffer> {
 
 test("F2: template_data_patch PDF edit produces output bytes that differ from the source", async () => {
   await writePdfmeTemplate();
-  const adapter = getProjectAdapter("dr-lurie")!;
   const sourceJob = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-p0-edit-src", artifactKind: "pdf", filename: "source.pdf", templateId: "article_export_v1", data: { title: "Original" }, tags: [], label: undefined });
-  await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: sourceJob.jobId }) });
+  await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: sourceJob.jobId }) });
   const source = (await readArtifactJob("dr-lurie", sourceJob.jobId))!.artifactReference!;
 
   const editJob = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-p0-edit", operation: "edit", artifactKind: "pdf", filename: "edited.pdf", templateId: "article_export_v1", tags: [], label: undefined, sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 }, editMode: "template_data_patch", baseDataRef: source.metadata!.renderDataRef as { storeName: string; blobKey: string; version: number }, dataPatch: [{ op: "replace", path: "/title", value: "Updated" }] });
-  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: editJob.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: editJob.jobId }) });
   assert.equal(response.statusCode, 200);
   const edited = JSON.parse(response.body).artifactReference;
 
-  const store = await projectBlobStore(adapter.config.artifactStoreName, { siteID: "dr-site", token: "dr-token" });
+  const store = await projectBlobStore("artifacts");
   const sourceBytes = Buffer.from(await store.get(source.blobKey, { type: "arrayBuffer" }) as ArrayBuffer);
   const editedBytes = Buffer.from(await store.get(edited.blobKey, { type: "arrayBuffer" }) as ArrayBuffer);
   assert.notEqual(sha256Hex(editedBytes), sha256Hex(sourceBytes), "an edit that changes nothing is a fabricated edit");
@@ -108,13 +119,12 @@ test("F2: template_data_patch PDF edit produces output bytes that differ from th
 // --- F3: binary-safe artifact reads --------------------------------------------------------
 
 test("F3: readProjectArtifactBytes reads via arrayBuffer so real stored PDFs decode", async () => {
-  const adapter = getProjectAdapter("dr-lurie")!;
   // Binary PDF-ish bytes that a utf-8 text decode would corrupt (high bytes + NULs).
   const original = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x81, 0xc3, 0x28, 0x00, 0x9f]), Buffer.from("\n%%EOF")]);
   const expectedSha = sha256Hex(original);
   // Simulate the production Netlify Blobs client: a plain get() returns a utf-8 string
   // (lossy for binary); only { type: "arrayBuffer" } yields the true bytes.
-  setMemoryBlobStoreGet(adapter.config.artifactStoreName, async (_key, options) => {
+  setMemoryBlobStoreGet("artifacts", async (_key, options) => {
     if (options?.type === "arrayBuffer") return original.buffer.slice(original.byteOffset, original.byteOffset + original.byteLength);
     return original.toString("utf8");
   });
@@ -143,9 +153,8 @@ test("F4: request-derived hosts resolve only against the configured allowlist", 
 // --- F5: image byte ceiling enforced by default --------------------------------------------
 
 test("F5: an image job with no requirements.maxBytes rejects output above the 5 MB ceiling", async () => {
-  const adapter = getProjectAdapter("dr-lurie")!;
   const big = await oversizedNoisePng();
-  const source = await adapter.saveArtifactBytes({ projectId: "dr-lurie", requestId: "req-p0-f5-src", artifactKind: "image", filename: "big.png", contentType: "image/png", bytes: big, tags: [] });
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-p0-f5-src", artifactKind: "image", filename: "big.png", contentType: "image/png", bytes: big, tags: [] });
   const job = await createArtifactJob({
     projectId: "dr-lurie",
     requestId: "req-p0-f5",
@@ -159,7 +168,7 @@ test("F5: an image job with no requirements.maxBytes rejects output above the 5 
     // No requirements at all: the cap must apply by default.
   });
   assert.equal(job.requirements?.maxBytes, undefined, "fixture precondition: job carries no explicit maxBytes");
-  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
   const stored = await readArtifactJob("dr-lurie", job.jobId);
@@ -322,7 +331,7 @@ test("deadline: a job past the worker deadline fails cleanly with WORKER_TIMEOUT
   // A 1ms cap with the default 30s safety margin puts the deadline in the past immediately.
   process.env.WORKER_BACKGROUND_TIMEOUT_MS = "1";
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-p0-deadline", artifactKind: "image", prompt: "hero", filename: "hero.png", tags: [], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 500);
   const body = JSON.parse(response.body);
   assert.equal(body.errorCode, "WORKER_TIMEOUT_APPROACHING");
@@ -335,7 +344,7 @@ test("deadline: a job past the worker deadline fails cleanly with WORKER_TIMEOUT
 test("deadline: normal jobs record startedAt and complete within budget", async () => {
   const before = Date.now();
   const job = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-p0-started-at", artifactKind: "image", prompt: "hero", filename: "hero.png", tags: [], label: undefined });
-  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   assert.equal(response.statusCode, 200);
   const stored = await readArtifactJob("dr-lurie", job.jobId);
   assert.equal(stored?.status, "complete");
