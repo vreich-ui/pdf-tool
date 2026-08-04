@@ -1,7 +1,7 @@
 import { createAgentArtifactJob, getAgentArtifactByFilename, getAgentArtifactBySlot, getAgentArtifactJobStatus, resumeAgentArtifactJob, type CreateAgentArtifactJobInput } from "../lib/agent-artifact-mcp.js";
 import { verifyArtifactMaterialization, type VerifyArtifactInput } from "../lib/agent-artifact-verification.js";
 import type { ResumeArtifactJobInput } from "../lib/agent-artifact-approval.js";
-import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput } from "../lib/pdf-template-mcp.js";
+import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, archivePdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput, type ArchivePdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
@@ -182,15 +182,21 @@ const TOOL_METADATA: ToolMetadata[] = [
   },
   {
     name: "list_pdf_templates",
-    description: "List all PDF templates stored for a project, with their renderer, latest version, active version, and status. Paginated: pass `limit` (default 50, max 200) and the `nextCursor` from a previous response to page through a large project.",
+    description: "List all PDF templates stored for a project, with their renderer, latest version, active version, and status. Disabled (archived, via delete_pdf_template) templates are excluded by default — pass includeArchived:true to see them. Paginated: pass `limit` (default 50, max 200) and the `nextCursor` from a previous response to page through a large project.",
     annotations: { readOnlyHint: true, openWorldHint: false },
     outputSchema: outputSchema({ templates: { type: "array" }, nextCursor: { type: "string" } })
   },
   {
     name: "publish_pdf_template",
-    description: "Publish a PDF template version as active (defaults to latest draft). GATING: react-pdf/typst/chromium require a PASSED validate_pdf_template report for the exact version (409 otherwise); pdfme is warn-only.",
+    description: "Publish a PDF template version as active (defaults to latest draft). GATING: react-pdf/typst/chromium require a PASSED validate_pdf_template report for the exact version (409 otherwise); pdfme is warn-only. Fails with TEMPLATE_ARCHIVED if the template was deactivated via delete_pdf_template.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, status: { type: "string" }, validation: { type: "object" }, validationWarning: { type: "string" } })
+  },
+  {
+    name: "delete_pdf_template",
+    description: "Deactivates a template (status -> disabled): it stops appearing in default listings, cannot be published/activated, and cannot be rendered from, but its stored data is preserved, not deleted. This is a soft, reversible deactivation, not a hard delete of stored bytes — already-rendered artifacts from this template are unaffected. Defaults to the latest version when `version` is omitted. Idempotent: deactivating an already-disabled template succeeds without error.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, status: { type: "string" }, renderer: { type: "string" } })
   },
   {
     name: "validate_pdf_template",
@@ -535,6 +541,11 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     }
     case "publish_pdf_template": {
       const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
+      const { statusCode: _statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent(body);
+    }
+    case "delete_pdf_template": {
+      const result = await archivePdfTemplateRecord(args as ArchivePdfTemplateInput);
       const { statusCode: _statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : errorContent(body);
     }
