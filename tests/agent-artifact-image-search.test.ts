@@ -446,7 +446,11 @@ test("batch import: zip archive expands into banked url_import candidates", asyn
 });
 
 test("batch import: folder page collects same-host images only", async () => {
-  const html = `<html><body>\n    <img src="/media/a.png">\n    <a href="https://cdn.example.org/media/b.png">same host</a>\n    <a href="https://elsewhere.example.net/media/c.png">offsite</a>\n  </body></html>`;
+  const html = `<html><body>
+    <img src="/media/a.png">
+    <a href="https://cdn.example.org/media/b.png">same host</a>
+    <a href="https://elsewhere.example.net/media/c.png">offsite</a>
+  </body></html>`;
   process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: {
     "https://cdn.example.org/gallery/": Buffer.from(html).toString("base64"),
     "https://cdn.example.org/media/a.png": pngVariant(4).toString("base64"),
