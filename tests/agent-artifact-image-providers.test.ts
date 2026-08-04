@@ -17,7 +17,9 @@ import {
 import { createAgentArtifactJob, getAgentArtifactJobStatus } from "../netlify/lib/agent-artifact-mcp.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
-import { getProjectAdapter, supportedProjectIds } from "../netlify/lib/agent-project-registry.js";
+import { allowedProjectModels, DEFAULT_ALLOWED_MODELS } from "../netlify/lib/project-descriptor.js";
+import { saveArtifactBytes as saveCanonicalArtifactBytes } from "../netlify/lib/artifact-layout.js";
+import { parseStorageGrant, runWithStorageGrant } from "../netlify/lib/storage-grant.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -40,14 +42,28 @@ const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 const TINY_PNG = Buffer.from(TINY_PNG_B64, "base64");
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
 });
 
-test("supported-project resolution registers Dr. Lurie under the canonical dr-lurie id", () => {
-  assert.ok(supportedProjectIds().has("dr-lurie"));
-  assert.equal(getProjectAdapter("site_drlurie"), undefined);
+test("descriptor-model default allowlist carries the pre-refactor project models", () => {
+  const allowed = allowedProjectModels("any-project");
+  for (const model of DEFAULT_ALLOWED_MODELS) assert.ok(allowed.has(model), model);
+  assert.ok(allowed.has("fal-ai/flux-2/klein/9b"));
+  assert.ok(!allowed.has("some-unlisted-model"));
 });
 
 // --- registry ------------------------------------------------------------------------------
@@ -209,8 +225,13 @@ test("routing: omitted model + article_header routes to klein/9b with a USD cost
   });
 });
 
-test("unknown projects return one actionable primary cause without model or artifactKind cascades", async () => {
-  const result = await createAgentArtifactJob(
+test("a projectId outside the grant's scope returns one actionable primary cause without cascades", async () => {
+  // Stateless model: there is no registry of known projects; the tenant boundary is the
+  // grant↔project binding. A mismatched projectId must yield ONE primary cause, not a
+  // cascade of secondary model/artifactKind errors.
+  const parsed = parseStorageGrant(STORAGE);
+  assert.ok(parsed.ok);
+  const result = await runWithStorageGrant(parsed.ok ? parsed.grant : undefined, () => createAgentArtifactJob(
     {
       projectId: "site_drlurie",
       requestId: "req-primary-cause",
@@ -221,12 +242,12 @@ test("unknown projects return one actionable primary cause without model or arti
       requirements: { image: { outputFormat: "webp", size: "1536x1024" } },
     },
     CREATE_OPTS
-  );
+  ));
 
   assert.equal(result.ok, false);
   const issues = (result as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? [];
   assert.deepEqual(issues.map((issue) => issue.path), [["projectId"]]);
-  assert.match(issues[0]?.message ?? "", /Resolve the site through its Platform artifact bridge/);
+  assert.match(issues[0]?.message ?? "", /projectId mismatch/);
   assert.ok(!JSON.stringify(issues).includes("Unsupported model"));
   assert.ok(!JSON.stringify(issues).includes("Unsupported artifactKind"));
 });
@@ -292,8 +313,7 @@ test("costEstimate surfaces on the status endpoint with source config", async ()
 // --- worker flows ---------------------------------------------------------------------------
 
 async function saveSourceArtifact(requestId: string) {
-  const adapter = getProjectAdapter("dr-lurie")!;
-  return adapter.saveArtifactBytes({
+  return saveCanonicalArtifactBytes({
     projectId: "dr-lurie",
     requestId,
     artifactKind: "image",
@@ -322,7 +342,7 @@ test("loud edit-mode failure: image_variation on gpt-image-1 fails IMAGE_EDIT_MO
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 500);
   const body = JSON.parse(workerRes.body);
@@ -354,7 +374,7 @@ test("qwen-image-edit reference-image happy path via workerHandler: inline data 
     const workerRes = await workerHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
     });
     assert.equal(workerRes.statusCode, 200, `worker failed: ${workerRes.body}`);
     const body = JSON.parse(workerRes.body);
