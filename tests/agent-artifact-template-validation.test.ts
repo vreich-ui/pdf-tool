@@ -23,7 +23,6 @@ import { handler as createHandler } from "../netlify/functions/create-pdf-templa
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 import { handler as validationWorkerHandler } from "../netlify/functions/pdf-template-validation-worker-background.js";
-import { getProjectAdapter } from "../netlify/lib/agent-project-registry.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -41,6 +40,18 @@ function env() {
 }
 
 const AUTH = { authorization: "Bearer test-token" };
+
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
 
 test.beforeEach(() => {
   resetMemoryBlobStores();
@@ -110,7 +121,7 @@ interface McpToolResult {
 }
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult> {
-  const res = await mcpRpc("tools/call", { name, arguments: args });
+  const res = await mcpRpc("tools/call", { name, arguments: { storage: STORAGE, ...args } });
   assert.equal(res.statusCode, 200, `${name} transport failed: ${res.body}`);
   return JSON.parse(res.body).result as McpToolResult;
 }
@@ -163,7 +174,7 @@ async function createTemplate(templateId: string, templateJson: unknown, rendere
   const res = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson, renderer }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson, renderer }),
   });
   assert.equal(res.statusCode, 201, `create failed for ${templateId}: ${res.body}`);
   return JSON.parse(res.body) as { version: number };
@@ -244,7 +255,7 @@ test("gating (a): react-pdf publish with no validation report is rejected (409, 
   const httpResult = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "gate-required" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "gate-required" }),
   });
   assert.equal(httpResult.statusCode, 409);
   assert.equal(JSON.parse(httpResult.body).errorCode, "TEMPLATE_VALIDATION_REQUIRED");
@@ -472,9 +483,7 @@ test("validation renders never write artifacts", async () => {
   const workerRes = await runValidationWorker(trigger!);
   assert.equal(JSON.parse(workerRes.body).status, "passed");
 
-  const adapter = getProjectAdapter("dr-lurie");
-  assert.ok(adapter);
-  const artifactStore = await projectBlobStore(adapter!.config.artifactStoreName, {});
+  const artifactStore = await projectBlobStore("artifacts");
   const listed = (await artifactStore.list?.()) as { blobs?: unknown[] } | undefined;
   assert.ok(!listed?.blobs || listed.blobs.length === 0, "validation must never write to the artifact store");
 });

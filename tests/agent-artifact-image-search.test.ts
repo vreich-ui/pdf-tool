@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { projectBlobStore, resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
-import { drLurieAdapter } from "../netlify/lib/project-adapters/dr-lurie.js";
+import { saveArtifactBytes as saveCanonicalArtifactBytes } from "../netlify/lib/artifact-layout.js";
 import { sha256Hex } from "../netlify/lib/artifact-core/index.js";
 import { validateArtifactJobRequest } from "../netlify/lib/agent-artifact-jobs.js";
 import { DEFAULT_IMAGE_SOURCING_POLICY, HARD_MAX_CANDIDATES_PER_REQUEST, mergeImageSourcingPolicy, validateImageSourcingPolicyPatch } from "../netlify/lib/image-search/policy.js";
@@ -37,6 +37,18 @@ function env() {
 
 const AUTH = { authorization: "Bearer test-token" };
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -59,19 +71,19 @@ function openverseFixture(count: number, overrides: Partial<ImageSearchResult> =
 
 async function runSearchJob(input: { requestId: string; query: string; count?: number; policyOverrides?: unknown }) {
   const job = await createImageSearchJobRecord({ projectId: "dr-lurie", ...input });
-  const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   return { job, response, body: JSON.parse(response.body) };
 }
 
 async function runImportJob(input: { requestId: string; urls: string[]; policyOverrides?: unknown; tags?: string[]; label?: string }) {
   const job = await createImageSearchJobRecord({ projectId: "dr-lurie", kind: "url_import", ...input });
-  const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }) });
+  const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   return { job, response, body: JSON.parse(response.body) };
 }
 
 async function seedLibraryImage(requestId: string, tags: string[]): Promise<string> {
   const sha256 = sha256Hex(pngBytes);
-  await drLurieAdapter.saveArtifactBytes({
+  await saveCanonicalArtifactBytes({
     projectId: "dr-lurie",
     requestId,
     artifactKind: "image",
@@ -158,7 +170,7 @@ test("image search worker: banks scored candidates, saves artifacts, and never r
   assert.equal(sidecar?.metadata?.search?.provider, "openverse");
   assert.ok(sidecar?.metadata?.search?.sourceUrl?.startsWith("https://images.example.org/"));
 
-  const statusResponse = await imageSearchStatusHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", jobId: body.jobId } });
+  const statusResponse = await imageSearchStatusHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", jobId: body.jobId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(statusResponse.statusCode, 200);
   assert.equal(JSON.parse(statusResponse.body).status, "complete");
 });
@@ -258,19 +270,19 @@ test("policy endpoint: set and get round-trip, invalid policies rejected", async
   const set = await policyHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", policy: { candidateTarget: 2, budget: { maxPaidImports: 1 } } })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", policy: { candidateTarget: 2, budget: { maxPaidImports: 1 } } })
   });
   assert.equal(set.statusCode, 200, set.body);
   assert.equal(JSON.parse(set.body).policy.candidateTarget, 2);
 
-  const get = await policyHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: null });
+  const get = await policyHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(get.statusCode, 200);
   const policy = JSON.parse(get.body).policy;
   assert.equal(policy.candidateTarget, 2);
   assert.equal(policy.budget.maxPaidImports, 1);
   assert.equal(policy.maxCandidatesPerRequest, HARD_MAX_CANDIDATES_PER_REQUEST);
 
-  const bad = await policyHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", policy: { minScore: 42 } }) });
+  const bad = await policyHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", policy: { minScore: 42 } }) });
   assert.equal(bad.statusCode, 400);
 });
 
@@ -280,7 +292,7 @@ test("MCP tools/call dispatches image search tools", async () => {
   const policyCall = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_image_search_policy", arguments: { projectId: "dr-lurie" } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_image_search_policy", arguments: { storage: STORAGE, projectId: "dr-lurie" } } })
   });
   assert.equal(policyCall.statusCode, 200);
   const policyResult = JSON.parse(policyCall.body).result;
@@ -289,7 +301,7 @@ test("MCP tools/call dispatches image search tools", async () => {
   const bankMiss = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_image_search_bank", arguments: { projectId: "dr-lurie", requestId: "nope" } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_image_search_bank", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "nope" } } })
   });
   const bankResult = JSON.parse(bankMiss.body).result;
   assert.equal(bankResult.isError, true);
@@ -298,7 +310,7 @@ test("MCP tools/call dispatches image search tools", async () => {
   const searchCall = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_images", arguments: { projectId: "dr-lurie", requestId: "req-mcp", query: "sun" } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_images", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp", query: "sun" } } })
   });
   const searchResult = JSON.parse(searchCall.body).result;
   assert.equal(searchResult.isError, true);
@@ -314,6 +326,7 @@ test("import from URL: saves the image to the project blob store and returns its
     httpMethod: "POST",
     headers: AUTH,
     body: JSON.stringify({
+      storage: STORAGE,
       projectId: "dr-lurie",
       requestId: "req-url-import",
       url: "https://cdn.example.org/media/hero-shot.png",
@@ -360,7 +373,7 @@ test("import from URL: converts non-native formats and rejects invalid input", a
   const converted = await importFromUrlHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-gif", url: "https://cdn.example.org/spacer.gif" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-url-gif", url: "https://cdn.example.org/spacer.gif" })
   });
   assert.equal(converted.statusCode, 200, converted.body);
   const convertedBody = JSON.parse(converted.body);
@@ -370,7 +383,7 @@ test("import from URL: converts non-native formats and rejects invalid input", a
   const notImage = await importFromUrlHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-bad", url: "https://cdn.example.org/not-an-image.bin" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-url-bad", url: "https://cdn.example.org/not-an-image.bin" })
   });
   assert.equal(notImage.statusCode, 400);
   assert.ok(JSON.parse(notImage.body).error.includes("decodable"));
@@ -378,7 +391,7 @@ test("import from URL: converts non-native formats and rejects invalid input", a
   const insecure = await importFromUrlHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", requestId: "req-url-http", url: "http://cdn.example.org/a.png" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-url-http", url: "http://cdn.example.org/a.png" })
   });
   assert.equal(insecure.statusCode, 400);
 });
@@ -388,7 +401,7 @@ test("MCP tools/call dispatches import_image_from_url", async () => {
   const call = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "import_image_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-import", url: "https://cdn.example.org/mcp.png" } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "import_image_from_url", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp-import", url: "https://cdn.example.org/mcp.png" } } })
   });
   assert.equal(call.statusCode, 200);
   const result = JSON.parse(call.body).result;
@@ -483,7 +496,7 @@ test("MCP tools/call dispatches import_images_from_url", async () => {
   const call = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "import_images_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["https://cdn.example.org/x.png"] } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "import_images_from_url", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["https://cdn.example.org/x.png"] } } })
   });
   const result = JSON.parse(call.body).result;
   assert.equal(result.isError, true);
@@ -492,7 +505,7 @@ test("MCP tools/call dispatches import_images_from_url", async () => {
   const invalid = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "import_images_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["http://insecure.example.org/x.png"] } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "import_images_from_url", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp-batch", urls: ["http://insecure.example.org/x.png"] } } })
   });
   const invalidResult = JSON.parse(invalid.body).result;
   assert.equal(invalidResult.isError, true);

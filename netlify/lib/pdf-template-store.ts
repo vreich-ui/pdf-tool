@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
-import { getProjectAdapter } from "./agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "./project-descriptor.js";
 import { RenderError } from "./pdf-render/errors.js";
 import { getPdfRendererEngine } from "./pdf-render/registry.js";
 import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
@@ -60,15 +60,10 @@ function metaKey(templateId: string): string {
 }
 
 async function openTemplateStore(projectId: string) {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  const storeName = adapter.config.templateStoreName;
-  if (!storeName) throw new Error(`Project ${projectId} has no templateStoreName configured`);
-  return projectBlobStore(storeName, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-    consistency: "strong"
-  });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
+  // The grant names the templates store; credentials flow from the active grant context.
+  return projectBlobStore(projectStoreNames().templates, { consistency: "strong" });
 }
 
 export interface SavePdfTemplateInput {

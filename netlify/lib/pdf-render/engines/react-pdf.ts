@@ -6,8 +6,7 @@
  * registered from bundled or project files via fonts.ts.
  */
 import { projectBlobStore } from "../../artifact-core/blob-store.js";
-import { currentStorageGrant } from "../../storage-grant.js";
-import { getProjectAdapter } from "../../agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "../../project-descriptor.js";
 import { RenderError } from "../errors.js";
 import { inspectPdf, marginToPt } from "../inspect.js";
 import { resolveFonts, type FontRequest } from "../fonts.js";
@@ -54,17 +53,15 @@ async function toRenderableImage(bytes: Buffer, ref: string): Promise<ResolvedIm
 }
 
 async function readArtifactImage(projectId: string, storeName: string | undefined, blobKey: string): Promise<Buffer | null> {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new RenderError("ASSET_NOT_FOUND", `Unsupported projectId: ${projectId}`);
-  const resolvedStore = storeName ?? adapter.config.artifactStoreName;
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new RenderError("ASSET_NOT_FOUND", accessIssue);
+  const stores = projectStoreNames();
+  const resolvedStore = storeName ?? stores.artifacts;
   // Blobs tokens are site-wide, so the store NAME is the access boundary: an agent-supplied
-  // storeName must stay inside the stores this render is entitled to (the project's own
-  // artifact/template stores plus whatever an active storage grant explicitly names).
-  const grant = currentStorageGrant();
+  // storeName must stay inside the stores this render is entitled to (the stores the active
+  // storage grant / descriptor name for this project).
   const allowedStores = new Set<string>(
-    [adapter.config.artifactStoreName, adapter.config.templateStoreName, ...(grant ? Object.values(grant.stores) : [])].filter(
-      (name): name is string => typeof name === "string" && name.length > 0
-    )
+    Object.values(stores).filter((name): name is string => typeof name === "string" && name.length > 0)
   );
   if (!allowedStores.has(resolvedStore)) {
     throw new RenderError("ASSET_NOT_FOUND", `Image storeName "${resolvedStore}" is not accessible to this render`, {
@@ -72,10 +69,7 @@ async function readArtifactImage(projectId: string, storeName: string | undefine
       allowedStores: [...allowedStores],
     });
   }
-  const store = await projectBlobStore(resolvedStore, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-  });
+  const store = await projectBlobStore(resolvedStore);
   const value = await store.get(blobKey, { type: "arrayBuffer" }).catch(() => null);
   if (value == null) return null;
   if (value instanceof ArrayBuffer) return Buffer.from(value);

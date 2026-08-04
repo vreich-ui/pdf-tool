@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "../blob-store.js";
-import { getProjectAdapter } from "../agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
+import { saveArtifactBytes } from "../artifact-layout.js";
 import { sha256Hex } from "../artifact-core/index.js";
 import { optimizeImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
 import { imageSearchProviders } from "./providers.js";
 import { fetchImportBytes, sniffImageFormat } from "./import.js";
-import { loadProjectImageSourcingPolicy, mergeImageSourcingPolicy, IMAGE_SEARCH_STORE_NAME } from "./policy.js";
+import { loadProjectImageSourcingPolicy, mergeImageSourcingPolicy } from "./policy.js";
 import { scoreSearchResult } from "./scoring.js";
 import { newImageSearchRunSummary, type ImageSearchJobRecord, type ImageSearchJobResultSummary } from "./jobs.js";
 import type { ImageSearchBankRecord, ImageSearchCandidate, ImageSearchProvider, ImageSearchResult, ImageSearchScoreBreakdown, ImageSourcingPolicy } from "./types.js";
@@ -18,13 +19,10 @@ export function imageSearchBankKey(requestId: string): string {
 }
 
 async function bankStore(projectId: string) {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${projectId}`);
-  return projectBlobStore(IMAGE_SEARCH_STORE_NAME, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-    consistency: "strong"
-  });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new Error(accessIssue);
+  // The grant names the image-search store; credentials flow from the active grant context.
+  return projectBlobStore(projectStoreNames().imageSearch, { consistency: "strong" });
 }
 
 export async function readImageSearchBank(projectId: string, requestId: string): Promise<ImageSearchBankRecord | null> {
@@ -71,8 +69,8 @@ export interface RunImageSearchOptions {
  * The scored pool is then banked up to the per-request cap; the agent picks the winner later.
  */
 export async function runImageSearch(job: ImageSearchJobRecord, options: RunImageSearchOptions = {}): Promise<ImageSearchJobResultSummary> {
-  const adapter = getProjectAdapter(job.projectId);
-  if (!adapter) throw new Error(`Unsupported projectId: ${job.projectId}`);
+  const accessIssue = validateProjectAccess(job.projectId);
+  if (accessIssue) throw new Error(accessIssue);
   const query = job.query;
   if (!query) throw new Error("Image search jobs require query");
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -207,7 +205,7 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
         const bytes = await optimizeImageBytes(rawBytes, { outputFormat, maxBytes: policy.quotas.maxImportBytes, inputFormat: inputFormat ?? "unknown" });
         const contentType = contentTypeForImageOutputFormat(outputFormat);
         const filename = `search-${run.searchId.slice(0, 8)}-${newCandidates.length + 1}.${outputFormat === "jpeg" ? "jpg" : outputFormat}`;
-        const artifact = await adapter.saveArtifactBytes({
+        const artifact = await saveArtifactBytes({
           projectId: job.projectId,
           requestId: job.requestId,
           artifactKind: "image",
@@ -302,12 +300,9 @@ export async function updateImageSearchCandidateState(input: UpdateCandidateInpu
 
   let artifactDeleted = false;
   if (input.state === "discarded" && input.deleteArtifact && candidate.origin === "imported" && candidate.artifactReference?.blobKey) {
-    const adapter = getProjectAdapter(input.projectId);
-    if (!adapter) throw new Error(`Unsupported projectId: ${input.projectId}`);
-    const store = await projectBlobStore(adapter.config.artifactStoreName, {
-      siteID: process.env[adapter.config.siteIdEnv],
-      token: process.env[adapter.config.blobsTokenEnv]
-    });
+    const accessIssue = validateProjectAccess(input.projectId);
+    if (accessIssue) throw new Error(accessIssue);
+    const store = await projectBlobStore(projectStoreNames().artifacts);
     if (store.delete) {
       await store.delete(candidate.artifactReference.blobKey);
       await store.delete(`${candidate.artifactReference.blobKey}.json`);

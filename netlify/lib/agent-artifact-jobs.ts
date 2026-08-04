@@ -1,15 +1,26 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { jobRecordBlobStore } from "./blob-store.js";
+import { projectBlobStore } from "./blob-store.js";
+import { currentStorageGrant } from "./storage-grant.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
-import { getProjectAdapter, resolveProjectModel, supportedProjectIds, unsupportedProjectIdError, validateProjectArtifactKind, validateProjectModel } from "./agent-project-registry.js";
+import {
+  PROJECT_DESCRIPTOR_VERSION,
+  projectGrantLimits,
+  projectStoreNames,
+  resolveProjectModel,
+  validateProjectAccess,
+  validateProjectArtifactKind,
+  validateProjectModel,
+  validateProjectRequestId
+} from "./project-descriptor.js";
 
+/** Fallback job-store name with NO grant in scope (tests, pdf-tool's own probes). With a
+ * grant — required on every entrypoint — records live in the grant's `jobs` store. */
 export const AGENT_ARTIFACT_JOB_STORE = "agent-artifact-jobs";
 export const MAX_IMAGE_OUTPUT_BYTES = 5_000_000;
 /** Legacy name: applies to image and binary artifacts. PDFs use MAX_PDF_OUTPUT_BYTES. */
 export const MAX_ARTIFACT_OUTPUT_BYTES = MAX_IMAGE_OUTPUT_BYTES;
 /** PDFs have no product size limit; this is a memory-safety backstop for the worker only. */
 export const MAX_PDF_OUTPUT_BYTES = 104_857_600;
-export const DEFAULT_PROJECT_ID = "dr-lurie";
 
 export function maxOutputBytesForKind(kind: ArtifactKind): number {
   return kind === "pdf" ? MAX_PDF_OUTPUT_BYTES : MAX_IMAGE_OUTPUT_BYTES;
@@ -228,13 +239,15 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         }).optional()
       }).optional()
     }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
-      if (!supportedProjectIds().has(value.projectId)) {
-        ctx.addIssue({ code: "custom", path: ["projectId"], message: unsupportedProjectIdError(value.projectId) });
-        // Project configuration owns artifact-kind and model policy. Once
-        // resolution failed, secondary errors from an absent adapter only
-        // obscure the one provisioning/mapping action the caller needs.
+      // Stateless model: any projectId is valid — the tenant boundary is the grant/descriptor
+      // binding, not a server-side registry.
+      const accessIssue = validateProjectAccess(value.projectId);
+      if (accessIssue) {
+        ctx.addIssue({ code: "custom", path: ["projectId"], message: accessIssue });
         return;
       }
+      const requestIdIssue = validateProjectRequestId(value.requestId);
+      if (requestIdIssue) ctx.addIssue({ code: "custom", path: ["requestId"], message: requestIdIssue });
       if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
         ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
       }
@@ -261,7 +274,7 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
         if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
       }
       if (value.artifactKind === "image") {
-        const outputFormat = value.requirements?.image?.outputFormat ?? "png";
+        const outputFormat = value.requirements?.image?.outputFormat ?? projectGrantLimits().preferredImageFormat ?? "png";
         const lowerFilename = value.filename.toLowerCase();
         const ok = outputFormat === "png" ? lowerFilename.endsWith(".png") : outputFormat === "webp" ? lowerFilename.endsWith(".webp") : (lowerFilename.endsWith(".jpg") || lowerFilename.endsWith(".jpeg"));
         if (!ok) ctx.addIssue({ code: "custom", path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
@@ -294,8 +307,16 @@ async function zodSafeParse(input: unknown): Promise<{ success: true; data: Arti
 
 function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind, projectId?: string): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
+  // Grant-limits defaulting: a job that omits requirements (or individual image fields)
+  // inherits the grant's preferredImageFormat / maxImageBytes instead of running unbudgeted
+  // against the service-wide defaults. Explicit job requirements always win.
+  const grantLimits = artifactKind === "image" ? projectGrantLimits() : {};
+  const grantMaxBytes = grantLimits.maxImageBytes !== undefined ? Math.min(grantLimits.maxImageBytes, maxOutputBytesForKind(artifactKind)) : undefined;
+  const grantOutputFormat = grantLimits.preferredImageFormat;
   if (input === undefined) {
-    return artifactKind === "image" ? { requirements: { image: { size: "1024x1024", outputFormat: "png", role: "featured" } }, issues } : { issues };
+    return artifactKind === "image"
+      ? { requirements: { ...(grantMaxBytes === undefined ? {} : { maxBytes: grantMaxBytes }), image: { size: "1024x1024", outputFormat: grantOutputFormat ?? "png", role: "featured" } }, issues }
+      : { issues };
   }
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     return { issues: [{ path: ["requirements"], message: "requirements must be an object" }] };
@@ -381,12 +402,13 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   if (imageValue.outputFormat !== undefined && imageValue.outputFormat !== "png" && imageValue.outputFormat !== "webp" && imageValue.outputFormat !== "jpeg") issues.push({ path: ["requirements", "image", "outputFormat"], message: "image outputFormat must be png, webp, or jpeg" });
   const usageContext = imageValue.usageContext;
 
+  const effectiveMaxBytes = normalizedMaxBytes ?? (maxBytes === undefined ? grantMaxBytes : undefined);
   return {
     requirements: {
-      ...(normalizedMaxBytes === undefined ? {} : { maxBytes: normalizedMaxBytes }),
+      ...(effectiveMaxBytes === undefined ? {} : { maxBytes: effectiveMaxBytes }),
       image: {
         size: (imageValue.size as string) || "1024x1024",
-        outputFormat: (imageValue.outputFormat as ImageRequirementOutputFormat) || "png",
+        outputFormat: (imageValue.outputFormat as ImageRequirementOutputFormat) || grantOutputFormat || "png",
         role: (imageValue.role as string) || "featured",
         ...(typeof usageContext === "string" ? { usageContext } : {})
       }
@@ -434,10 +456,12 @@ export const artifactJobRequestSchema = {
     const requireApproval = typeof value.requireApproval === "boolean" ? value.requireApproval : undefined;
     const approvalAction = typeof value.approvalAction === "string" && value.approvalAction.trim() ? value.approvalAction.trim() : undefined;
 
-    if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
-    const projectSupported = Boolean(projectId && supportedProjectIds().has(projectId));
-    if (projectId && !projectSupported) issues.push({ path: ["projectId"], message: unsupportedProjectIdError(projectId) });
+    const accessIssue = validateProjectAccess(projectId);
+    const projectSupported = !accessIssue;
+    if (accessIssue) issues.push({ path: ["projectId"], message: accessIssue });
     if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
+    const requestIdIssue = requestId ? validateProjectRequestId(requestId) : undefined;
+    if (requestIdIssue) issues.push({ path: ["requestId"], message: requestIdIssue });
     if (artifactKind === "image" && !prompt) issues.push({ path: ["prompt"], message: "prompt is required for image jobs" });
     if (operation === "edit") {
       if (artifactKind !== "image" && artifactKind !== "pdf") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
@@ -536,9 +560,16 @@ export function safeError(error: unknown): string {
   return "Artifact generation failed";
 }
 
+/** The job-record store: the grant's `jobs` store when a grant is active (always, in
+ * production — every entrypoint requires one); the pdf-tool fallback store otherwise
+ * (tests and local tooling only). */
+export async function jobRecordStore() {
+  const storeName = currentStorageGrant() ? projectStoreNames().jobs : AGENT_ARTIFACT_JOB_STORE;
+  return projectBlobStore(storeName, { consistency: "strong" });
+}
+
 export async function createArtifactJob(input: ArtifactJobRequest, overrides: { status?: ArtifactJobStatus; blocked?: BlockedArtifactState; jobId?: string } = {}): Promise<ArtifactJobRecord> {
-  const adapter = getProjectAdapter(input.projectId);
-  const adapterVersion = adapter?.config.adapterVersion ?? "v1";
+  const adapterVersion = PROJECT_DESCRIPTOR_VERSION;
   const selectedModel = resolveProjectModel(input.projectId, input.model);
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
@@ -557,12 +588,12 @@ export async function createArtifactJob(input: ArtifactJobRequest, overrides: { 
 }
 
 export async function readArtifactJob(projectId: string, jobId: string): Promise<ArtifactJobRecord | null> {
-  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordStore();
   return await store.get(jobBlobKey(projectId, jobId), { type: "json" }).catch(() => null) as ArtifactJobRecord | null;
 }
 
 export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
-  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordStore();
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 

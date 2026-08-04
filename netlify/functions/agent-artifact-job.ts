@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { validateArtifactJobRequest, createArtifactJob, getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError, updateArtifactJob } from "../lib/agent-artifact-jobs.js";
 import { artifactWorkerBaseUrl, triggerWorker } from "../lib/agent-artifact-worker-trigger.js";
-import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
+import { extractRequestContextFromBody, runWithRequestContext } from "../lib/project-descriptor.js";
 import { buildBlockedState, evaluateApprovalRequirement } from "../lib/agent-artifact-approval.js";
 
 type FunctionEvent = {
@@ -23,14 +23,16 @@ export async function handler(event: FunctionEvent) {
   if (!parsedBody) {
     return jsonResponse(400, { error: "Invalid JSON body" });
   }
-  const parsed = await validateArtifactJobRequest(parsedBody);
-  if (!parsed.success) {
-    return jsonResponse(400, { error: "Invalid artifact job input", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
-  }
-  const grant = extractStorageGrantFromBody(event.body);
-  if (grant.error) return jsonResponse(400, { error: grant.error });
+  const ctx = extractRequestContextFromBody(event.body);
+  if (ctx.error) return jsonResponse(400, { error: ctx.error, ...(ctx.errorCode ? { errorCode: ctx.errorCode } : {}) });
 
-  return runWithStorageGrant(grant.grant, async () => {
+  // Validation runs INSIDE the request context: model/kind policy and requestIdPattern
+  // come from the descriptor, and requirement defaults come from the grant's limits.
+  return runWithRequestContext(ctx.ctx, async () => {
+    const parsed = await validateArtifactJobRequest(parsedBody);
+    if (!parsed.success) {
+      return jsonResponse(400, { error: "Invalid artifact job input", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
+    }
     // Operator-approval gate: hold the job in a resumable blocked state instead of running it.
     const requirement = evaluateApprovalRequirement(parsed.data);
     if (requirement.required) {

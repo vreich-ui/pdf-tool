@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { jobRecordBlobStore } from "../blob-store.js";
-import { AGENT_ARTIFACT_JOB_STORE, type ArtifactJobStatus } from "../agent-artifact-jobs.js";
-import { supportedProjectIds } from "../agent-project-registry.js";
+import { jobRecordStore, type ArtifactJobStatus } from "../agent-artifact-jobs.js";
+import { validateProjectAccess, validateProjectRequestId } from "../project-descriptor.js";
 import { HARD_MAX_CANDIDATES_PER_REQUEST, validateImageSourcingPolicyPatch } from "./policy.js";
 import type { ImageLicenseInfo, ImageSearchCandidate, ImageSearchRunSummary } from "./types.js";
 
@@ -74,9 +73,11 @@ export function validateImageSearchJobRequest(input: unknown): { success: true; 
   const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : undefined;
   const label = typeof value.label === "string" ? value.label : undefined;
 
-  if (!projectId) issues.push({ path: ["projectId"], message: "projectId is required" });
-  if (projectId && !supportedProjectIds().has(projectId)) issues.push({ path: ["projectId"], message: `Unsupported projectId: ${projectId}` });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) issues.push({ path: ["projectId"], message: accessIssue });
   if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
+  const requestIdIssue = requestId ? validateProjectRequestId(requestId) : undefined;
+  if (requestIdIssue) issues.push({ path: ["requestId"], message: requestIdIssue });
   if (value.kind !== undefined && value.kind !== "search" && value.kind !== "url_import") issues.push({ path: ["kind"], message: "kind must be search or url_import" });
   if (kind === "search") {
     if (!query) issues.push({ path: ["query"], message: "query is required for search jobs" });
@@ -108,12 +109,12 @@ export async function createImageSearchJobRecord(input: ImageSearchJobRequest): 
 }
 
 export async function readImageSearchJob(projectId: string, jobId: string): Promise<ImageSearchJobRecord | null> {
-  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordStore();
   return await store.get(imageSearchJobBlobKey(projectId, jobId), { type: "json" }).catch(() => null) as ImageSearchJobRecord | null;
 }
 
 export async function writeImageSearchJob(job: ImageSearchJobRecord): Promise<void> {
-  const store = await jobRecordBlobStore(AGENT_ARTIFACT_JOB_STORE, { consistency: "strong" });
+  const store = await jobRecordStore();
   await store.setJSON(imageSearchJobBlobKey(job.projectId, job.jobId), job);
 }
 

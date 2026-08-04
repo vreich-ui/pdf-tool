@@ -22,6 +22,16 @@ function env() {
 
 const AUTH = { authorization: "Bearer test-token" };
 
+
+// Stateless refactor: storage-touching entrypoints require a caller storage grant.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -155,7 +165,7 @@ test("MCP tools/call import_image_from_url: a near-zero platform budget returns 
           jsonrpc: "2.0",
           id: 1,
           method: "tools/call",
-          params: { name: "import_image_from_url", arguments: { projectId: "dr-lurie", requestId: "req-mcp-budget", url: "https://cdn.example.org/tight.png" } }
+          params: { name: "import_image_from_url", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-mcp-budget", url: "https://cdn.example.org/tight.png" } }
         })
       },
       context

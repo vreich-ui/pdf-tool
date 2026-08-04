@@ -6,7 +6,7 @@ import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImag
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
-import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
+import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
 import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
 import { getPdfTemplateValidation, startPdfTemplateValidation, type GetPdfTemplateValidationInput, type ValidatePdfTemplateInput } from "../lib/pdf-template-validation.js";
@@ -19,13 +19,15 @@ type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: 
 type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "validate_pdf_template" | "get_pdf_template_validation" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "get_image_model_policy" | "set_image_model_policy" | "import_image_from_url" | "import_images_from_url";
 
 // Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
-// to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds none.
+// to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds
+// none — and (stateless refactor) there is no server-side env fallback, so the grant is
+// REQUIRED on every storage-touching tool.
 const STORAGE_GRANT_SCHEMA = {
   type: "object",
   additionalProperties: true,
-  description: "Client storage grant: the Netlify siteId + Blobs token pdf-tool uses to read/write the client's Blob stores for this request. Fetch a fresh grant per request (short-lived).",
+  description: "REQUIRED client storage grant: the Netlify siteId + Blobs token pdf-tool uses to read/write the client's Blob stores for this request. pdf-tool holds no storage credentials of its own — a call without this grant fails with STORAGE_GRANT_REQUIRED. Fetch a fresh grant per request (short-lived).",
   properties: {
-    grantType: { type: "string" },
+    grantType: { type: "string", description: "netlify-pat (default). A switch point for future grant types (e.g. exchange)." },
     projectId: { type: "string" },
     siteId: { type: "string" },
     token: { type: "string" },
@@ -41,9 +43,59 @@ const STORAGE_GRANT_SCHEMA = {
         renderData: { type: "string" },
         jobs: { type: "string" }
       }
+    },
+    limits: {
+      type: "object",
+      additionalProperties: true,
+      description: "Output-shaping defaults inherited by jobs that omit requirements",
+      properties: {
+        maxImageBytes: { type: "number" },
+        preferredImageFormat: { type: "string", enum: ["png", "webp", "jpeg"] }
+      }
     }
   }
 } as const;
+
+// Optional caller-supplied project descriptor — the stateless replacement for the deleted
+// server-side project registry. All fields optional; omitted fields use pdf-tool defaults,
+// so a minimal caller sends only the grant.
+const PROJECT_DESCRIPTOR_SCHEMA = {
+  type: "object",
+  additionalProperties: true,
+  description: "Optional project descriptor. Tunes per-project policy without any pdf-tool-side registration: model allowlist, default model, allowed artifact kinds, store-name overrides, and a full-match requestId pattern. Its projectId must match the request's projectId and the grant's projectId.",
+  properties: {
+    projectId: { type: "string" },
+    storeNames: {
+      type: "object",
+      additionalProperties: true,
+      description: "Store-name overrides for keys the grant does not explicitly name (the grant wins)",
+      properties: {
+        artifacts: { type: "string" },
+        artifactIndex: { type: "string" },
+        templates: { type: "string" },
+        imageSearch: { type: "string" },
+        renderData: { type: "string" },
+        jobs: { type: "string" }
+      }
+    },
+    allowedModels: { type: "array", items: { type: "string" }, description: "Generation-model allowlist; omit to use pdf-tool's default allowlist" },
+    defaultModel: { type: "string", description: "Model used when a job omits `model`; defaults to gpt-image-1" },
+    allowedKinds: { type: "array", items: { type: "string", enum: ["image", "pdf", "binary"] }, description: "Allowed artifact kinds; defaults to image,pdf" },
+    requestIdPattern: { type: "string", description: "Full-match request-id pattern in a safe regex subset (literals, escapes, character classes, quantifiers on single atoms — no groups/alternation); non-conforming writes are rejected" }
+  }
+} as const;
+
+/** Tools that can answer without storage access (verification degrades gracefully to
+ * attestation-only); every other tool REQUIRES the storage grant. */
+const GRANT_OPTIONAL_TOOLS = new Set<string>(["verify_agent_artifact"]);
+
+/** Known tool names — the grant requirement applies only to real tools, so an unknown tool
+ * still surfaces as a proper JSON-RPC "Unknown tool" error rather than a grant error. */
+let knownToolNames: Set<string> | undefined;
+function isKnownTool(name: string | undefined): boolean {
+  if (!knownToolNames) knownToolNames = new Set(baseTools.map((tool) => tool.name));
+  return typeof name === "string" && knownToolNames.has(name);
+}
 
 const baseTools = [
   {
@@ -465,12 +517,17 @@ const baseTools = [
   }
 ] as const;
 
-// Advertise the storage grant on every tool without repeating it in 16 literals.
+// Advertise the storage grant + project descriptor on every tool without repeating them in
+// 22 literals. `storage` joins `required` (except on the grant-optional tools) so strict
+// clients can no longer omit the grant silently.
 const tools = baseTools.map((tool) => ({
   ...tool,
   inputSchema: {
     ...tool.inputSchema,
-    properties: { ...(tool.inputSchema as { properties?: Record<string, unknown> }).properties, storage: STORAGE_GRANT_SCHEMA }
+    properties: { ...(tool.inputSchema as { properties?: Record<string, unknown> }).properties, storage: STORAGE_GRANT_SCHEMA, descriptor: PROJECT_DESCRIPTOR_SCHEMA },
+    ...(GRANT_OPTIONAL_TOOLS.has(tool.name)
+      ? {}
+      : { required: [...((tool.inputSchema as { required?: readonly string[] }).required ?? []), "storage"] })
   }
 }));
 
@@ -601,11 +658,15 @@ function toolContent(structuredContent: unknown) {
 }
 
 async function callTool(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {
-  // A per-request storage grant (the `storage` argument) supplies the client's Blob
-  // credentials; run the whole tool within it so every downstream store call picks it up.
-  const extracted = extractStorageGrant(args);
-  if (extracted.error) return { isError: true, ...toolContent({ error: extracted.error }) };
-  return runWithStorageGrant(extracted.grant, () => callToolInner(name, args, event, ctx));
+  // The per-request storage grant (the `storage` argument) supplies the client's Blob
+  // credentials and the optional `descriptor` supplies project policy; run the whole tool
+  // within both so every downstream store call picks them up. The grant is REQUIRED on
+  // every storage-touching tool: pdf-tool holds no credentials of its own, so a grantless
+  // call fails here with a typed, self-explaining error instead of silently reading an
+  // empty store and answering "not found".
+  const extracted = extractRequestContext(args, { requireGrant: isKnownTool(name) && !GRANT_OPTIONAL_TOOLS.has(name!) });
+  if (extracted.error) return { isError: true, ...toolContent({ error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) }) };
+  return runWithRequestContext(extracted.ctx, () => callToolInner(name, args, event, ctx));
 }
 
 async function callToolInner(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {

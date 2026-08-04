@@ -2,13 +2,12 @@ import { randomUUID } from "node:crypto";
 import { createArtifactJob, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type PdfTemplateRef, type ArtifactJobStatus, type ArtifactJobOperation, type ArtifactEditMode, type SourceArtifactLock, type ArtifactReferenceHolder, type ImageEditInstructions } from "./agent-artifact-jobs.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./artifact-core/index.js";
-import { resolveProjectArtifactIndexOptions } from "./agent-project-registry.js";
+import { resolveProjectArtifactIndexOptions, resolveProjectModel, validateProjectAccess } from "./project-descriptor.js";
 import { attestArtifactReference } from "./artifact-attestation.js";
 import { buildBlockedState, evaluateApprovalRequirement, refreshedBlockedState, resumeArtifactJob, type ResumeArtifactJobInput } from "./agent-artifact-approval.js";
 import { canonicalImageModel, findImageProvider } from "./image-providers/registry.js";
 import { estimateImageJobCost } from "./image-providers/pricing.js";
 import { policyModelForUsageContext } from "./image-routing/policy.js";
-import { resolveProjectModel } from "./agent-project-registry.js";
 
 export interface CreateAgentArtifactJobInput {
   projectId: string;
@@ -118,6 +117,8 @@ export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, opti
 
 export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatusInput) {
   if (!input.projectId || !input.jobId) return { ok: false as const, statusCode: 400, error: "projectId and jobId are required" };
+  const accessIssue = validateProjectAccess(input.projectId);
+  if (accessIssue) return { ok: false as const, statusCode: 400, error: accessIssue };
   const job = await readArtifactJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Artifact job not found" };
   const artifactReference = job.artifactReference ?? job.artifact;
@@ -129,6 +130,8 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
 
 export async function getAgentArtifactBySlot(input: GetAgentArtifactBySlotInput) {
   if (!input.projectId || !input.requestId || !input.slot) return { ok: false as const, statusCode: 400, error: "projectId, requestId and slot are required" };
+  const slotAccessIssue = validateProjectAccess(input.projectId);
+  if (slotAccessIssue) return { ok: false as const, statusCode: 400, error: slotAccessIssue };
   if (!isSafeOptionalPathSegment(input.slot)) return { ok: false as const, statusCode: 400, error: "slot must be a safe path segment" };
   const artifact = await readArtifactReferenceBySlot(input.projectId, input.requestId, input.slot, resolveProjectArtifactIndexOptions(input.projectId));
   if (!artifact) return { ok: false as const, statusCode: 404, error: "Artifact not found" };
@@ -138,6 +141,8 @@ export async function getAgentArtifactBySlot(input: GetAgentArtifactBySlotInput)
 
 export async function getAgentArtifactByFilename(input: GetAgentArtifactByFilenameInput) {
   if (!input.projectId || !input.requestId || !input.filename) return { ok: false as const, statusCode: 400, error: "projectId, requestId and filename are required" };
+  const filenameAccessIssue = validateProjectAccess(input.projectId);
+  if (filenameAccessIssue) return { ok: false as const, statusCode: 400, error: filenameAccessIssue };
   const artifact = await readArtifactReferenceByFilename(input.projectId, input.requestId, input.filename, resolveProjectArtifactIndexOptions(input.projectId));
   if (!artifact) return { ok: false as const, statusCode: 404, error: "Artifact not found" };
   const materializationProof = attestArtifactReference(input.projectId, input.requestId, artifact);

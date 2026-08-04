@@ -15,7 +15,6 @@ import { handler as workerHandler } from "../netlify/functions/agent-artifact-wo
 import { handler as mcpStatusHandler } from "../netlify/functions/get-agent-artifact-job-status.js";
 import { renderPdfArtifact } from "../netlify/lib/pdf-render/render.js";
 import { createArtifactJob } from "../netlify/lib/agent-artifact-jobs.js";
-import { getProjectAdapter } from "../netlify/lib/agent-project-registry.js";
 import { inspectPdf } from "../netlify/lib/pdf-render/inspect.js";
 import { writePdfTemplateValidation } from "../netlify/lib/pdf-template-store.js";
 
@@ -101,6 +100,18 @@ const worstCaseData = {
 
 const jobAssets = { images: [{ assetId: "logo", dataUri: TINY_PNG_DATA_URI }] };
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -110,7 +121,7 @@ async function createReactPdfTemplate(templateId: string, templateJson: unknown 
   return createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson, renderer: "react-pdf" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson, renderer: "react-pdf" }),
   });
 }
 
@@ -139,15 +150,13 @@ async function publishTemplate(templateId: string, version = 1) {
   const res = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }),
   });
   assert.equal(res.statusCode, 200, `publishTemplate failed: ${res.body}`);
 }
 
 async function readSavedArtifactBytes(blobKey: string): Promise<Buffer> {
-  const adapter = getProjectAdapter("dr-lurie");
-  assert.ok(adapter, "dr-lurie adapter must exist");
-  const store = await projectBlobStore(adapter!.config.artifactStoreName, {});
+  const store = await projectBlobStore("artifacts");
   const value = await store.get(blobKey, { type: "arrayBuffer" });
   assert.ok(value, `saved artifact bytes not found at ${blobKey}`);
   return value instanceof ArrayBuffer ? Buffer.from(value) : (value as Buffer);
@@ -172,7 +181,7 @@ test("MCP surface: create_pdf_template enum lists react-pdf and tools/call creat
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
-      params: { name: "create_pdf_template", arguments: { projectId: "dr-lurie", templateId: "rp-mcp-create", templateJson: docTreeTemplate, renderer: "react-pdf" } },
+      params: { name: "create_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "rp-mcp-create", templateJson: docTreeTemplate, renderer: "react-pdf" } },
     }),
   });
   assert.equal(callRes.statusCode, 200);
@@ -233,7 +242,7 @@ test("react-pdf end-to-end: job renders a real two-page A4 PDF with Hebrew text 
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 200, `worker failed: ${workerRes.body}`);
   const workerBody = JSON.parse(workerRes.body);
@@ -246,6 +255,7 @@ test("react-pdf end-to-end: job renders a real two-page A4 PDF with Hebrew text 
     httpMethod: "GET",
     headers: AUTH,
     queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+    body: JSON.stringify({ storage: STORAGE }),
   });
   assert.equal(statusRes.statusCode, 200);
   const statusBody = JSON.parse(statusRes.body);
@@ -310,7 +320,7 @@ test("react-pdf requirements mismatch: Letter requirement against A4 output fail
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 500);
   const workerBody = JSON.parse(workerRes.body);
@@ -322,6 +332,7 @@ test("react-pdf requirements mismatch: Letter requirement against A4 output fail
     httpMethod: "GET",
     headers: AUTH,
     queryStringParameters: { projectId: "dr-lurie", jobId: job.jobId },
+    body: JSON.stringify({ storage: STORAGE }),
   });
   const statusBody = JSON.parse(statusRes.body);
   assert.equal(statusBody.status, "failed");
@@ -348,7 +359,7 @@ test("react-pdf missing jobAsset: job fails with ASSET_NOT_FOUND naming the asse
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 500);
   const workerBody = JSON.parse(workerRes.body);

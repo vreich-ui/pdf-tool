@@ -111,6 +111,18 @@ async function buildPdfBase64(): Promise<string> {
   return Buffer.from(await doc.save()).toString("base64");
 }
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -127,7 +139,7 @@ test("chromium template: parse-only Liquid validation rejects bad syntax and sha
     const created = await createHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", templateId: `chromium-bad-${index}`, templateJson, renderer: "chromium" }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: `chromium-bad-${index}`, templateJson, renderer: "chromium" }),
     });
     assert.equal(created.statusCode, 400, `case ${index} should be rejected`);
     const body = JSON.parse(created.body);
@@ -140,7 +152,7 @@ test("chromium template: parse-only Liquid validation rejects bad syntax and sha
   const good = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-good", templateJson: chromiumTemplate, renderer: "chromium" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-good", templateJson: chromiumTemplate, renderer: "chromium" }),
   });
   assert.equal(good.statusCode, 201, `valid template rejected: ${good.body}`);
   assert.equal(JSON.parse(good.body).renderer, "chromium");
@@ -158,14 +170,14 @@ test("chromium happy path: worker sends html/css/partials, data, mode, requireme
     const created = await createHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-e2e", templateJson: chromiumTemplate, renderer: "chromium" }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-e2e", templateJson: chromiumTemplate, renderer: "chromium" }),
     });
     assert.equal(created.statusCode, 201);
     await seedPassedValidation("chromium-e2e");
     const published = await publishHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-e2e" }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-e2e" }),
     });
     assert.equal(published.statusCode, 200);
 
@@ -184,7 +196,7 @@ test("chromium happy path: worker sends html/css/partials, data, mode, requireme
     const workerRes = await workerHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
     });
     assert.equal(workerRes.statusCode, 200, `worker failed: ${workerRes.body}`);
     const workerBody = JSON.parse(workerRes.body);
@@ -229,13 +241,13 @@ test("chromium ok:false passthrough: service DATA_BINDING_ERROR surfaces as the 
     await createHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-binding", templateJson: chromiumTemplate, renderer: "chromium" }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-binding", templateJson: chromiumTemplate, renderer: "chromium" }),
     });
     await seedPassedValidation("chromium-binding");
     await publishHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-binding" }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-binding" }),
     });
     const job = await createArtifactJob({
       projectId: "dr-lurie",
@@ -249,7 +261,7 @@ test("chromium ok:false passthrough: service DATA_BINDING_ERROR surfaces as the 
     const workerRes = await workerHandler({
       httpMethod: "POST",
       headers: AUTH,
-      body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+      body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
     });
     assert.equal(workerRes.statusCode, 500);
     const workerBody = JSON.parse(workerRes.body);
@@ -265,13 +277,13 @@ test("chromium without service env fails with RENDER_SERVICE_UNCONFIGURED", asyn
   await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-unconf", templateJson: chromiumTemplate, renderer: "chromium" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-unconf", templateJson: chromiumTemplate, renderer: "chromium" }),
   });
   await seedPassedValidation("chromium-unconf");
   await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "chromium-unconf" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "chromium-unconf" }),
   });
   const job = await createArtifactJob({
     projectId: "dr-lurie",
@@ -285,7 +297,7 @@ test("chromium without service env fails with RENDER_SERVICE_UNCONFIGURED", asyn
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   assert.equal(workerRes.statusCode, 500);
   const workerBody = JSON.parse(workerRes.body);

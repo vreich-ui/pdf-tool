@@ -1,5 +1,5 @@
 import { isSafeOptionalPathSegment, safeError, MAX_IMAGE_OUTPUT_BYTES } from "./agent-artifact-jobs.js";
-import { getProjectAdapter, supportedProjectIds } from "./agent-project-registry.js";
+import { validateProjectAccess, validateProjectRequestId } from "./project-descriptor.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { createImageSearchJobRecord, readImageSearchJob, updateImageSearchJob, validateImageSearchJobRequest } from "./image-search/jobs.js";
 import { readImageSearchBank, updateImageSearchCandidateState, type UpdateCandidateInput } from "./image-search/orchestrator.js";
@@ -47,6 +47,8 @@ export async function createImageSearchJob(input: unknown, options: { baseUrl?: 
 
 export async function getImageSearchJobStatus(input: GetImageSearchJobStatusInput) {
   if (!input.projectId || !input.jobId) return { ok: false as const, statusCode: 400, error: "projectId and jobId are required" };
+  const statusAccessIssue = validateProjectAccess(input.projectId);
+  if (statusAccessIssue) return { ok: false as const, statusCode: 400, error: statusAccessIssue };
   const job = await readImageSearchJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Image search job not found" };
   return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, query: job.query, status: job.status, result: job.result, error: job.error };
@@ -54,7 +56,8 @@ export async function getImageSearchJobStatus(input: GetImageSearchJobStatusInpu
 
 export async function getImageSearchBank(input: GetImageSearchBankInput) {
   if (!input.projectId || !input.requestId) return { ok: false as const, statusCode: 400, error: "projectId and requestId are required" };
-  if (!getProjectAdapter(input.projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${input.projectId}` };
+  const bankAccessIssue = validateProjectAccess(input.projectId);
+  if (bankAccessIssue) return { ok: false as const, statusCode: 400, error: bankAccessIssue };
   const bank = await readImageSearchBank(input.projectId, input.requestId);
   if (!bank) return { ok: false as const, statusCode: 404, error: "No image search bank found for request" };
   return { ok: true as const, statusCode: 200, bank };
@@ -84,7 +87,10 @@ export async function importImageFromUrl(input: unknown, options: { budgetMs?: n
   const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
   const url = typeof value.url === "string" ? value.url.trim() : "";
   if (!projectId || !requestId || !url) return { ok: false as const, statusCode: 400, error: "projectId, requestId and url are required" };
-  if (!supportedProjectIds().has(projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${projectId}` };
+  const importAccessIssue = validateProjectAccess(projectId);
+  if (importAccessIssue) return { ok: false as const, statusCode: 400, error: importAccessIssue };
+  const importRequestIdIssue = validateProjectRequestId(requestId);
+  if (importRequestIdIssue) return { ok: false as const, statusCode: 400, error: importRequestIdIssue };
   if (!url.startsWith("https://")) return { ok: false as const, statusCode: 400, error: "url must use https" };
   if (value.slot && !isSafeOptionalPathSegment(value.slot)) return { ok: false as const, statusCode: 400, error: "slot must be a safe path segment" };
   if (value.maxBytes !== undefined && !(Number.isInteger(value.maxBytes) && typeof value.maxBytes === "number" && value.maxBytes > 0 && value.maxBytes <= MAX_IMAGE_OUTPUT_BYTES)) {
@@ -160,14 +166,16 @@ export async function createImageImportJob(input: unknown, options: { baseUrl?: 
 
 export async function getImageSearchPolicy(input: GetImageSearchPolicyInput) {
   if (!input.projectId) return { ok: false as const, statusCode: 400, error: "projectId is required" };
-  if (!getProjectAdapter(input.projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${input.projectId}` };
+  const getPolicyAccessIssue = validateProjectAccess(input.projectId);
+  if (getPolicyAccessIssue) return { ok: false as const, statusCode: 400, error: getPolicyAccessIssue };
   const policy = await loadProjectImageSourcingPolicy(input.projectId);
   return { ok: true as const, statusCode: 200, policy };
 }
 
 export async function setImageSearchPolicy(input: SetImageSearchPolicyInput) {
   if (!input.projectId) return { ok: false as const, statusCode: 400, error: "projectId is required" };
-  if (!getProjectAdapter(input.projectId)) return { ok: false as const, statusCode: 400, error: `Unsupported projectId: ${input.projectId}` };
+  const setPolicyAccessIssue = validateProjectAccess(input.projectId);
+  if (setPolicyAccessIssue) return { ok: false as const, statusCode: 400, error: setPolicyAccessIssue };
   const issues = validateImageSourcingPolicyPatch(input.policy);
   if (issues.length > 0) return { ok: false as const, statusCode: 400, error: "Invalid image sourcing policy", issues };
   const policy = await saveProjectImageSourcingPolicy(input.projectId, input.policy);

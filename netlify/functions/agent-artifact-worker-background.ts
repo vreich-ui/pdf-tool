@@ -1,12 +1,12 @@
 import { executeAgentArtifactWorkflow } from "../lib/agent-artifact-workflow.js";
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
-import { getProjectAdapter, resolveProjectOpenAIKey } from "../lib/agent-project-registry.js";
+import { saveArtifactBytes } from "../lib/artifact-layout.js";
+import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
 import { executePdfEditJob, writePdfRenderData } from "../lib/agent-pdf-editing.js";
 import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfArtifact } from "../lib/pdf-render/render.js";
 import { structuredError } from "../lib/pdf-render/errors.js";
-import { extractStorageGrant, runWithStorageGrant } from "../lib/storage-grant.js";
 import { assertWorkerBudget, startWorkerDeadline, type WorkerDeadline } from "../lib/worker-budget.js";
 
 export const config = { name: "agent-artifact-worker-background" };
@@ -17,8 +17,8 @@ type FunctionEvent = {
   body?: string | null;
 };
 
-function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string; storage?: unknown } {
-  return parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown }>(event.body) ?? {};
+function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown } {
+  return parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown }>(event.body) ?? {};
 }
 
 export async function handler(event: FunctionEvent) {
@@ -29,19 +29,21 @@ export async function handler(event: FunctionEvent) {
     return jsonResponse(401, { error: "Unauthorized" });
   }
 
-  const { projectId, jobId, storage } = parseWorkerInput(event);
+  const { projectId, jobId, storage, descriptor } = parseWorkerInput(event);
   if (!projectId || !jobId) {
     return jsonResponse(400, { error: "projectId and jobId are required" });
   }
 
-  // F7: pass projectId alongside the grant so the cross-project guard (grant.projectId must
-  // match the request's projectId) actually runs on this entrypoint.
-  const extracted = extractStorageGrant({ storage, projectId });
-  if (extracted.error) return jsonResponse(400, { error: extracted.error });
+  // F7 → descriptor binding: projectId travels with the grant/descriptor so the
+  // cross-project guard runs on this entrypoint too. The grant is REQUIRED — a grantless
+  // worker run could only read pdf-tool's own (empty) stores and mislabel that as
+  // "job not found", so it fails loudly instead.
+  const extracted = extractRequestContext({ storage, descriptor, projectId });
+  if (extracted.error) return jsonResponse(400, { error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) });
   // Deadline-awareness: the clock starts at invocation; Netlify hard-kills background
   // functions at 15 minutes with no signal, so the worker tracks its own budget.
   const deadline = startWorkerDeadline();
-  return runWithStorageGrant(extracted.grant, () => runWorker(projectId, jobId, deadline));
+  return runWithRequestContext(extracted.ctx, () => runWorker(projectId, jobId, deadline));
 }
 
 async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadline) {
@@ -61,8 +63,6 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
   let runningJob = job;
   try {
     runningJob = await updateArtifactJob(job, { status: "running", startedAt: new Date(deadline.startedAtMs).toISOString(), error: undefined, errorCode: undefined, errorDetail: undefined });
-    const adapter = getProjectAdapter(runningJob.projectId);
-    if (!adapter) throw new Error(`Unsupported projectId: ${runningJob.projectId}`);
 
     // Fail cleanly with WORKER_TIMEOUT_APPROACHING instead of being silently killed at the
     // platform background cap; the failure record persists via the catch below.
@@ -77,7 +77,9 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
       requiresModel: route.requiresModel,
       selectedModel: route.requiresModel ? runningJob.selectedModel : undefined,
     });
-    const apiKey = route.requiresAI ? resolveProjectOpenAIKey(runningJob.projectId) : undefined;
+    // The OpenAI key is pdf-tool's own provider credential (service env), not client
+    // storage — undefined is harmless for non-OpenAI routes (fal keys resolve provider-side).
+    const apiKey = route.requiresAI ? process.env.OPENAI_API_KEY : undefined;
 
     const generated = route.artifactKind === "pdf"
       ? (runningJob.operation === "edit"
@@ -90,7 +92,7 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
       : undefined;
     const sha256 = sha256Hex(generated.bytes);
-    const artifact = await adapter.saveArtifactBytes({
+    const artifact = await saveArtifactBytes({
       projectId: runningJob.projectId,
       requestId: runningJob.requestId,
       artifactKind: runningJob.artifactKind,

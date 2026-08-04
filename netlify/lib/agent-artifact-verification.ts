@@ -1,5 +1,6 @@
 import { sha256Hex, readArtifactReference, type ArtifactReference } from "./artifact-core/index.js";
-import { getProjectAdapter, resolveProjectArtifactIndexOptions, resolveProjectBlobStoreOptions, supportedProjectIds } from "./agent-project-registry.js";
+import { projectStoreNames, resolveProjectArtifactIndexOptions, validateProjectAccess } from "./project-descriptor.js";
+import { parseArtifactBlobKey, safeRequestSegment } from "./artifact-layout.js";
 import { projectBlobStore } from "./blob-store.js";
 import { currentStorageGrant } from "./storage-grant.js";
 import {
@@ -72,10 +73,8 @@ function fail(statusCode: number, error: string): VerifyArtifactResult {
 }
 
 async function readArtifactBytesSha256(projectId: string, blobKey: string): Promise<string | undefined> {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) return undefined;
-  const storeOptions = resolveProjectBlobStoreOptions(projectId);
-  const value = await (await projectBlobStore(adapter.config.artifactStoreName, storeOptions)).get(blobKey, { type: "arrayBuffer" }).catch(() => null);
+  if (validateProjectAccess(projectId)) return undefined;
+  const value = await (await projectBlobStore(projectStoreNames().artifacts)).get(blobKey, { type: "arrayBuffer" }).catch(() => null);
   if (value == null) return undefined;
   const bytes = value instanceof ArrayBuffer ? Buffer.from(value)
     : Buffer.isBuffer(value) ? value
@@ -91,7 +90,8 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
   const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
   if (!projectId) return fail(400, "projectId is required");
   if (!requestId) return fail(400, "requestId is required");
-  if (!supportedProjectIds().has(projectId)) return fail(400, `Unsupported projectId: ${projectId}`);
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) return fail(400, accessIssue);
 
   const claimed = (input.artifactReference && typeof input.artifactReference === "object" && !Array.isArray(input.artifactReference) ? input.artifactReference : {}) as Record<string, unknown>;
   const blobKey = typeof input.blobKey === "string" && input.blobKey.trim() ? input.blobKey.trim() : typeof claimed.blobKey === "string" ? claimed.blobKey.trim() : "";
@@ -117,11 +117,10 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
   }
   checks.safety = "pass";
 
-  // 2. blobKey binding — decode the key via the adapter's own layout and confirm it binds this
+  // 2. blobKey binding — decode the key via the canonical layout and confirm it binds this
   // request id and this sha256. A hand-authored key won't parse; a copied key parses to a
   // different request id.
-  const adapter = getProjectAdapter(projectId);
-  const parts = adapter?.parseArtifactBlobKey?.(blobKey) ?? null;
+  const parts = parseArtifactBlobKey(blobKey);
   if (!parts) {
     checks.blobKeyBinding = "fail";
     return negative("blobKey is not in pdf-tool's artifact layout (hand-authored or foreign key)");
@@ -130,7 +129,7 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
     checks.blobKeyBinding = "fail";
     return negative("blobKey does not encode the claimed sha256");
   }
-  const expectedRequestSegment = adapter?.safeRequestSegment?.(requestId) ?? requestId;
+  const expectedRequestSegment = safeRequestSegment(requestId);
   if (parts.requestSegment !== expectedRequestSegment) {
     checks.blobKeyBinding = "fail";
     return negative("blobKey is bound to a different request (copied reference)");
@@ -158,7 +157,9 @@ export async function verifyArtifactMaterialization(input: VerifyArtifactInput):
   // bytes as an integrity corroboration; a present-but-wrong hash is a hard failure. Note the
   // blobKey-binding check above uses the adapter's path-sanitized request segment, which is
   // NOT injective, so it is only a cheap pre-filter — the request binding is proven here.
-  const hasStorageAccess = Boolean(currentStorageGrant()) || Boolean(resolveProjectBlobStoreOptions(projectId).siteID);
+  // Post-stateless refactor there is no env-credential path: storage-backed checks run
+  // exactly when the caller supplied a storage grant.
+  const hasStorageAccess = Boolean(currentStorageGrant());
   let persisted: ArtifactReference | undefined;
   if (hasStorageAccess) {
     persisted = await readArtifactReference(requestId, sha256, resolveProjectArtifactIndexOptions(projectId)).catch(() => undefined);

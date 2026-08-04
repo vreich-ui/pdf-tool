@@ -10,8 +10,7 @@
  * site-wide, so the store NAME is the access boundary.
  */
 import { projectBlobStore } from "../artifact-core/blob-store.js";
-import { currentStorageGrant } from "../storage-grant.js";
-import { getProjectAdapter } from "../agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
 import { RenderError } from "./errors.js";
 import { DOC_TREE_LIMITS } from "./doc-tree/schema.js";
 import type { RenderServiceAsset } from "./render-service-client.js";
@@ -43,14 +42,12 @@ function sniffContentType(bytes: Buffer): string | undefined {
 }
 
 async function readAllowlistedBlob(projectId: string, storeName: string | undefined, blobKey: string): Promise<Buffer | null> {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new RenderError("ASSET_NOT_FOUND", `Unsupported projectId: ${projectId}`);
-  const resolvedStore = storeName ?? adapter.config.artifactStoreName;
-  const grant = currentStorageGrant();
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new RenderError("ASSET_NOT_FOUND", accessIssue);
+  const stores = projectStoreNames();
+  const resolvedStore = storeName ?? stores.artifacts;
   const allowedStores = new Set<string>(
-    [adapter.config.artifactStoreName, adapter.config.templateStoreName, ...(grant ? Object.values(grant.stores) : [])].filter(
-      (name): name is string => typeof name === "string" && name.length > 0
-    )
+    Object.values(stores).filter((name): name is string => typeof name === "string" && name.length > 0)
   );
   if (!allowedStores.has(resolvedStore)) {
     throw new RenderError("ASSET_NOT_FOUND", `Asset storeName "${resolvedStore}" is not accessible to this render`, {
@@ -58,10 +55,7 @@ async function readAllowlistedBlob(projectId: string, storeName: string | undefi
       allowedStores: [...allowedStores],
     });
   }
-  const store = await projectBlobStore(resolvedStore, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-  });
+  const store = await projectBlobStore(resolvedStore);
   const value = await store.get(blobKey, { type: "arrayBuffer" }).catch(() => null);
   if (value == null) return null;
   if (value instanceof ArrayBuffer) return Buffer.from(value);

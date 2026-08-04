@@ -38,6 +38,18 @@ async function mcpRpc(method: string, params?: Record<string, unknown>) {
   });
 }
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -90,7 +102,7 @@ test("create-pdf-template requires POST", async () => {
 });
 
 test("create-pdf-template requires auth", async () => {
-  const response = await createHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ projectId: "dr-lurie", templateJson: validTemplate }) });
+  const response = await createHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateJson: validTemplate }) });
   assert.equal(response.statusCode, 401);
 });
 
@@ -99,17 +111,17 @@ test("create-pdf-template rejects invalid JSON body", async () => {
   assert.equal(response.statusCode, 400);
 });
 
-test("create-pdf-template rejects unknown projectId", async () => {
-  const response = await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "unknown", templateJson: validTemplate }) });
+test("create-pdf-template rejects a projectId outside the grant's scope", async () => {
+  const response = await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "unknown", templateJson: validTemplate }) });
   assert.equal(response.statusCode, 400);
-  assert.match(JSON.parse(response.body).error, /Unsupported projectId/);
+  assert.match(JSON.parse(response.body).error, /projectId mismatch/);
 });
 
 test("create-pdf-template rejects invalid templateJson", async () => {
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateJson: { schemas: [] } })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateJson: { schemas: [] } })
   });
   assert.equal(response.statusCode, 400);
   const body = JSON.parse(response.body);
@@ -121,7 +133,7 @@ test("create-pdf-template rejects unsupported renderer", async () => {
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateJson: validTemplate, renderer: "html_chromium" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateJson: validTemplate, renderer: "html_chromium" })
   });
   assert.equal(response.statusCode, 400);
   assert.match(JSON.parse(response.body).error, /Unsupported renderer/);
@@ -131,7 +143,7 @@ test("create-pdf-template creates draft version 1 with explicit templateId", asy
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "my-template", templateJson: validTemplate, renderer: "pdfme", label: "My Template", tags: ["test"] })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "my-template", templateJson: validTemplate, renderer: "pdfme", label: "My Template", tags: ["test"] })
   });
   assert.equal(response.statusCode, 201);
   const body = JSON.parse(response.body);
@@ -145,7 +157,7 @@ test("create-pdf-template auto-generates templateId when omitted", async () => {
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateJson: validTemplate })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateJson: validTemplate })
   });
   assert.equal(response.statusCode, 201);
   const body = JSON.parse(response.body);
@@ -160,19 +172,19 @@ test("get-pdf-template requires auth", async () => {
 });
 
 test("get-pdf-template returns 404 for missing template", async () => {
-  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "nonexistent" } });
+  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "nonexistent" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(response.statusCode, 404);
 });
 
 test("get-pdf-template returns 404 for draft template when no version specified", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "draft-only", templateJson: validTemplate }) });
-  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "draft-only" } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "draft-only", templateJson: validTemplate }) });
+  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "draft-only" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(response.statusCode, 404);
 });
 
 test("get-pdf-template returns draft with explicit version", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "explicit-v", templateJson: validTemplate }) });
-  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "explicit-v", version: "1" } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "explicit-v", templateJson: validTemplate }) });
+  const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "explicit-v", version: "1" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.version, 1);
@@ -182,8 +194,8 @@ test("get-pdf-template returns draft with explicit version", async () => {
 });
 
 test("get-pdf-template accepts POST body", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "post-get", templateJson: validTemplate }) });
-  const response = await getHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "post-get", version: 1 }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "post-get", templateJson: validTemplate }) });
+  const response = await getHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "post-get", version: 1 }) });
   assert.equal(response.statusCode, 200);
   assert.equal(JSON.parse(response.body).version, 1);
 });
@@ -196,14 +208,14 @@ test("list-pdf-templates requires auth", async () => {
 });
 
 test("list-pdf-templates returns empty array for project with no templates", async () => {
-  const response = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  const response = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(JSON.parse(response.body).templates, []);
 });
 
 test("list-pdf-templates shows draft status before publish", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "list-draft", templateJson: validTemplate }) });
-  const response = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "list-draft", templateJson: validTemplate }) });
+  const response = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(response.statusCode, 200);
   const entry = JSON.parse(response.body).templates.find((t: { templateId: string }) => t.templateId === "list-draft");
   assert.ok(entry, "template should appear in list");
@@ -222,18 +234,18 @@ test("publish-pdf-template requires POST", async () => {
 });
 
 test("publish-pdf-template requires auth", async () => {
-  const response = await publishHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ projectId: "dr-lurie", templateId: "x" }) });
+  const response = await publishHandler({ httpMethod: "POST", headers: {}, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "x" }) });
   assert.equal(response.statusCode, 401);
 });
 
 test("publish-pdf-template returns 404 for nonexistent template", async () => {
-  const response = await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "nonexistent" }) });
+  const response = await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "nonexistent" }) });
   assert.equal(response.statusCode, 404);
 });
 
 test("publish-pdf-template flips status to active", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "pub-test", templateJson: validTemplate }) });
-  const response = await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "pub-test" }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "pub-test", templateJson: validTemplate }) });
+  const response = await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "pub-test" }) });
   assert.equal(response.statusCode, 200);
   const body = JSON.parse(response.body);
   assert.equal(body.status, "active");
@@ -247,27 +259,27 @@ test("lifecycle: draft is not active, publish makes it active, get/list reflect 
   const templateId = "lifecycle-template";
 
   // Create — status is draft
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
 
   // Default get returns 404 (no active version)
-  let getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId } });
+  let getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(getResp.statusCode, 404);
 
   // List shows draft
-  let listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  let listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   const beforePublish = JSON.parse(listResp.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
   assert.equal(beforePublish.status, "draft");
 
   // Publish
-  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
 
   // Default get now returns the active version
-  getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId } });
+  getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(getResp.statusCode, 200);
   assert.equal(JSON.parse(getResp.body).status, "active");
 
   // List shows active
-  listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   const afterPublish = JSON.parse(listResp.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
   assert.equal(afterPublish.status, "active");
   assert.equal(afterPublish.latestActiveVersion, 1);
@@ -277,38 +289,38 @@ test("versioning: both versions fetchable, latest-active updates when v2 is publ
   const templateId = "versioned-tmpl";
 
   // Create and publish v1
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: validTemplate, label: "Version 1" }) });
-  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate, label: "Version 1" }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }) });
 
   // Create v2 of same templateId
-  const v2Create = await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: validTemplate, label: "Version 2" }) });
+  const v2Create = await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate, label: "Version 2" }) });
   assert.equal(JSON.parse(v2Create.body).version, 2);
   assert.equal(JSON.parse(v2Create.body).status, "draft");
 
   // Latest-active still resolves to v1 (v2 is draft)
-  let latestActive = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId } });
+  let latestActive = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(JSON.parse(latestActive.body).version, 1);
 
   // Publish v2
-  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, version: 2 }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, version: 2 }) });
 
   // Latest-active now resolves to v2
-  latestActive = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId } });
+  latestActive = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(JSON.parse(latestActive.body).version, 2);
   assert.equal(JSON.parse(latestActive.body).status, "active");
 
   // v1 is still fetchable by explicit version
-  const v1 = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId, version: "1" } });
+  const v1 = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId, version: "1" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(JSON.parse(v1.body).version, 1);
   assert.equal(JSON.parse(v1.body).status, "active");
 
   // v2 is fetchable by explicit version
-  const v2 = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId, version: "2" } });
+  const v2 = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId, version: "2" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(JSON.parse(v2.body).version, 2);
   assert.equal(JSON.parse(v2.body).status, "active");
 
   // List reflects latestVersion=2, latestActiveVersion=2, status=active
-  const listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  const listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   const entry = JSON.parse(listResp.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
   assert.equal(entry.latestVersion, 2);
   assert.equal(entry.latestActiveVersion, 2);
@@ -317,18 +329,18 @@ test("versioning: both versions fetchable, latest-active updates when v2 is publ
 
 test("publish with explicit version targets that version, not latest", async () => {
   const templateId = "explicit-publish";
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
 
   // Publish v1 explicitly while v2 is the latest
-  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId, version: 1 }) });
+  await publishHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, version: 1 }) });
 
   // Latest-active resolves to v1
-  const active = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId } });
+  const active = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(JSON.parse(active.body).version, 1);
 
   // List: latestVersion=2, latestActiveVersion=1
-  const listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  const listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   const entry = JSON.parse(listResp.body).templates.find((t: { templateId: string }) => t.templateId === templateId);
   assert.equal(entry.latestVersion, 2);
   assert.equal(entry.latestActiveVersion, 1);
@@ -336,7 +348,7 @@ test("publish with explicit version targets that version, not latest", async () 
 
 test("blob store uses project adapter credentials for pdf-templates store", async () => {
   const { projectBlobStoreCallLog } = await import("../netlify/lib/blob-store.js");
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "creds-test", templateJson: validTemplate }) });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "creds-test", templateJson: validTemplate }) });
   const calls = projectBlobStoreCallLog();
   assert.ok(calls.some((c) => c.name === "pdf-templates" && c.siteID === "dr-site" && c.token === "dr-token"));
 });
@@ -355,18 +367,18 @@ test("MCP tools/list includes PDF template tools", async () => {
 
 test("MCP publish_pdf_template flips status to active and get_pdf_template returns published version", async () => {
   // Create a draft
-  const createRes = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle", templateJson: validTemplate } });
+  const createRes = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle", templateJson: validTemplate } });
   assert.equal(createRes.statusCode, 200);
   const created = JSON.parse(createRes.body).result.structuredContent;
   assert.equal(created.status, "draft");
   assert.equal(created.version, 1);
 
   // get_pdf_template with no version should return isError (no active version yet)
-  const draftGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  const draftGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
   assert.equal(JSON.parse(draftGetRes.body).result.isError, true);
 
   // Publish it
-  const publishRes = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  const publishRes = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
   assert.equal(publishRes.statusCode, 200);
   const published = JSON.parse(publishRes.body).result.structuredContent;
   assert.equal(published.projectId, "dr-lurie");
@@ -375,7 +387,7 @@ test("MCP publish_pdf_template flips status to active and get_pdf_template retur
   assert.equal(published.status, "active");
 
   // get_pdf_template with no version now returns the active version
-  const activeGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
+  const activeGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
   assert.equal(activeGetRes.statusCode, 200);
   const activeTemplate = JSON.parse(activeGetRes.body).result.structuredContent;
   assert.equal(activeTemplate.status, "active");
@@ -384,13 +396,13 @@ test("MCP publish_pdf_template flips status to active and get_pdf_template retur
 });
 
 test("MCP publish_pdf_template returns isError for nonexistent templateId", async () => {
-  const response = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { projectId: "dr-lurie", templateId: "does-not-exist" } });
+  const response = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "does-not-exist" } });
   assert.equal(response.statusCode, 200);
   assert.equal(JSON.parse(response.body).result.isError, true);
 });
 
 test("MCP create_pdf_template creates draft and returns version", async () => {
-  const response = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-create", templateJson: validTemplate, renderer: "pdfme" } });
+  const response = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-create", templateJson: validTemplate, renderer: "pdfme" } });
   assert.equal(response.statusCode, 200);
   const result = JSON.parse(response.body).result.structuredContent;
   assert.equal(result.status, "draft");
@@ -399,15 +411,15 @@ test("MCP create_pdf_template creates draft and returns version", async () => {
 });
 
 test("MCP create_pdf_template returns isError for invalid templateJson", async () => {
-  const response = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { projectId: "dr-lurie", templateJson: { schemas: [] } } });
+  const response = await mcpRpc("tools/call", { name: "create_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateJson: { schemas: [] } } });
   assert.equal(response.statusCode, 200);
   const rpcResult = JSON.parse(response.body).result;
   assert.equal(rpcResult.isError, true);
 });
 
 test("MCP get_pdf_template returns 404 content for draft without version", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "mcp-get-draft", templateJson: validTemplate }) });
-  const response = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-get-draft" } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-draft", templateJson: validTemplate }) });
+  const response = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-draft" } });
   assert.equal(response.statusCode, 200);
   const rpcResult = JSON.parse(response.body).result;
   assert.equal(rpcResult.isError, true);
@@ -415,8 +427,8 @@ test("MCP get_pdf_template returns 404 content for draft without version", async
 });
 
 test("MCP get_pdf_template returns template with explicit version", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "mcp-get-v", templateJson: validTemplate }) });
-  const response = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { projectId: "dr-lurie", templateId: "mcp-get-v", version: 1 } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-v", templateJson: validTemplate }) });
+  const response = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-v", version: 1 } });
   assert.equal(response.statusCode, 200);
   const result = JSON.parse(response.body).result.structuredContent;
   assert.equal(result.version, 1);
@@ -424,8 +436,8 @@ test("MCP get_pdf_template returns template with explicit version", async () => 
 });
 
 test("MCP list_pdf_templates returns template list", async () => {
-  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ projectId: "dr-lurie", templateId: "mcp-list-t", templateJson: validTemplate }) });
-  const response = await mcpRpc("tools/call", { name: "list_pdf_templates", arguments: { projectId: "dr-lurie" } });
+  await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-list-t", templateJson: validTemplate }) });
+  const response = await mcpRpc("tools/call", { name: "list_pdf_templates", arguments: { storage: STORAGE, projectId: "dr-lurie" } });
   assert.equal(response.statusCode, 200);
   const result = JSON.parse(response.body).result.structuredContent;
   assert.ok(Array.isArray(result.templates));

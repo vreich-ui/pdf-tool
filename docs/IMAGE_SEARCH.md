@@ -217,7 +217,7 @@ edits, variations) using the returned reference and its sha256 lock.
 ## Architecture critique
 
 - **Cyclic dependency (partially fixed here):** `artifact-core/artifacts.ts` imports
-  `agent-project-registry`, which imports the dr-lurie adapter, which imports artifact-core.
+  `project-descriptor` and the canonical `artifact-layout`, which import artifact-core.
   This branch makes the registry's adapter map lazy so module evaluation order can't crash,
   but the proper fix is inverting the dependency: artifact-core should receive store options
   as parameters (it mostly does) and never import the registry.

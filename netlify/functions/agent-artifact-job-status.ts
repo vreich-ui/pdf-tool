@@ -1,5 +1,5 @@
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody, readArtifactJob } from "../lib/agent-artifact-jobs.js";
-import { extractStorageGrantFromBody, runWithStorageGrant } from "../lib/storage-grant.js";
+import { extractRequestContextFromBody, runWithRequestContext, validateProjectAccess } from "../lib/project-descriptor.js";
 
 type FunctionEvent = {
   httpMethod: string;
@@ -29,9 +29,13 @@ export async function handler(event: FunctionEvent) {
   if (!projectId || !jobId) {
     return jsonResponse(400, { error: "projectId and jobId are required" });
   }
-  const grant = extractStorageGrantFromBody(event.body);
-  if (grant.error) return jsonResponse(400, { error: grant.error });
-  const job = await runWithStorageGrant(grant.grant, () => readArtifactJob(projectId, jobId));
+  const ctx = extractRequestContextFromBody(event.body);
+  if (ctx.error) return jsonResponse(400, { error: ctx.error, ...(ctx.errorCode ? { errorCode: ctx.errorCode } : {}) });
+  // GET requests carry projectId in query params, outside the body the binding checked —
+  // re-bind here so a grant scoped to another project cannot read this one's records.
+  const accessIssue = runWithRequestContext(ctx.ctx, () => validateProjectAccess(projectId));
+  if (accessIssue) return jsonResponse(400, { error: accessIssue });
+  const job = await runWithRequestContext(ctx.ctx, () => readArtifactJob(projectId, jobId));
   if (!job) {
     return jsonResponse(404, { error: "Artifact job not found" });
   }

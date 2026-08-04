@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { projectBlobStore } from "./../artifact-core/blob-store.js";
-import { getProjectAdapter } from "./../agent-project-registry.js";
+import { projectStoreNames, validateProjectAccess } from "./../project-descriptor.js";
 import { RenderError } from "./errors.js";
 import { BUNDLED_FONT_FAMILIES, DOC_TREE_LIMITS } from "./doc-tree/schema.js";
 
@@ -61,14 +61,9 @@ function fontSlug(family: string): string {
 }
 
 async function readProjectFontFile(projectId: string, key: string): Promise<Buffer | null> {
-  const adapter = getProjectAdapter(projectId);
-  if (!adapter) throw new RenderError("FONT_NOT_FOUND", `Unsupported projectId: ${projectId}`);
-  const storeName = adapter.config.templateStoreName;
-  if (!storeName) return null;
-  const store = await projectBlobStore(storeName, {
-    siteID: process.env[adapter.config.siteIdEnv],
-    token: process.env[adapter.config.blobsTokenEnv],
-  });
+  const accessIssue = validateProjectAccess(projectId);
+  if (accessIssue) throw new RenderError("FONT_NOT_FOUND", accessIssue);
+  const store = await projectBlobStore(projectStoreNames().templates);
   const value = await store.get(key, { type: "arrayBuffer" }).catch(() => null);
   if (value == null) return null;
   if (value instanceof ArrayBuffer) return Buffer.from(value);
@@ -79,13 +74,8 @@ async function readProjectFontFile(projectId: string, key: string): Promise<Buff
 
 async function listProjectFontFamilies(projectId: string): Promise<string[]> {
   try {
-    const adapter = getProjectAdapter(projectId);
-    const storeName = adapter?.config.templateStoreName;
-    if (!adapter || !storeName) return [];
-    const store = await projectBlobStore(storeName, {
-      siteID: process.env[adapter.config.siteIdEnv],
-      token: process.env[adapter.config.blobsTokenEnv],
-    });
+    if (validateProjectAccess(projectId)) return [];
+    const store = await projectBlobStore(projectStoreNames().templates);
     if (!store.list) return [];
     const result = (await store.list({ prefix: "fonts/" })) as { blobs?: Array<{ key: string }> };
     const families = new Set<string>();

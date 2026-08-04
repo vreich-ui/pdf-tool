@@ -12,13 +12,18 @@ ChatGPT agents remain responsible for text and structured content work through M
 
 - ChatGPT agents: article/content planning, drafts, briefs, metadata, workflow records, and project JSON updates through MCP.
 - MCP artifact tools/endpoints: enqueue artifact jobs and poll job status using `AGENT_RUN_TOKEN` server-side; responses contain job metadata and, when complete, an `ArtifactReference` only.
-- Netlify Agent SDK artifact utility: generates binary artifacts server-side. The worker calls OpenAI server-side, keeps raw bytes in local worker scope only, and persists bytes through a project adapter into the target project Blob stores.
+- Netlify Agent SDK artifact utility: generates binary artifacts server-side. The worker calls the image provider server-side, keeps raw bytes in local worker scope only, and persists bytes under the canonical layout into the caller's Blob stores (under the per-request storage grant).
 - Normal clients: direct upload paths remain available for standard client-provided files.
 - Fallback tools: `save_artifact` and `create_artifact_from_url` remain fallback paths only, not the primary MCP artifact path.
 
-### Reference-only artifact examples
+### Canonical artifact persistence
 
-`/Artifacts code examples` on `main` is reference-only. Runtime code must not import from that folder. Runtime artifact persistence lives under `netlify/lib/artifact-core/` plus project adapters under `netlify/lib/project-adapters/`. The Dr. Lurie adapter preserves the canonical `ArtifactReference` contract (`blobKey`, `sizeBytes`, `sha256`, `contentType`, `createdAtISO`, `artifactKind`, `originalFilename`, `label`, `tags`, `metadata`) and retained indexes required by the reference implementation:
+Runtime artifact persistence lives under `netlify/lib/artifact-core/` plus the canonical
+layout in `netlify/lib/artifact-layout.ts`. There is ONE blob layout for every caller —
+`{artifactKind}/{safeRequestId}/{sha256}{extension}` — and one canonical `ArtifactReference`
+contract (`blobKey`, `sizeBytes`, `sha256`, `contentType`, `createdAtISO`, `artifactKind`,
+`originalFilename`, `label`, `tags`, `metadata`) with these retained indexes, written into
+the caller's own artifact-index store:
 
 - `request-artifacts`
 - `by-request`
@@ -173,8 +178,9 @@ jobs remain durable and are resumed by their `projectId`/`jobId`, not by the MCP
 
 - `GET|POST /.netlify/functions/health` (alias `/health`)
   - Probes the pdf-tool job Blob store (write/read/delete round-trip) and reports `ok`,
-    the credential `mode` (`same-site` vs `manual`), and, on failure, the store error and
-    targeted advice. Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
+    the credential `mode` (always `same-site` — the manual-credential path was removed),
+    and, on failure, the store error and targeted advice. It probes only pdf-tool's OWN
+    store (sessions, OAuth); client storage runs under per-request grants. Requires `Authorization: Bearer AGENT_RUN_TOKEN`.
   - Use this to confirm Blobs works for artifact jobs, MCP sessions, and OAuth single-use
     tracking — e.g. `curl -H "Authorization: Bearer $AGENT_RUN_TOKEN" https://pdf-x.netlify.app/health`.
 
@@ -211,7 +217,7 @@ if you have it — the `materializationProof`. Forward the `storage` grant so pd
 cross-check the client store. The verdict runs five independent checks:
 
 - `safety` — the blobKey/reference is not a remote URL, data URI, repo path, or traversal.
-- `blobKeyBinding` — the blobKey decodes (via the project adapter's own layout) to *this*
+- `blobKeyBinding` — the blobKey decodes (via the canonical layout) to *this*
   request id and *this* sha256. Rejects hand-authored keys and copied references.
 - `attestation` — a supplied `materializationProof` is valid and binds the same tuple
   (conclusive; a supplied-but-wrong proof is a hard failure).
@@ -224,7 +230,7 @@ cross-check the client store. The verdict runs five independent checks:
 request — either the `persisted` request-scoped index entry (authoritative: only pdf-tool
 writes it, keyed by the exact request id), or a *forgery-resistant* `attestation` (one signed
 with a dedicated `ARTIFACT_ATTESTATION_SECRET` / `MCP_OAUTH_SIGNING_SECRET`, not the
-caller-held `AGENT_RUN_TOKEN`). `blobKeyBinding` uses the adapter's path-sanitized request
+caller-held `AGENT_RUN_TOKEN`). `blobKeyBinding` uses the layout's path-sanitized request
 segment, which is not injective, so it is only a cheap pre-filter; `bytesHash` corroborates
 content integrity but does not by itself bind the request. Any *contradicted* check
 (mismatched attestation, wrong indexed blobKey, tampered bytes) fails the whole verdict. The
@@ -295,7 +301,7 @@ HTTP mirrors: `POST /.netlify/functions/create-image-search-job`,
 
 `import_image_from_url` swallows any valid single image reachable at an https URL: it
 downloads server-side, converts non-native formats (gif, tiff, avif, ...) to png/jpeg,
-optimizes to the 5MB image cap, saves through the project adapter (e.g. Dr. Lurie), banks
+optimizes to the 5MB image cap, saves under the canonical layout, banks
 it as a `url_import` candidate, and synchronously returns the project-native
 `ArtifactReference` plus `candidateId` — never bytes. Optional `slot` makes the artifact
 retrievable via `get_agent_artifact_by_slot`; caller-asserted `license` info is recorded
@@ -320,17 +326,19 @@ Optional provider credentials (providers without credentials are skipped, never 
 
 ### Storage model: per-request grants (pdf-tool holds no credentials)
 
-pdf-tool is stateless compute. Instead of carrying its own Blob credentials, it accepts a
-short-lived **storage grant** on every storage-touching tool call and uses it to read/write
-the client's Netlify Blob stores — including its own job records. Agents fetch a grant from
-the client (e.g. Dr-Lurie's `get_pdf_tool_storage_grant`) and forward it as the `storage`
-argument:
+pdf-tool is stateless compute. It carries **no Blob credentials of its own**: every
+storage-touching call MUST include a short-lived **storage grant**, which pdf-tool uses to
+read/write the caller's Netlify Blob stores — including the caller's job records. The
+server-side `CLIENT_*` / `PDF_TOOL_*` env-credential fallbacks were removed; a call without
+a grant fails with the typed error code `STORAGE_GRANT_REQUIRED` and a message explaining
+exactly what to send. Callers on a Platform site fetch a grant from their artifact bridge;
+direct callers mint one for their own site and pass it as the `storage` argument:
 
 ```json
 {
   "storage": {
     "grantType": "netlify-pat",
-    "projectId": "dr-lurie",
+    "projectId": "<your project id>",
     "siteId": "<client netlify site id>",
     "token": "<client blobs token>",
     "expiresAt": "<ISO, ~1h out>",
@@ -338,23 +346,72 @@ argument:
       "artifacts": "artifacts", "artifactIndex": "artifact-index",
       "templates": "pdf-templates", "imageSearch": "image-search",
       "renderData": "pdf-render-data", "jobs": "pdf-tool-jobs"
-    }
+    },
+    "limits": { "preferredImageFormat": "png", "maxImageBytes": 5000000 }
   }
 }
 ```
 
-- The `storage` grant is advertised on every tool's input schema. The parser is tolerant
-  (`siteId`/`siteID`, missing `stores` keys fall back to canonical names) and rejects an
-  expired grant or a grant missing `siteId`/`token` with a precise error.
-- The token is treated as radioactive: it travels only in the request (tool args → the
-  background worker's POST body → worker local scope), is **never** written into a job
-  record, and is never logged or echoed.
-- Job records move to the client's `jobs` store (`pdf-tool-jobs`) under the grant, so
-  `get_*_job_status` must also carry the grant to read them back.
-- **Migration fallback:** a call with no `storage` grant falls back to the env credentials
-  below. Once all agents pass grants, delete `CLIENT_*` (and `PDF_TOOL_*`) and pdf-tool
-  needs no Blob credentials at all. MCP sessions and OAuth remain stateless/degrading and
-  never require a grant.
+- The `storage` grant is advertised (and, except on `verify_agent_artifact`, **required**)
+  on every tool's input schema. The parser is tolerant (`siteId`/`siteID`, missing `stores`
+  keys fall back to canonical names) and rejects an expired grant, a grant missing
+  `siteId`/`token`, or an unimplemented `grantType` with a precise error.
+- `grantType` is a deliberate switch point: `netlify-pat` (the token IS the Blobs
+  credential) is the only implemented type. A future `exchange` type — same shape, but
+  `token` holds an opaque value pdf-tool swaps for the real credential against a
+  client-side endpoint — plugs into `grantBlobCredentials()` without changing any caller.
+- `limits` (optional) sets output-shaping defaults: an image job that omits `requirements`
+  inherits `preferredImageFormat` / `maxImageBytes`. Explicit job requirements always win.
+- The grant's **store names are authoritative** for every resolver — artifact writes, index
+  slot/filename lookups, template reads, policy stores, and job records all use
+  `grant.stores.*`. The token is treated as radioactive: it travels only in the request
+  (tool args → the background worker's POST body → worker local scope), is **never**
+  written into a job record, and is never logged or echoed.
+- Job records live in the grant's `jobs` store (`pdf-tool-jobs`), so `get_*_job_status`
+  must carry the grant to read them back.
+- MCP sessions and OAuth state remain on pdf-tool's own same-site store, degrade
+  gracefully, and never require a grant — the transport (`initialize`, `tools/list`,
+  OAuth discovery/consent) works without one; only tool calls need the grant.
+
+### Project descriptor contract
+
+The server-side project registry/adapter model was removed: **any `projectId` works with
+zero pdf-tool-side registration.** The caller self-describes per request with an optional
+`descriptor` argument (advertised on every tool); a minimal caller sends only the grant and
+gets the defaults.
+
+```json
+{
+  "descriptor": {
+    "projectId": "<must match the request and the grant>",
+    "storeNames": { "artifactIndex": "artifact-index" },
+    "allowedModels": ["gpt-image-1", "fal-ai/flux-2/klein/9b"],
+    "defaultModel": "gpt-image-1",
+    "allowedKinds": ["image", "pdf"],
+    "requestIdPattern": "req_[a-z0-9]+_[a-z0-9]+_\\d{8}_\\d{2}"
+  }
+}
+```
+
+- **Binding (the tenant boundary):** the grant's `projectId`, the descriptor's `projectId`,
+  and the request's `projectId` must agree wherever present — enforced on every entrypoint
+  (MCP tools, HTTP endpoints, and all three background workers).
+- **Defaults when omitted:** `allowedKinds` → `image, pdf`; `defaultModel` → `gpt-image-1`;
+  `allowedModels` → the pre-refactor allowlist (`gpt-image-1`, the fal.ai flux/qwen
+  backends and their aliases — see `DEFAULT_ALLOWED_MODELS` in
+  `netlify/lib/project-descriptor.ts`), plus `AGENT_ARTIFACT_DEFAULT_MODEL` /
+  `AGENT_ARTIFACT_ALLOWED_MODELS` service additions. To TIGHTEN model policy, send
+  `descriptor.allowedModels` with exactly the models you allow.
+- `storeNames` fills in store-name keys the grant does not explicitly name; the grant wins
+  where both specify a store.
+- `requestIdPattern` (full-match) makes pdf-tool enforce the caller's request-id
+  convention: a non-conforming id fails the write instead of creating a client-side
+  orphan. The pattern language is a **safe regex subset** — literal characters, escapes
+  (`\d \D \w \W \s \S` and escaped literals), `.`, character classes, and `? * + {m}
+  {m,} {m,n}` quantifiers on single atoms; groups, alternation, anchors and
+  backreferences are rejected at parse. Matching runs on a linear-time engine (never the
+  JS RegExp backtracker), with the pattern and pattern-checked ids capped at 256 chars,
+  so no caller-supplied pattern can stall the service.
 
 ### Required environment variables
 
@@ -369,48 +426,25 @@ argument:
 - `MCP_PUBLIC_URL` (optional): canonical public base URL used in OAuth metadata/endpoints. Defaults to `URL`/`DEPLOY_PRIME_URL`, then the request Host header.
 - `MCP_SESSION_TTL_SECONDS` (optional, default 86400): idle expiry for MCP sessions.
 - `MCP_REQUIRE_SESSION` (optional): set to `1` to reject sessionless MCP requests.
-- `OPENAI_API_KEY`: adapter-provided server-only OpenAI API key used by Netlify artifact generation.
+- `OPENAI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation (a pdf-tool provider credential, not client storage).
 - `RENDER_SERVICE_URL` (required for the `typst` renderer): base URL of the Cloud Run render service (see `render-service/README.md`). Binary engines (typst; chromium in PR4) render there — Netlify inlines template/data/asset bytes per request; the storage grant never leaves Netlify. Unset ⇒ typst jobs fail with machine-readable `RENDER_SERVICE_UNCONFIGURED`.
 - `RENDER_SERVICE_SECRET` (required with `RENDER_SERVICE_URL`): shared secret sent as `x-render-secret`; the service compares it timing-safely. Set the same value on the Cloud Run service (the deploy script generates and wires one).
 - `RENDER_SERVICE_TIMEOUT_MS` (optional, default 120000): Netlify-side deadline per render-service call; expiry surfaces as `RENDER_TIMEOUT`.
 - `FAL_KEY` (required for `fal-ai/*` image models): fal.ai API key covering BOTH FLUX.2 and Qwen-Image (one queue/polling API). Unset means the fal adapter reports unavailable and jobs selecting a fal model fail with `IMAGE_PROVIDER_ERROR`; deploys without it stay fully functional on the OpenAI backend.
 - `QWEN_IMAGE_ENDPOINT_URL` (optional): overrides the fal queue base URL for `qwen` models — the Apache-2.0 self-host seam.
 - Image model routing: when a `create_agent_artifact_job` image job omits `model`, the per-project policy (`get_image_model_policy`/`set_image_model_policy`, stored at `image-model-policy.json` in the image-search store) routes by `requirements.image.usageContext` — defaults send `article_header`/`article_body`/`category_page` to `fal-ai/flux-2/klein/9b` ($0.006/MP); text-in-image contexts stay on the project default (`gpt-image-1`). An explicit `model` always wins (aliases: `flux-2` → klein/9b, `qwen-image`, `qwen-image-edit`). Jobs carry an output-only `costEstimate` (static config pricing, USD/megapixel) on create/status responses.
-- `PDF_TOOL_SITE_ID`: Netlify site ID for pdf-tool job-state Blob storage when running outside same-site Blob context.
-- `PDF_TOOL_BLOBS_TOKEN`: Netlify Blobs token for pdf-tool job-state Blob storage when running outside same-site Blob context.
-  - These back the pdf-tool job store, MCP sessions, and image-search banks. When the
-    functions run on the pdf-tool site itself, leave both **unset** so the built-in
-    same-site Blobs context (a platform-issued, auto-rotating identity — no token to expire
-    or leak) is used. Only set them (to a valid pair for the target site) when the store
-    genuinely lives on a different site (e.g. a deploy preview sharing the production job
-    store).
-  - **Rotation / incident recovery:** a revoked or stale token here previously surfaced as a
-    hard `401` (`BlobsInternalError`, 502 on the first write) with no recovery until an
-    operator fixed the credential. Every job-store operation now retries once via the
-    built-in same-site identity when it sees a `401`/`403`, so a bad token degrades to
-    "using the pdf-tool site's own store" instead of an outage — this matches the health.ts
-    diagnostic's own long-standing advice ("unset both to use the built-in same-site Blobs
-    context"), just automated per-call. Note the fallback lands on pdf-tool's *own* site's
-    store, not the originally-configured target site, so if `PDF_TOOL_SITE_ID` pointed at a
-    shared/foreign store the retry silently uses a different (empty) one instead — fine for
-    transient job records, but rotate the token promptly rather than relying on the fallback
-    long-term. To rotate: mint a new Blobs token for the target site in the Netlify UI,
-    update `PDF_TOOL_BLOBS_TOKEN`, redeploy, then confirm with `GET /health` (`blobStore.ok:
-    true`, `mode: "manual"`). If the target site's store is no longer needed, just unset both
-    vars instead of rotating.
-- `CLIENT_SITE_ID`: adapter-provided target-project site ID for artifact Blob storage when running outside same-site Blob context.
-- `CLIENT_BLOBS_TOKEN`: adapter-provided target-project Blob token for artifact Blob storage when running outside same-site Blob context.
-- pdf-tool is project-agnostic: project adapters declare which environment variables provide storage and OpenAI credentials.
-- Agents may include `model` in artifact job input; adapters define a `defaultModel`, and unsupported models are rejected.
+- **Removed (stateless refactor):** `PDF_TOOL_SITE_ID` / `PDF_TOOL_BLOBS_TOKEN` and
+  `CLIENT_SITE_ID` / `CLIENT_BLOBS_TOKEN` are no longer read anywhere. pdf-tool's own state
+  (MCP sessions, OAuth single-use tracking, the health probe) always uses the built-in
+  same-site Blobs context (a platform-issued, auto-rotating identity — no token to expire
+  or leak); ALL client storage access happens under the per-request storage grant. Unset
+  these vars on the deployment — leaving them set is harmless but misleading.
+- Agents may include `model` in artifact job input; the descriptor's `defaultModel`
+  (default `gpt-image-1`) applies otherwise, and models outside the effective allowlist
+  are rejected.
 - Artifact generation/storage stays separate from workflow ownership: agents call project MCP/workflow APIs separately after receiving an `ArtifactReference`.
 
 Never expose `OPENAI_API_KEY` to browsers, ChatGPT-hosted clients, MCP tool schemas, logs, or workflow JSON.
-
-### Supported project IDs
-
-The first configured project is:
-
-- `dr-lurie`
 
 ### Output limits
 
@@ -420,8 +454,18 @@ worker memory-safety backstop (`MAX_PDF_OUTPUT_BYTES`), which also applies when 
 `maxBytes` is provided. Image validation also runs inside `saveArtifactBytes()`.
 
 
-### Multi-project adapter model
+### Client-agnostic project model (no adapters, no registry)
 
-`netlify/lib/agent-project-registry.ts` validates `projectId` and routes jobs to a project adapter. Each adapter declares its OpenAI key env name, target Netlify Blob credential env names, artifact and index store names, artifact reference adapter, default model, allowed models, and allowed artifact kinds. Future projects should add their own adapter rather than changing Dr. Lurie contracts.
+There is no server-side project registry and no per-client adapter: adding a tenant is
+**zero pdf-tool changes**. `netlify/lib/project-descriptor.ts` resolves per-request policy
+from the caller-supplied descriptor (see "Project descriptor contract" above) and the
+storage grant; `netlify/lib/artifact-layout.ts` persists every artifact under the single
+canonical layout.
 
-For Dr. Lurie, artifact Blob keys are `{artifactKind}/{safeRequestId}/{sha256}{extension}`. Retained index keys are `request-artifacts/{requestId}/{sha256}.json`, `by-request/{requestId}/{kind}/{sha256}.json`, `by-kind/{kind}/{sha256}.json`, and `by-tag/{tag}/{sha256}.json`. Workflow mutation is not implemented in pdf-tool by design. Agents/project MCP own checkout, patch, and checkin.
+Artifact Blob keys are `{artifactKind}/{safeRequestId}/{sha256}{extension}` for every
+caller. Retained index keys are `request-artifacts/{requestId}/{sha256}.json`,
+`by-request/{requestId}/{kind}/{sha256}.json`, `by-kind/{kind}/{sha256}.json`, and
+`by-tag/{tag}/{sha256}.json` (plus by-slot / by-filename / latest-by-slot when a slot or
+filename applies), all written into the grant-named artifact-index store. Workflow mutation
+is not implemented in pdf-tool by design. Agents/project MCP own checkout, patch, and
+checkin.
