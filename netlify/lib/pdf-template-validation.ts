@@ -11,8 +11,6 @@ import { safeError, type NormalizedArtifactJobRequirements } from "./agent-artif
 import { artifactWorkerBaseUrl } from "./agent-artifact-worker-trigger.js";
 import { currentStorageGrant, forwardableGrant } from "./storage-grant.js";
 import { currentProjectDescriptor } from "./project-descriptor.js";
-import { renderPdfArtifact } from "./pdf-render/render.js";
-import { RenderError, structuredError } from "./pdf-render/errors.js";
 import {
   getPdfTemplate,
   getPdfTemplateMeta,
@@ -20,6 +18,17 @@ import {
   writePdfTemplateValidation,
   type PdfTemplateValidationReport,
 } from "./pdf-template-store.js";
+
+/**
+ * NOTE: this module deliberately does NOT import pdf-render/render.js (renderPdfArtifact).
+ * mcp.ts imports this file (for startPdfTemplateValidation / getPdfTemplateValidation, neither
+ * of which renders anything — they only enqueue/poll a report). The actual render — the only
+ * consumer of renderPdfArtifact — is runPdfTemplateValidation, which runs exclusively inside
+ * the background worker function and lives in pdf-template-validation-worker.ts instead, so
+ * that a static import of the full render-capable engine registry (pdfme-render.ts,
+ * react-pdf-render.ts, and their @pdfme/generator / @react-pdf/renderer dependencies) never
+ * becomes part of the MCP function's bundle.
+ */
 
 /** Worst-case data must fit the report record comfortably (Blobs JSON) and the render
  * engines' own input caps (typst sys.inputs 120 KB is the tightest). */
@@ -71,7 +80,7 @@ async function triggerValidationWorker(baseUrl: string | undefined, token: strin
   }
 }
 
-function stripReport(report: PdfTemplateValidationReport): Omit<PdfTemplateValidationReport, "data"> {
+export function stripReport(report: PdfTemplateValidationReport): Omit<PdfTemplateValidationReport, "data"> {
   const { data: _data, ...rest } = report;
   return rest;
 }
@@ -160,54 +169,6 @@ export async function startPdfTemplateValidation(
       intervalMs: 2000,
     },
   };
-}
-
-/** Worker body: runs the validation render on the target (possibly draft) version and
- * completes the report. Never writes artifacts. */
-export async function runPdfTemplateValidation(input: { projectId: string; templateId: string; version: number; validationId: string }) {
-  const report = await readPdfTemplateValidation(input.projectId, input.templateId, input.version);
-  if (!report) return { ok: false as const, statusCode: 404, error: "Validation report not found" };
-  if (report.validationId !== input.validationId) {
-    return { ok: false as const, statusCode: 409, error: "Validation report was superseded by a newer validate_pdf_template call" };
-  }
-
-  let completed: PdfTemplateValidationReport;
-  try {
-    const rendered = await renderPdfArtifact({
-      projectId: input.projectId,
-      templateId: input.templateId,
-      templateVersion: input.version,
-      data: report.data,
-      requirements: report.requirements as NormalizedArtifactJobRequirements | undefined,
-      mode: "validation",
-      onRequirementFailure: "collect",
-    });
-    const failures = rendered.requirementFailures ?? [];
-    completed = {
-      ...report,
-      status: failures.length === 0 ? "passed" : "failed",
-      diagnostics: rendered.diagnostics,
-      requirementFailures: failures,
-      completedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      error: undefined,
-      errorCode: undefined,
-    };
-  } catch (error) {
-    const { code, detail } = structuredError(error);
-    completed = {
-      ...report,
-      status: "failed",
-      error: safeError(error),
-      ...(code ? { errorCode: code } : {}),
-      ...(error instanceof RenderError && detail ? { requirementFailures: (detail.failures as PdfTemplateValidationReport["requirementFailures"]) ?? undefined } : {}),
-      completedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  await writePdfTemplateValidation(input.projectId, completed);
-  return { ok: true as const, statusCode: 200, ...stripReport(completed) };
 }
 
 export async function getPdfTemplateValidation(input: GetPdfTemplateValidationInput) {

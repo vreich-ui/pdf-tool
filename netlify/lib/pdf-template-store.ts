@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { projectBlobStore } from "./blob-store.js";
 import { projectStoreNames, validateProjectAccess } from "./project-descriptor.js";
 import { RenderError } from "./pdf-render/errors.js";
-import { getPdfRendererEngine } from "./pdf-render/registry.js";
+import { getPdfRendererMetadata } from "./pdf-render/registry.js";
 import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
 
 export type PdfTemplateStatus = "draft" | "active" | "disabled";
@@ -334,7 +334,7 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   // Publish gating: engines with publishGate "hard" (react-pdf, typst, chromium) require a
   // PASSED validation render for the EXACT target version — no override in v1. pdfme is
   // warn-only for back-compat with existing active templates.
-  const engine = isKnownRendererId(record.renderer) ? getPdfRendererEngine(record.renderer) : undefined;
+  const engine = isKnownRendererId(record.renderer) ? getPdfRendererMetadata(record.renderer) : undefined;
   const rawReport = await store.get(validationKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateValidationReport | null;
   const report = rawReport && rawReport.projectId === projectId ? rawReport : null;
   let validation: PublishPdfTemplateResult["validation"];

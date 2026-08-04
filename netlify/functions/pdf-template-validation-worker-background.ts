@@ -5,7 +5,7 @@
  */
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody } from "../lib/agent-artifact-jobs.js";
 import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
-import { runPdfTemplateValidation } from "../lib/pdf-template-validation.js";
+import { runPdfTemplateValidation } from "../lib/pdf-template-validation-worker.js";
 
 export const config = { name: "pdf-template-validation-worker-background" };
 
