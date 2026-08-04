@@ -121,14 +121,14 @@ async function createAndPublishTypstTemplate(templateId: string) {
   const created = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId, templateJson: { source: TYPST_SOURCE }, renderer: "typst" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: { source: TYPST_SOURCE }, renderer: "typst" }),
   });
   assert.equal(created.statusCode, 201, `create failed: ${created.body}`);
   await seedPassedValidation(templateId);
   const published = await publishHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }),
   });
   assert.equal(published.statusCode, 200, `publish failed: ${published.body}`);
 }
@@ -148,10 +148,22 @@ async function runTypstJob(templateId: string, requestSuffix: string, extras: Re
   const workerRes = await workerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", jobId: job.jobId }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }),
   });
   return { job, workerRes, workerBody: JSON.parse(workerRes.body) as Record<string, unknown> };
 }
+
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
 
 test.beforeEach(() => {
   resetMemoryBlobStores();
@@ -162,7 +174,7 @@ test("typst template: create validates source shape and rejects junk", async () 
   const bad = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "typst-bad", templateJson: { html: "<b>no</b>" }, renderer: "typst" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "typst-bad", templateJson: { html: "<b>no</b>" }, renderer: "typst" }),
   });
   assert.equal(bad.statusCode, 400);
   const body = JSON.parse(bad.body);
@@ -172,7 +184,7 @@ test("typst template: create validates source shape and rejects junk", async () 
   const good = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "typst-good", templateJson: { source: TYPST_SOURCE }, renderer: "typst" }),
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "typst-good", templateJson: { source: TYPST_SOURCE }, renderer: "typst" }),
   });
   assert.equal(good.statusCode, 201);
   assert.equal(JSON.parse(good.body).renderer, "typst");
