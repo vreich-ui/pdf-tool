@@ -28,6 +28,18 @@ const validPdfmeTemplate = {
   ]]
 };
 
+
+// Stateless refactor: every storage-touching entrypoint REQUIRES a storage grant. The
+// grant's jobs store matches the no-grant fallback name so lib-level setup and
+// grant-scoped entrypoint calls resolve the same memory store.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -41,7 +53,7 @@ test("create-pdf-template rejects unregistered renderer and lists supported valu
   const response = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateJson: { html: "<main/>" }, renderer: "weasyprint" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateJson: { html: "<main/>" }, renderer: "weasyprint" })
   });
   assert.equal(response.statusCode, 400);
   const body = JSON.parse(response.body);
@@ -53,7 +65,7 @@ test("create-pdf-template round-trips the renderer on record, get, and list", as
   const created = await createHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ projectId: "dr-lurie", templateId: "renderer-roundtrip", templateJson: validPdfmeTemplate, renderer: "pdfme" })
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "renderer-roundtrip", templateJson: validPdfmeTemplate, renderer: "pdfme" })
   });
   assert.equal(created.statusCode, 201);
   assert.equal(JSON.parse(created.body).renderer, "pdfme");
@@ -61,12 +73,13 @@ test("create-pdf-template round-trips the renderer on record, get, and list", as
   const fetched = await getHandler({
     httpMethod: "GET",
     headers: AUTH,
-    queryStringParameters: { projectId: "dr-lurie", templateId: "renderer-roundtrip", version: "1" }
+    queryStringParameters: { projectId: "dr-lurie", templateId: "renderer-roundtrip", version: "1" },
+    body: JSON.stringify({ storage: STORAGE }),
   });
   assert.equal(fetched.statusCode, 200);
   assert.equal(JSON.parse(fetched.body).renderer, "pdfme");
 
-  const listed = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" } });
+  const listed = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
   assert.equal(listed.statusCode, 200);
   const entry = JSON.parse(listed.body).templates.find((item: { templateId: string }) => item.templateId === "renderer-roundtrip");
   assert.equal(entry?.renderer, "pdfme");

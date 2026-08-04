@@ -21,6 +21,16 @@ function env() {
 
 const AUTH = { authorization: "Bearer test-token" };
 
+
+// Stateless refactor: storage-touching entrypoints require a caller storage grant.
+const STORAGE = {
+  grantType: "netlify-pat",
+  projectId: "dr-lurie",
+  siteId: "dr-site",
+  token: "dr-token",
+  stores: { jobs: "agent-artifact-jobs" }
+};
+
 test.beforeEach(() => {
   resetMemoryBlobStores();
   env();
@@ -218,7 +228,7 @@ test("MCP tools/call returns a tool error (not a crash) when the job store write
   const response = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_agent_artifact_job", arguments: { projectId: "dr-lurie", requestId: "req-store-down", artifactKind: "image", prompt: "x", filename: "x.png" } } })
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_agent_artifact_job", arguments: { storage: STORAGE, projectId: "dr-lurie", requestId: "req-store-down", artifactKind: "image", prompt: "x", filename: "x.png" } } })
   });
   assert.equal(response.statusCode, 200, "must return a JSON-RPC response, not an origin 5xx");
   const result = JSON.parse(response.body).result;

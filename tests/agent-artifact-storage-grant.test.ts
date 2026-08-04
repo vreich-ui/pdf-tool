@@ -150,12 +150,17 @@ test("create_agent_artifact_job with a grant writes the job record to the client
   assert.ok(!JSON.stringify(record).includes(SECRET_TOKEN), "job record must not contain the grant token");
 });
 
-test("create_agent_artifact_job without a grant falls back to the pdf-tool job store (migration)", async () => {
+test("create_agent_artifact_job without a grant fails loudly with the typed, self-explaining error", async () => {
+  // Stateless refactor: the env-credential migration fallback was REMOVED. A grantless call
+  // must never silently read/write pdf-tool's own (wrong, empty) stores — it fails with a
+  // typed error that names exactly what is missing and how to supply it.
   const result = await createJob(false);
-  const jobId = result.structuredContent?.jobId;
-  assert.ok(jobId);
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent?.errorCode, "STORAGE_GRANT_REQUIRED");
+  assert.match(String(result.structuredContent?.error ?? ""), /storage/);
+  assert.match(String(result.structuredContent?.error ?? ""), /grant/i);
   const defaultJobStore = await projectBlobStore("agent-artifact-jobs", {});
-  assert.ok(await defaultJobStore.get(jobBlobKey("dr-lurie", jobId), { type: "json" }), "no-grant job uses env/same-site store");
+  assert.equal(await defaultJobStore.get(jobBlobKey("dr-lurie", "any"), { type: "json" }), null, "nothing may be written without a grant");
 });
 
 test("create_agent_artifact_job with an expired grant returns a clean tool error", async () => {
