@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { z } from "zod";
 import { projectBlobStore } from "./blob-store.js";
 import { currentStorageGrant } from "./storage-grant.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
@@ -185,126 +186,6 @@ export interface ValidationIssue {
   message: string;
 }
 
-
-async function zodSafeParse(input: unknown): Promise<{ success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } } | undefined> {
-  try {
-    const { z } = await import("zod");
-    const schema = z.object({
-      projectId: z.string().min(1),
-      requestId: z.string().min(1),
-      artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
-      operation: z.enum(["generate", "edit"]).default("generate"),
-      prompt: z.string().min(1).optional(),
-      filename: z.string().min(1),
-      templateId: z.string().min(1).optional(),
-      templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
-      data: z.unknown().optional(),
-      assets: z.object({ images: z.array(z.unknown()).optional() }).optional(),
-      slot: z.string().optional(),
-      tags: z.array(z.string()).default([]),
-      label: z.string().optional(),
-      agentName: z.string().optional(),
-      promptId: z.string().optional(),
-      model: z.string().optional(),
-      sourceArtifact: z.object({ artifactReference: z.object({}).passthrough(), expectedSha256: z.string().min(1) }).optional(),
-      editMode: z.enum(["deterministic_transform", "masked_edit", "image_variation", "template_data_patch", "pdf_overlay", "pdf_transform"]).optional(),
-      maskRef: z.object({ artifactReference: z.object({}).passthrough() }).optional(),
-      baseDataRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
-      currentData: z.unknown().optional(),
-      dataPatch: z.array(z.object({ op: z.enum(["add", "replace", "remove"]), path: z.string().min(1), value: z.unknown().optional() })).optional(),
-      overlayInstructions: z.array(z.unknown()).optional(),
-      transformInstructions: z.object({}).passthrough().optional(),
-      preservation: z.object({}).passthrough().optional(),
-      editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
-      requireApproval: z.boolean().optional(),
-      approvalAction: z.string().min(1).optional(),
-      requirements: z.object({
-        // The kind-dependent ceiling is enforced in normalizeArtifactJobRequirements.
-        maxBytes: z.number().int().positive().optional(),
-        pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
-        format: z.enum(["A4", "Letter"]).optional(),
-        orientation: z.enum(["portrait", "landscape"]).optional(),
-        margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional(),
-        pdf: z.object({
-          pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
-          format: z.enum(["A4", "Letter"]).optional(),
-          orientation: z.enum(["portrait", "landscape"]).optional(),
-          margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional()
-        }).optional(),
-        image: z.object({
-          size: z.string().optional(),
-          outputFormat: z.enum(["png", "webp", "jpeg"]).optional(),
-          role: z.string().optional(),
-          usageContext: z.string().optional()
-        }).optional()
-      }).optional()
-    }).superRefine((value: ArtifactJobRequest, ctx: { addIssue: (issue: { code: string; path: string[]; message: string }) => void }) => {
-      // Stateless model: any projectId is valid — the tenant boundary is the grant/descriptor
-      // binding, not a server-side registry.
-      const accessIssue = validateProjectAccess(value.projectId);
-      if (accessIssue) {
-        ctx.addIssue({ code: "custom", path: ["projectId"], message: accessIssue });
-        return;
-      }
-      const requestIdIssue = validateProjectRequestId(value.requestId);
-      if (requestIdIssue) ctx.addIssue({ code: "custom", path: ["requestId"], message: requestIdIssue });
-      if (value.slot && !isSafeOptionalPathSegment(value.slot)) {
-        ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
-      }
-      if (value.operation === "edit") {
-        if (value.artifactKind !== "image" && value.artifactKind !== "pdf") ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
-        if (!value.sourceArtifact?.artifactReference) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
-        if (!value.sourceArtifact?.expectedSha256) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
-        if (!value.editMode) ctx.addIssue({ code: "custom", path: ["editMode"], message: "edit jobs require editMode" });
-        if (value.artifactKind === "pdf") {
-          if (!["template_data_patch", "pdf_overlay", "pdf_transform"].includes(value.editMode ?? "")) ctx.addIssue({ code: "custom", path: ["editMode"], message: "PDF edit jobs require a supported editMode" });
-          if (value.editMode === "template_data_patch" && !value.dataPatch?.length) ctx.addIssue({ code: "custom", path: ["dataPatch"], message: "template_data_patch requires dataPatch" });
-          if (value.editMode === "template_data_patch" && !value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "template_data_patch requires templateId or templateRef" });
-          if (value.editMode === "template_data_patch" && !value.baseDataRef && value.currentData === undefined) ctx.addIssue({ code: "custom", path: ["baseDataRef"], message: "template_data_patch requires baseDataRef or currentData" });
-          if (value.editMode === "pdf_overlay" && !value.overlayInstructions?.length) ctx.addIssue({ code: "custom", path: ["overlayInstructions"], message: "pdf_overlay requires overlayInstructions" });
-          if (value.editMode === "pdf_transform" && !value.transformInstructions) ctx.addIssue({ code: "custom", path: ["transformInstructions"], message: "pdf_transform requires transformInstructions" });
-        }
-        if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && (!value.editInstructions?.preserve || value.editInstructions.preserve.length === 0)) ctx.addIssue({ code: "custom", path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
-        if ((value.editMode === "masked_edit" || value.editMode === "image_variation") && !value.editInstructions?.change) ctx.addIssue({ code: "custom", path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
-        if (value.editMode === "masked_edit" && !value.maskRef) ctx.addIssue({ code: "custom", path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
-      }
-      if (value.artifactKind === "image" && !value.prompt) ctx.addIssue({ code: "custom", path: ["prompt"], message: "prompt is required for image jobs" });
-      if (value.artifactKind === "pdf") {
-        if ((value.operation ?? "generate") !== "edit" && !value.templateId && !value.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
-        if (!value.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
-      }
-      if (value.artifactKind === "image") {
-        const outputFormat = value.requirements?.image?.outputFormat ?? projectGrantLimits().preferredImageFormat ?? "png";
-        const lowerFilename = value.filename.toLowerCase();
-        const ok = outputFormat === "png" ? lowerFilename.endsWith(".png") : outputFormat === "webp" ? lowerFilename.endsWith(".webp") : (lowerFilename.endsWith(".jpg") || lowerFilename.endsWith(".jpeg"));
-        if (!ok) ctx.addIssue({ code: "custom", path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
-      }
-      const kindIssue = validateProjectArtifactKind(value.projectId, value.artifactKind);
-      if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
-      const resolvedModel = resolveProjectModel(value.projectId, value.model);
-      const modelIssue = validateProjectModel(value.projectId, resolvedModel);
-      if (modelIssue) ctx.addIssue({ code: "custom", path: ["model"], message: modelIssue });
-    });
-    const result = schema.safeParse(input);
-    if (result.success) {
-      const normalized = normalizeArtifactJobRequirements((result.data as { requirements?: unknown }).requirements, (result.data as ArtifactJobRequest).artifactKind, (result.data as ArtifactJobRequest).projectId);
-      if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
-      return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
-    }
-    return {
-      success: false,
-      error: {
-        issues: result.error.issues.map((issue: { path: Array<string | number>; message: string }) => ({
-          path: issue.path.map(String),
-          message: issue.message
-        }))
-      }
-    };
-  } catch {
-    return undefined;
-  }
-}
-
 function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind, projectId?: string): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
   // Grant-limits defaulting: a job that omits requirements (or individual image fields)
@@ -417,98 +298,150 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   };
 }
 
-export const artifactJobRequestSchema = {
-  safeParse(input: unknown): { success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } } {
-    const issues: ValidationIssue[] = [];
-    const value = input && typeof input === "object" ? input as Record<string, unknown> : undefined;
-    if (!value) {
-      return { success: false, error: { issues: [{ path: [], message: "Expected JSON object" }] } };
+/**
+ * S4: single zod-sourced validator. This schema (with its cross-field business rules in
+ * .superRefine()) is the ONLY definition of what a valid create_agent_artifact_job call
+ * looks like — the MCP tool's advertised inputSchema is generated from this exact object
+ * (see netlify/lib/mcp-tool-schemas.ts), and this same object performs the actual
+ * validation. Previously a second, hand-maintained fallback validator duplicated all of
+ * this by hand for the (unreachable-in-production) case where `import("zod")` itself
+ * failed; that duplication is exactly the F6 class of drift (the advertised schema and the
+ * enforced schema silently disagreeing) this session's mandate is to kill permanently, so
+ * the fallback is gone and zod is a normal static import.
+ */
+export function buildArtifactJobRequestSchema() {
+  return z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
+    operation: z.enum(["generate", "edit"]).default("generate"),
+    prompt: z.string().min(1).optional(),
+    filename: z.string().min(1),
+    templateId: z.string().min(1).optional(),
+    templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
+    data: z.unknown().optional(),
+    assets: z.object({ images: z.array(z.unknown()).optional() }).optional(),
+    slot: z.string().optional(),
+    tags: z.array(z.string()).default([]),
+    label: z.string().optional(),
+    agentName: z.string().optional(),
+    promptId: z.string().optional(),
+    model: z.string().optional(),
+    sourceArtifact: z.object({ artifactReference: z.object({}).passthrough(), expectedSha256: z.string().min(1) }).optional(),
+    editMode: z.enum(["deterministic_transform", "masked_edit", "image_variation", "template_data_patch", "pdf_overlay", "pdf_transform"]).optional(),
+    maskRef: z.object({ artifactReference: z.object({}).passthrough() }).optional(),
+    baseDataRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
+    currentData: z.unknown().optional(),
+    dataPatch: z.array(z.object({ op: z.enum(["add", "replace", "remove"]), path: z.string().min(1), value: z.unknown().optional() })).optional(),
+    overlayInstructions: z.array(z.unknown()).optional(),
+    transformInstructions: z.object({}).passthrough().optional(),
+    preservation: z.object({}).passthrough().optional(),
+    editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
+    requireApproval: z.boolean().optional(),
+    approvalAction: z.string().min(1).optional(),
+    requirements: z.object({
+      // The kind-dependent ceiling is enforced in normalizeArtifactJobRequirements.
+      maxBytes: z.number().int().positive().optional(),
+      pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
+      format: z.enum(["A4", "Letter"]).optional(),
+      orientation: z.enum(["portrait", "landscape"]).optional(),
+      margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional(),
+      pdf: z.object({
+        pageCount: z.object({ min: z.number().int().positive().optional(), max: z.number().int().positive().optional() }).optional(),
+        format: z.enum(["A4", "Letter"]).optional(),
+        orientation: z.enum(["portrait", "landscape"]).optional(),
+        margins: z.object({ top: z.string().optional(), right: z.string().optional(), bottom: z.string().optional(), left: z.string().optional() }).optional()
+      }).optional(),
+      image: z.object({
+        // Enum-restricted to match what was ALREADY advertised in the MCP tool schema
+        // (mcp.ts) before this session — size/outputFormat/role previously accepted any
+        // string here while the advertised schema claimed a fixed enum; that mismatch is
+        // exactly the drift class this session's single-validator work closes, so the
+        // enforced schema now matches the (unchanged) advertised contract.
+        size: z.enum(["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"]).optional(),
+        outputFormat: z.enum(["png", "webp", "jpeg"]).optional(),
+        role: z.enum(["featured"]).optional(),
+        // usageContext stays a free string: the routing policy (image-routing/policy.ts)
+        // already treats any value outside its known IMAGE_USAGE_CONTEXTS list as "no
+        // routing opinion" rather than an error, so constraining it here would be a new,
+        // unrequested restriction rather than closing real drift.
+        usageContext: z.string().optional().describe("Known values used for model routing: article_header, article_body, category_page, newsletter, open_graph, search_preview, instagram_story, ad_platform. Other values are accepted and simply skip routing.")
+      }).optional()
+    }).optional()
+  }).superRefine((value, ctx: z.RefinementCtx) => {
+    // `sourceArtifact`/`maskRef` carry passthrough (`{}.passthrough()`) artifactReference
+    // objects — validated for real shape only once materialized, not at this schema layer
+    // — so zod's inferred type is intentionally looser here than ArtifactJobRequest.
+    const typed = value as unknown as ArtifactJobRequest;
+    // Stateless model: any projectId is valid — the tenant boundary is the grant/descriptor
+    // binding, not a server-side registry.
+    const accessIssue = validateProjectAccess(typed.projectId);
+    if (accessIssue) {
+      ctx.addIssue({ code: "custom", path: ["projectId"], message: accessIssue });
+      return;
     }
-
-    const projectId = typeof value.projectId === "string" ? value.projectId.trim() : "";
-    const requestId = typeof value.requestId === "string" ? value.requestId.trim() : "";
-    const operation = value.operation === "edit" ? "edit" : "generate";
-    const prompt = typeof value.prompt === "string" ? value.prompt : undefined;
-    const filename = typeof value.filename === "string" ? value.filename.trim() : "";
-    const artifactKind = typeof value.artifactKind === "string" ? value.artifactKind : "image";
-    const templateId = typeof value.templateId === "string" ? value.templateId.trim() : undefined;
-    const templateRef = value.templateRef && typeof value.templateRef === "object" && !Array.isArray(value.templateRef) ? value.templateRef as PdfTemplateRef : undefined;
-    const data = value.data;
-    const assets = value.assets && typeof value.assets === "object" && !Array.isArray(value.assets) ? value.assets as { images?: unknown[] } : undefined;
-    const slot = typeof value.slot === "string" ? value.slot : undefined;
-    const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : [];
-    const label = typeof value.label === "string" ? value.label : undefined;
-    const agentName = typeof value.agentName === "string" ? value.agentName : undefined;
-    const promptId = typeof value.promptId === "string" ? value.promptId : undefined;
-    const model = typeof value.model === "string" ? value.model.trim() : undefined;
-    const requirementsResult = normalizeArtifactJobRequirements(value.requirements, artifactKind as ArtifactKind, projectId);
-    const sourceArtifact = value.sourceArtifact && typeof value.sourceArtifact === "object" && !Array.isArray(value.sourceArtifact) ? value.sourceArtifact as SourceArtifactLock : undefined;
-    const editMode = typeof value.editMode === "string" ? value.editMode as ArtifactEditMode : undefined;
-    const baseDataRef = value.baseDataRef && typeof value.baseDataRef === "object" && !Array.isArray(value.baseDataRef) ? value.baseDataRef as PdfTemplateRef : undefined;
-    const currentData = value.currentData;
-    const dataPatch = Array.isArray(value.dataPatch) ? value.dataPatch as ArtifactJobRequest["dataPatch"] : undefined;
-    const overlayInstructions = Array.isArray(value.overlayInstructions) ? value.overlayInstructions : undefined;
-    const transformInstructions = value.transformInstructions && typeof value.transformInstructions === "object" && !Array.isArray(value.transformInstructions) ? value.transformInstructions as Record<string, unknown> : undefined;
-    const preservation = value.preservation && typeof value.preservation === "object" && !Array.isArray(value.preservation) ? value.preservation as Record<string, unknown> : undefined;
-    const maskRef = value.maskRef && typeof value.maskRef === "object" && !Array.isArray(value.maskRef) ? value.maskRef as ArtifactReferenceHolder : undefined;
-    const rawEditInstructions = value.editInstructions && typeof value.editInstructions === "object" && !Array.isArray(value.editInstructions) ? value.editInstructions as Record<string, unknown> : undefined;
-    const editInstructions = rawEditInstructions ? { change: typeof rawEditInstructions.change === "string" ? rawEditInstructions.change : "", preserve: Array.isArray(rawEditInstructions.preserve) ? rawEditInstructions.preserve.filter((item): item is string => typeof item === "string") : [], negativeInstructions: Array.isArray(rawEditInstructions.negativeInstructions) ? rawEditInstructions.negativeInstructions.filter((item): item is string => typeof item === "string") : [] } : undefined;
-    const requireApproval = typeof value.requireApproval === "boolean" ? value.requireApproval : undefined;
-    const approvalAction = typeof value.approvalAction === "string" && value.approvalAction.trim() ? value.approvalAction.trim() : undefined;
-
-    const accessIssue = validateProjectAccess(projectId);
-    const projectSupported = !accessIssue;
-    if (accessIssue) issues.push({ path: ["projectId"], message: accessIssue });
-    if (!requestId) issues.push({ path: ["requestId"], message: "requestId is required" });
-    const requestIdIssue = requestId ? validateProjectRequestId(requestId) : undefined;
-    if (requestIdIssue) issues.push({ path: ["requestId"], message: requestIdIssue });
-    if (artifactKind === "image" && !prompt) issues.push({ path: ["prompt"], message: "prompt is required for image jobs" });
-    if (operation === "edit") {
-      if (artifactKind !== "image" && artifactKind !== "pdf") issues.push({ path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
-      if (!sourceArtifact?.artifactReference) issues.push({ path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
-      if (!sourceArtifact?.expectedSha256) issues.push({ path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
-      const supportedModes = artifactKind === "pdf" ? ["template_data_patch", "pdf_overlay", "pdf_transform"] : ["deterministic_transform", "masked_edit", "image_variation"];
-      if (!editMode || !supportedModes.includes(editMode)) issues.push({ path: ["editMode"], message: "edit jobs require a supported editMode" });
-      if (artifactKind === "pdf") {
-        if (editMode === "template_data_patch" && !dataPatch?.length) issues.push({ path: ["dataPatch"], message: "template_data_patch requires dataPatch" });
-        if (editMode === "template_data_patch" && !templateId && !templateRef) issues.push({ path: ["templateId"], message: "template_data_patch requires templateId or templateRef" });
-        if (editMode === "template_data_patch" && !baseDataRef && currentData === undefined) issues.push({ path: ["baseDataRef"], message: "template_data_patch requires baseDataRef or currentData" });
-        if (editMode === "pdf_overlay" && !overlayInstructions?.length) issues.push({ path: ["overlayInstructions"], message: "pdf_overlay requires overlayInstructions" });
-        if (editMode === "pdf_transform" && !transformInstructions) issues.push({ path: ["transformInstructions"], message: "pdf_transform requires transformInstructions" });
+    const requestIdIssue = validateProjectRequestId(typed.requestId);
+    if (requestIdIssue) ctx.addIssue({ code: "custom", path: ["requestId"], message: requestIdIssue });
+    if (typed.slot && !isSafeOptionalPathSegment(typed.slot)) {
+      ctx.addIssue({ code: "custom", path: ["slot"], message: "slot must be a safe path segment" });
+    }
+    if (typed.operation === "edit") {
+      if (typed.artifactKind !== "image" && typed.artifactKind !== "pdf") ctx.addIssue({ code: "custom", path: ["artifactKind"], message: "edit jobs require artifactKind image or pdf" });
+      if (!typed.sourceArtifact?.artifactReference) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "artifactReference"], message: "edit jobs require sourceArtifact.artifactReference" });
+      if (!typed.sourceArtifact?.expectedSha256) ctx.addIssue({ code: "custom", path: ["sourceArtifact", "expectedSha256"], message: "edit jobs require sourceArtifact.expectedSha256" });
+      if (!typed.editMode) ctx.addIssue({ code: "custom", path: ["editMode"], message: "edit jobs require editMode" });
+      if (typed.artifactKind === "pdf") {
+        if (!["template_data_patch", "pdf_overlay", "pdf_transform"].includes(typed.editMode ?? "")) ctx.addIssue({ code: "custom", path: ["editMode"], message: "PDF edit jobs require a supported editMode" });
+        if (typed.editMode === "template_data_patch" && !typed.dataPatch?.length) ctx.addIssue({ code: "custom", path: ["dataPatch"], message: "template_data_patch requires dataPatch" });
+        if (typed.editMode === "template_data_patch" && !typed.templateId && !typed.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "template_data_patch requires templateId or templateRef" });
+        if (typed.editMode === "template_data_patch" && !typed.baseDataRef && typed.currentData === undefined) ctx.addIssue({ code: "custom", path: ["baseDataRef"], message: "template_data_patch requires baseDataRef or currentData" });
+        if (typed.editMode === "pdf_overlay" && !typed.overlayInstructions?.length) ctx.addIssue({ code: "custom", path: ["overlayInstructions"], message: "pdf_overlay requires overlayInstructions" });
+        if (typed.editMode === "pdf_transform" && !typed.transformInstructions) ctx.addIssue({ code: "custom", path: ["transformInstructions"], message: "pdf_transform requires transformInstructions" });
       }
-      if ((editMode === "masked_edit" || editMode === "image_variation") && (!editInstructions?.preserve || editInstructions.preserve.length === 0)) issues.push({ path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
-      if ((editMode === "masked_edit" || editMode === "image_variation") && !editInstructions?.change) issues.push({ path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
-      if (editMode === "masked_edit" && !maskRef?.artifactReference) issues.push({ path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
+      if ((typed.editMode === "masked_edit" || typed.editMode === "image_variation") && (!typed.editInstructions?.preserve || typed.editInstructions.preserve.length === 0)) ctx.addIssue({ code: "custom", path: ["editInstructions", "preserve"], message: "masked_edit and image_variation require editInstructions.preserve" });
+      if ((typed.editMode === "masked_edit" || typed.editMode === "image_variation") && !typed.editInstructions?.change) ctx.addIssue({ code: "custom", path: ["editInstructions", "change"], message: "generative edits require editInstructions.change" });
+      if (typed.editMode === "masked_edit" && !typed.maskRef) ctx.addIssue({ code: "custom", path: ["maskRef"], message: "masked_edit requires maskRef; broad regeneration is not supported" });
     }
-    if (!filename) issues.push({ path: ["filename"], message: "filename is required" });
-    if (artifactKind === "pdf") {
-      if (operation !== "edit" && !templateId && !templateRef) issues.push({ path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
-      if (filename && !filename.toLowerCase().endsWith(".pdf")) issues.push({ path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
-      if (templateRef && (typeof templateRef.blobKey !== "string" || !templateRef.blobKey.trim())) issues.push({ path: ["templateRef", "blobKey"], message: "templateRef.blobKey is required" });
+    if (typed.artifactKind === "image" && !typed.prompt) ctx.addIssue({ code: "custom", path: ["prompt"], message: "prompt is required for image jobs" });
+    if (typed.artifactKind === "pdf") {
+      if ((typed.operation ?? "generate") !== "edit" && !typed.templateId && !typed.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
+      if (!typed.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
     }
-    issues.push(...requirementsResult.issues);
-    if (slot && !isSafeOptionalPathSegment(slot)) issues.push({ path: ["slot"], message: "slot must be a safe path segment" });
-    if (artifactKind === "image" && filename) {
-      const outputFormat = requirementsResult.requirements?.image?.outputFormat ?? "png";
-      const lower = filename.toLowerCase();
-      const ok = outputFormat === "png" ? lower.endsWith(".png") : outputFormat === "webp" ? lower.endsWith(".webp") : (lower.endsWith(".jpg") || lower.endsWith(".jpeg"));
-      if (!ok) issues.push({ path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
+    if (typed.artifactKind === "image") {
+      const outputFormat = typed.requirements?.image?.outputFormat ?? projectGrantLimits().preferredImageFormat ?? "png";
+      const lowerFilename = typed.filename.toLowerCase();
+      const ok = outputFormat === "png" ? lowerFilename.endsWith(".png") : outputFormat === "webp" ? lowerFilename.endsWith(".webp") : (lowerFilename.endsWith(".jpg") || lowerFilename.endsWith(".jpeg"));
+      if (!ok) ctx.addIssue({ code: "custom", path: ["filename"], message: `filename extension must match image outputFormat ${outputFormat}` });
     }
-    if (!["image", "pdf", "binary"].includes(artifactKind)) issues.push({ path: ["artifactKind"], message: "artifactKind must be image, pdf, or binary" });
-    const kindIssue = projectSupported ? validateProjectArtifactKind(projectId, artifactKind as ArtifactKind) : undefined;
-    if (kindIssue) issues.push({ path: ["artifactKind"], message: kindIssue });
-    const resolvedModel = projectSupported ? resolveProjectModel(projectId, model) : undefined;
-    const modelIssue = projectSupported ? validateProjectModel(projectId, resolvedModel) : undefined;
-    if (modelIssue) issues.push({ path: ["model"], message: modelIssue });
+    const kindIssue = validateProjectArtifactKind(typed.projectId, typed.artifactKind);
+    if (kindIssue) ctx.addIssue({ code: "custom", path: ["artifactKind"], message: kindIssue });
+    const resolvedModel = resolveProjectModel(typed.projectId, typed.model);
+    const modelIssue = validateProjectModel(typed.projectId, resolvedModel);
+    if (modelIssue) ctx.addIssue({ code: "custom", path: ["model"], message: modelIssue });
+  });
+}
 
-    if (issues.length > 0) return { success: false, error: { issues } };
-    return { success: true, data: { projectId, requestId, artifactKind: artifactKind as ArtifactKind, operation, prompt, filename, templateId, templateRef, data, assets, slot, tags, label, agentName, promptId, model, sourceArtifact, editMode, maskRef, editInstructions, baseDataRef, currentData, dataPatch, overlayInstructions, transformInstructions, preservation, requirements: requirementsResult.requirements, requireApproval, approvalAction } };
-  }
-};
-
+/** Cached: the schema has no per-call state, so building it once per process is safe and
+ * avoids re-constructing ~30 zod nodes on every job creation and every tools/list call. */
+let cachedArtifactJobRequestSchema: ReturnType<typeof buildArtifactJobRequestSchema> | undefined;
+export function artifactJobRequestZodSchema() {
+  if (!cachedArtifactJobRequestSchema) cachedArtifactJobRequestSchema = buildArtifactJobRequestSchema();
+  return cachedArtifactJobRequestSchema;
+}
 
 export async function validateArtifactJobRequest(input: unknown): Promise<{ success: true; data: ArtifactJobRequest } | { success: false; error: { issues: ValidationIssue[] } }> {
-  return await zodSafeParse(input) ?? artifactJobRequestSchema.safeParse(input);
+  const result = artifactJobRequestZodSchema().safeParse(input);
+  if (!result.success) {
+    return {
+      success: false,
+      error: {
+        issues: result.error.issues.map((issue: { path: Array<string | number>; message: string }) => ({ path: issue.path.map(String), message: issue.message }))
+      }
+    };
+  }
+  const normalized = normalizeArtifactJobRequirements(result.data.requirements, result.data.artifactKind as ArtifactKind, result.data.projectId);
+  if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
+  return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
 }
 
 export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed" | "blocked";

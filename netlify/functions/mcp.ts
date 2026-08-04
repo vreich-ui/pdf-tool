@@ -6,17 +6,22 @@ import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImag
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
-import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
+import { extractRequestContext, runWithRequestContext, currentProjectDescriptor } from "../lib/project-descriptor.js";
 import { recordInvocation } from "../lib/instance-metrics.js";
-import { REGISTERED_RENDERERS } from "../lib/pdf-render/registry.js";
 import { getPdfTemplateValidation, startPdfTemplateValidation, type GetPdfTemplateValidationInput, type ValidatePdfTemplateInput } from "../lib/pdf-template-validation.js";
 import { loadProjectImageModelPolicy, saveProjectImageModelPolicy, validateImageModelPolicyPatch } from "../lib/image-routing/policy.js";
 import { remainingBudgetMs, type NetlifyFunctionContext } from "../lib/execution-budget.js";
 import { artifactWorkerBaseUrl } from "../lib/agent-artifact-worker-trigger.js";
+import { currentStorageGrant, forwardableGrant, redactGrant } from "../lib/storage-grant.js";
+import { clearSessionGrant, readSessionGrant, setSessionGrant, SessionGrantRequiresLiveSessionError } from "../lib/mcp-session-grant.js";
+import { isMcpToolName, toolBusinessJsonSchema, validateToolArgs, type McpToolName } from "../lib/mcp-tool-schemas.js";
+import { buildCapabilityManifest } from "../lib/mcp-capability-manifest.js";
+import { probePdfToolOwnStorage } from "../lib/health-probe.js";
 
 type FunctionEvent = { httpMethod: string; headers?: Record<string, string | undefined>; body?: string | null; queryStringParameters?: Record<string, string | undefined> | null; path?: string; rawUrl?: string };
 type JsonRpcRequest = { jsonrpc?: string; id?: string | number | null; method?: string; params?: Record<string, unknown> };
-type ToolName = "create_agent_artifact_job" | "get_agent_artifact_job_status" | "get_agent_artifact_by_slot" | "get_agent_artifact_by_filename" | "verify_agent_artifact" | "resume_agent_artifact_job" | "create_pdf_template" | "get_pdf_template" | "list_pdf_templates" | "publish_pdf_template" | "validate_pdf_template" | "get_pdf_template_validation" | "search_images" | "get_image_search_job_status" | "get_image_search_bank" | "update_image_search_candidate" | "get_image_search_policy" | "set_image_search_policy" | "get_image_model_policy" | "set_image_model_policy" | "import_image_from_url" | "import_images_from_url";
+type ToolName = McpToolName;
+export const SERVER_VERSION = "0.3.0";
 
 // Per-request storage grant advertised on every tool, so clients (claude.ai) are permitted
 // to send it under additionalProperties:false. Credentials the client owns; pdf-tool holds
@@ -85,451 +90,214 @@ const PROJECT_DESCRIPTOR_SCHEMA = {
   }
 } as const;
 
-/** Tools that can answer without storage access (verification degrades gracefully to
- * attestation-only); every other tool REQUIRES the storage grant. */
-const GRANT_OPTIONAL_TOOLS = new Set<string>(["verify_agent_artifact"]);
+/** Tools that can answer without storage access: verification degrades gracefully to
+ * attestation-only, and health is a pre-credential discovery/liveness check (a caller needs
+ * to be able to ask "are you there, and what do you offer" before it has a grant to send).
+ * Every other tool REQUIRES the storage grant. */
+const GRANT_OPTIONAL_TOOLS = new Set<string>(["verify_agent_artifact", "health"]);
 
 /** Known tool names — the grant requirement applies only to real tools, so an unknown tool
- * still surfaces as a proper JSON-RPC "Unknown tool" error rather than a grant error. */
-let knownToolNames: Set<string> | undefined;
-function isKnownTool(name: string | undefined): boolean {
-  if (!knownToolNames) knownToolNames = new Set(baseTools.map((tool) => tool.name));
-  return typeof name === "string" && knownToolNames.has(name);
+ * still surfaces as a proper JSON-RPC "Unknown tool" error rather than a grant error. Single
+ * source: the same MCP_TOOL_SCHEMAS keys that drive validation and advertised schemas. */
+function isKnownTool(name: string | undefined): name is McpToolName {
+  return isMcpToolName(name);
 }
 
-const baseTools = [
+function outputSchema(properties: Record<string, unknown> = {}) {
+  return {
+    type: "object",
+    properties: { error: { type: "string" }, errorCode: { type: "string" }, ...properties },
+    additionalProperties: true
+  } as const;
+}
+
+interface ToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+interface ToolMetadata {
+  name: McpToolName;
+  description: string;
+  annotations: ToolAnnotations;
+  outputSchema: ReturnType<typeof outputSchema>;
+}
+
+// S4 (surface): annotations on every tool (readOnlyHint on reads, destructiveHint on the one
+// tool that can permanently delete bytes, idempotentHint/openWorldHint on the rest) plus an
+// outputSchema per tool. inputSchema is NOT listed here: it is generated from the single
+// zod schema in mcp-tool-schemas.ts (see `tools` below) rather than duplicated by hand —
+// that duplication (a hand-written JSON schema here plus separate business validation) is
+// exactly the F6 class of drift this session closes.
+const TOOL_METADATA: ToolMetadata[] = [
   {
     name: "create_agent_artifact_job",
     description: "Create a server-side artifact generation job. Returns metadata and polling instructions only; never returns image/PDF bytes.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId", "artifactKind", "filename"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        artifactKind: { type: "string", enum: ["image", "pdf"] },
-        operation: { type: "string", enum: ["generate", "edit"] },
-        sourceArtifact: { type: "object", additionalProperties: false, required: ["artifactReference", "expectedSha256"], properties: { artifactReference: { type: "object", additionalProperties: true }, expectedSha256: { type: "string" } } },
-        editMode: { type: "string", enum: ["deterministic_transform", "masked_edit", "image_variation", "template_data_patch", "pdf_overlay", "pdf_transform"] },
-        baseDataRef: { type: "object", additionalProperties: false, required: ["blobKey"], properties: { storeName: { type: "string" }, blobKey: { type: "string" }, version: { type: "number" } } },
-        currentData: { type: "object" },
-        dataPatch: { type: "array", items: { type: "object", additionalProperties: true, required: ["op", "path"], properties: { op: { type: "string", enum: ["add", "replace", "remove"] }, path: { type: "string" }, value: {} } } },
-        overlayInstructions: { type: "array", items: { type: "object", additionalProperties: true } },
-        transformInstructions: { type: "object", additionalProperties: true },
-        preservation: { type: "object", additionalProperties: true },
-        maskRef: { type: "object", additionalProperties: false, required: ["artifactReference"], properties: { artifactReference: { type: "object", additionalProperties: true } } },
-        editInstructions: { type: "object", additionalProperties: false, properties: { change: { type: "string" }, preserve: { type: "array", items: { type: "string" } }, negativeInstructions: { type: "array", items: { type: "string" } } } },
-        prompt: { type: "string" },
-        filename: { type: "string" },
-        templateId: { type: "string" },
-        templateRef: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            storeName: { type: "string" },
-            blobKey: { type: "string" },
-            version: { type: "number" }
-          },
-          required: ["blobKey"]
-        },
-        data: { type: "object" },
-        assets: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            images: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: true
-              }
-            }
-          }
-        },
-        slot: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        label: { type: "string" },
-        agentName: { type: "string" },
-        promptId: { type: "string" },
-        model: { type: "string" },
-        requireApproval: { type: "boolean", description: "Hold the job in a resumable blocked state until an operator approves it via resume_agent_artifact_job." },
-        approvalAction: { type: "string", description: "Human-readable description of the action awaiting approval; defaults from kind/operation." },
-        requirements: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            maxBytes: { type: "number" },
-            pageCount: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                min: { type: "number" },
-                max: { type: "number" }
-              }
-            },
-            format: {
-              type: "string",
-              enum: ["A4", "Letter"]
-            },
-            orientation: {
-              type: "string",
-              enum: ["portrait", "landscape"]
-            },
-            margins: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                top: { type: "string" },
-                right: { type: "string" },
-                bottom: { type: "string" },
-                left: { type: "string" }
-              }
-            },
-            image: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                size: { type: "string", enum: ["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"] },
-                outputFormat: { type: "string", enum: ["png", "webp", "jpeg"] },
-                role: { type: "string", enum: ["featured"] },
-                usageContext: { type: "string", enum: ["article_header", "article_body", "category_page", "newsletter", "open_graph", "search_preview", "instagram_story", "ad_platform"] }
-              }
-            },
-            pdf: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                pageCount: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    min: { type: "number" },
-                    max: { type: "number" }
-                  }
-                },
-                format: {
-                  type: "string",
-                  enum: ["A4", "Letter"]
-                },
-                orientation: {
-                  type: "string",
-                  enum: ["portrait", "landscape"]
-                },
-                margins: {
-                  type: "object",
-                  additionalProperties: false,
-                  properties: {
-                    top: { type: "string" },
-                    right: { type: "string" },
-                    bottom: { type: "string" },
-                    left: { type: "string" }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, artifactKind: { type: "string" }, selectedModel: { type: "string" }, destination: { type: "object" }, polling: { type: "object" }, blocked: { type: "object" } })
   },
   {
     name: "get_agent_artifact_job_status",
     description: "Get pending/running/complete/failed status for an artifact job. Completed jobs include the project-native artifactReference metadata only.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "jobId"], properties: { projectId: { type: "string" }, jobId: { type: "string" } } }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, artifactReference: { type: "object" }, artifact: { type: "object" } })
   },
   {
     name: "get_agent_artifact_by_slot",
     description: "Look up a completed artifact reference by project, request, and slot. Returns metadata only, never binary bytes.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId", "slot"], properties: { projectId: { type: "string" }, requestId: { type: "string" }, slot: { type: "string" } } }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ artifact: { type: "object" }, materializationProof: { type: "string" } })
   },
   {
     name: "get_agent_artifact_by_filename",
     description: "Look up a completed artifact reference by project, request, and filename. Returns metadata only, never binary bytes.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId", "filename"], properties: { projectId: { type: "string" }, requestId: { type: "string" }, filename: { type: "string" } } }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ artifact: { type: "object" }, materializationProof: { type: "string" } })
   },
   {
     name: "verify_agent_artifact",
     description: "Prove an ArtifactReference was materialized by pdf-tool for the current request. Pass the claimed reference (or its blobKey + sha256), the requestId, and optionally the materializationProof. Returns a verdict with per-check results and, when verified, the canonical safe reference. Rejects hand-authored blob keys, copied references, remote URLs, and data URIs. Never returns bytes.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        artifactReference: { type: "object", additionalProperties: true, description: "The claimed ArtifactReference to verify (must contain at least blobKey and sha256)" },
-        blobKey: { type: "string", description: "The claimed blobKey (alternative to artifactReference)" },
-        sha256: { type: "string", description: "The claimed sha256 (alternative to artifactReference)" },
-        materializationProof: { type: "string", description: "The signed proof pdf-tool returned with the artifact; optional but conclusive when present" }
-      }
-    }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ verified: { type: "boolean" }, checks: { type: "array" }, artifactReference: { type: "object" } })
   },
   {
     name: "resume_agent_artifact_job",
     description: "Resume an artifact job that is blocked awaiting operator approval. Requires the resumeToken from the blocked state and an operator approvalToken. On success the job returns to pending and generation proceeds.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "jobId", "resumeToken", "approvalToken"],
-      properties: {
-        projectId: { type: "string" },
-        jobId: { type: "string" },
-        resumeToken: { type: "string", description: "The resume token from the blocked state's resume.input.resumeToken" },
-        approvalToken: { type: "string", description: "The operator approval secret authorizing this job to proceed" }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" } })
   },
   {
     name: "create_pdf_template",
     description: "Create and store a versioned PDF template definition for a supported renderer. Status starts as draft; use publish_pdf_template to make it active. A templateId is pinned to one renderer for life.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "templateJson"],
-      properties: {
-        projectId: { type: "string" },
-        templateId: { type: "string", description: "Stable identifier for this template; auto-generated if omitted" },
-        templateJson: { type: "object", additionalProperties: true, description: "Renderer-specific template document. pdfme: must contain basePdf and schemas array. react-pdf: a docTree document ({docTreeVersion: 1, document: {...}}) — see docs/REACT_PDF_DOCTREE.md" },
-        renderer: { type: "string", enum: [...REGISTERED_RENDERERS], description: "Target renderer; defaults to pdfme. The enum grows as new render engines ship." },
-        label: { type: "string" },
-        tags: { type: "array", items: { type: "string" } }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, status: { type: "string" }, renderer: { type: "string" } })
   },
   {
     name: "get_pdf_template",
     description: "Retrieve a stored PDF template definition. Defaults to the latest active version; pass version to retrieve a specific version.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "templateId"],
-      properties: {
-        projectId: { type: "string" },
-        templateId: { type: "string" },
-        version: { type: "number", description: "Specific version number; omit to get the latest active version" }
-      }
-    }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, templateJson: { type: "object" } })
   },
   {
     name: "list_pdf_templates",
-    description: "List all PDF templates stored for a project, with their renderer, latest version, active version, and status.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId"],
-      properties: {
-        projectId: { type: "string" }
-      }
-    }
+    description: "List all PDF templates stored for a project, with their renderer, latest version, active version, and status. Paginated: pass `limit` (default 50, max 200) and the `nextCursor` from a previous response to page through a large project.",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ templates: { type: "array" }, nextCursor: { type: "string" } })
   },
   {
     name: "publish_pdf_template",
-    description: "Publish a PDF template version, making it the active version used for PDF generation. Defaults to the latest draft version if version is omitted. GATING: react-pdf/typst/chromium templates require a PASSED validate_pdf_template report for the exact target version (409 TEMPLATE_VALIDATION_REQUIRED/TEMPLATE_VALIDATION_FAILED otherwise); pdfme publishes warn-only (a validationWarning is returned when no passed report exists).",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "templateId"],
-      properties: {
-        projectId: { type: "string" },
-        templateId: { type: "string" },
-        version: { type: "number", description: "Specific version to publish; omit to publish the latest version" }
-      }
-    }
+    description: "Publish a PDF template version as active (defaults to latest draft). GATING: react-pdf/typst/chromium require a PASSED validate_pdf_template report for the exact version (409 otherwise); pdfme is warn-only.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, status: { type: "string" }, validation: { type: "object" }, validationWarning: { type: "string" } })
   },
   {
     name: "validate_pdf_template",
-    description: "Start a pre-publish validation render for a (draft) template version with REQUIRED worst-case sample data. Background job: poll get_pdf_template_validation (~2s interval) for the passed/failed report with diagnostics (real pageCount, per-page dimensions, layout overflows for chromium, engine warnings) and requirement failures. Never writes an artifact. A PASSED report is required to publish react-pdf/typst/chromium templates.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "templateId", "data"],
-      properties: {
-        projectId: { type: "string" },
-        templateId: { type: "string" },
-        version: { type: "number", description: "Version to validate; omit for the latest version (drafts allowed)" },
-        data: { description: "Worst-case sample data for the render. Must be complete: validation mode treats missing bindings as DATA_BINDING_ERROR." },
-        requirements: { type: "object", additionalProperties: true, description: "Same shape as job requirements (pdf.format/orientation/margins/pageCount, maxBytes); failures are reported, not thrown" }
-      }
-    }
+    description: "Start a pre-publish validation render with REQUIRED worst-case sample data. Background job: poll get_pdf_template_validation for the passed/failed report (diagnostics, requirement failures). Never writes an artifact. Required before publishing react-pdf/typst/chromium templates.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    outputSchema: outputSchema({ validationId: { type: "string" }, status: { type: "string" } })
   },
   {
     name: "get_pdf_template_validation",
     description: "Read the validation report for a template version: status (running/passed/failed), diagnostics (pageCount, pages, overflows, engineWarnings), requirementFailures, and dataSha256 of the sample data used.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "templateId"],
-      properties: {
-        projectId: { type: "string" },
-        templateId: { type: "string" },
-        version: { type: "number", description: "Version whose report to read; omit for the latest version" }
-      }
-    }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ status: { type: "string" }, diagnostics: { type: "object" }, requirementFailures: { type: "array" } })
   },
   {
     name: "search_images",
     description: "Start a least-cost image sourcing job: searches the project media library first, then online providers by ascending cost tier, and banks up to five scored candidates per request. Returns job metadata and polling instructions only; never returns image bytes.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId", "query"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        query: { type: "string", description: "Search prompt describing the desired image" },
-        count: { type: "number", description: "Desired number of new candidates (1-5); defaults to the policy candidateTarget" },
-        tags: { type: "array", items: { type: "string" } },
-        label: { type: "string" },
-        policyOverrides: { type: "object", additionalProperties: true, description: "Partial image sourcing policy merged over the stored project policy for this search only" }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, polling: { type: "object" } })
   },
   {
     name: "get_image_search_job_status",
     description: "Get pending/running/complete/failed status for an image search job. Completed jobs include the banked candidate metadata (artifact references, scores, licenses); never image bytes.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "jobId"], properties: { projectId: { type: "string" }, jobId: { type: "string" } } }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ status: { type: "string" }, result: { type: "object" } })
   },
   {
     name: "get_image_search_bank",
-    description: "Read the per-request image selection bank: all candidates across searches with states, scores, licenses, and artifact references. Metadata only, never image bytes.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId", "requestId"], properties: { projectId: { type: "string" }, requestId: { type: "string" } } }
+    description: "Read the per-request image selection bank: all candidates across searches with states, scores, licenses, and artifact references. Metadata only, never image bytes. Optionally paginated via `limit`/`cursor` (the bank itself is a single read either way).",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ bank: { type: "object" }, nextCursor: { type: "string" } })
   },
   {
     name: "update_image_search_candidate",
     description: "Update a banked candidate's state: selected (agent's choice), kept, pending_review, or discarded. Discarding with deleteArtifact=true also deletes the imported blob bytes; library-origin artifacts are never deleted.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId", "candidateId", "state"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        candidateId: { type: "string" },
-        state: { type: "string", enum: ["kept", "pending_review", "selected", "discarded"] },
-        reason: { type: "string" },
-        deleteArtifact: { type: "boolean" }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ candidate: { type: "object" }, artifactDeleted: { type: "boolean" } })
   },
   {
     name: "import_image_from_url",
-    description: "Import a single image from an https URL into the project artifact Blob store, bank it as a url_import candidate, and synchronously return its ArtifactReference plus candidateId. Non-native formats (gif, tiff, avif, ...) are converted to png/jpeg. For zip archives, folder pages, or multiple URLs use import_images_from_url. Never returns image bytes; rights clearance for direct imports is the caller's responsibility. The download/convert is bounded to this call's remaining serverless execution budget: if it can't finish in time, this returns a structured error (never a dropped connection) — retry the call, or use import_images_from_url, which runs as a background job with its own polling.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId", "url"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        url: { type: "string", description: "https URL of the image to import" },
-        filename: { type: "string", description: "Optional target filename; derived from the URL if omitted" },
-        slot: { type: "string", description: "Optional safe slot so the artifact is retrievable via get_agent_artifact_by_slot" },
-        tags: { type: "array", items: { type: "string" } },
-        label: { type: "string" },
-        license: {
-          type: "object",
-          additionalProperties: false,
-          description: "Caller-asserted license recorded in artifact metadata; defaults to unknown",
-          properties: {
-            class: { type: "string", enum: ["public-domain", "permissive", "paid", "unknown"] },
-            name: { type: "string" },
-            url: { type: "string" },
-            attribution: { type: "string" },
-            commercialUse: { type: ["boolean", "string"] }
-          }
-        },
-        maxBytes: { type: "number", description: "Optional byte cap for the stored image (max 5000000)" }
-      }
-    }
+    description: "Import a single image from an https URL, bank it as a url_import candidate, and synchronously return its ArtifactReference + candidateId. Non-native formats convert to png/jpeg. For zips, folder pages, or multiple URLs use import_images_from_url instead. Never returns bytes; rights clearance is the caller's responsibility. Bounded to this call's remaining execution budget — a near-timeout returns a structured, retryable error rather than a dropped connection.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    outputSchema: outputSchema({ artifactReference: { type: "object" }, candidateId: { type: "string" } })
   },
   {
     name: "import_images_from_url",
     description: "Start a batch url-import job: each source URL may be a direct image, a zip archive of images, or an https folder/index page (same-host images are collected). Every imported image is saved to the project artifact Blob store and banked as a url_import candidate; bounded by policy quotas (default 20 per batch, 50 per request). Returns job metadata and polling instructions; results include ArtifactReferences, never bytes.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "requestId", "urls"],
-      properties: {
-        projectId: { type: "string" },
-        requestId: { type: "string" },
-        urls: { type: "array", items: { type: "string" }, description: "https URLs: direct images, zip archives, or folder/index pages (max 50)" },
-        tags: { type: "array", items: { type: "string" } },
-        label: { type: "string" },
-        license: {
-          type: "object",
-          additionalProperties: false,
-          description: "Caller-asserted license applied to all imported images; defaults to unknown",
-          properties: {
-            class: { type: "string", enum: ["public-domain", "permissive", "paid", "unknown"] },
-            name: { type: "string" },
-            url: { type: "string" },
-            attribution: { type: "string" },
-            commercialUse: { type: ["boolean", "string"] }
-          }
-        },
-        policyOverrides: { type: "object", additionalProperties: true, description: "Partial image sourcing policy (e.g. quotas.maxUrlImportsPerBatch) merged for this job only" }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, polling: { type: "object" } })
   },
   {
     name: "get_image_search_policy",
     description: "Read the project's effective image sourcing policy JSON (stored policy merged over defaults): candidate targets, provider tiers, license rules, scoring weights, budgets, and quotas.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["projectId"], properties: { projectId: { type: "string" } } }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ policy: { type: "object" } })
   },
   {
     name: "set_image_search_policy",
     description: "Replace the project's stored image sourcing policy with the given partial policy (validated, merged over defaults). Candidate caps are clamped to five per request.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId", "policy"],
-      properties: {
-        projectId: { type: "string" },
-        policy: { type: "object", additionalProperties: true, description: "Partial ImageSourcingPolicy JSON" }
-      }
-    }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ policy: { type: "object" } })
   },
   {
     name: "get_image_model_policy",
     description: "Read the project's effective image MODEL routing policy (stored policy merged over defaults): which generation model each requirements.image.usageContext routes to when a job omits `model`. Defaults route article_header/article_body/category_page to fal-ai/flux-2/klein/9b; text-in-image contexts fall back to the project default backend. An explicit job `model` always wins.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      required: ["projectId"],
-      properties: {
-        projectId: { type: "string" }
-      }
-    }
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ policy: { type: "object" } })
   },
   {
     name: "set_image_model_policy",
     description: "Replace the project's stored image model routing policy with the given partial policy (validated, merged over defaults). Entries map usageContext to { model } (null clears an entry back to the project default backend). Models must be routable (gpt-image*, dall-e*, fal-ai/*, or a known alias like flux-2 / qwen-image) AND in the project's allowedModels.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ policy: { type: "object" } })
+  },
+  {
+    name: "set_storage_grant",
+    description: "Attach a storage grant (+ optional descriptor) to THIS session so later calls on the same Mcp-Session-Id can omit `storage`/`descriptor`. Requires a durable session (call initialize first) — fails loudly if the session is stateless-degraded. Expires no later than the grant's own expiresAt, and is scrubbed on session DELETE. A later per-call `storage`/`descriptor` always overrides the session-scoped one.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ ok: { type: "boolean" }, sessionId: { type: "string" }, expiresAt: { type: "string" } })
+  },
+  {
+    name: "health",
+    description: "Liveness + capability check: confirms pdf-tool's own storage is reachable and returns the machine-readable capability manifest (every tool, and which are required vs optional per flow). Call this first — works with no grant and with a degraded/stateless session.",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ status: { type: "string" }, manifest: { type: "object" } })
+  }
+];
+
+// Advertise the storage grant + project descriptor on every tool without repeating them by
+// hand. `storage` joins `required` (except on the grant-optional tools) so strict clients
+// can no longer omit the grant silently. Each tool's business inputSchema.properties come
+// from toolBusinessJsonSchema(name) — generated from the SAME zod schema mcp-tool-schemas.ts
+// uses to actually validate the call (see validateToolArgs in callTool below).
+const tools = TOOL_METADATA.map((tool) => {
+  const business = toolBusinessJsonSchema(tool.name) as { properties?: Record<string, unknown>; required?: string[] };
+  return {
+    name: tool.name,
+    description: tool.description,
+    annotations: tool.annotations,
+    outputSchema: tool.outputSchema,
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      required: ["projectId", "policy"],
-      properties: {
-        projectId: { type: "string" },
-        policy: { type: "object", additionalProperties: true, description: "Partial ImageModelPolicy JSON: { byUsageContext: { article_header: { model: \"flux-2\" }, ... } }" }
-      }
+      properties: { ...(business.properties ?? {}), storage: STORAGE_GRANT_SCHEMA, descriptor: PROJECT_DESCRIPTOR_SCHEMA },
+      required: GRANT_OPTIONAL_TOOLS.has(tool.name) ? (business.required ?? []) : [...(business.required ?? []), "storage"]
     }
-  }
-] as const;
-
-// Advertise the storage grant + project descriptor on every tool without repeating them in
-// 22 literals. `storage` joins `required` (except on the grant-optional tools) so strict
-// clients can no longer omit the grant silently.
-const tools = baseTools.map((tool) => ({
-  ...tool,
-  inputSchema: {
-    ...tool.inputSchema,
-    properties: { ...(tool.inputSchema as { properties?: Record<string, unknown> }).properties, storage: STORAGE_GRANT_SCHEMA, descriptor: PROJECT_DESCRIPTOR_SCHEMA },
-    ...(GRANT_OPTIONAL_TOOLS.has(tool.name)
-      ? {}
-      : { required: [...((tool.inputSchema as { required?: readonly string[] }).required ?? []), "storage"] })
-  }
-}));
+  };
+});
 
 // F4: request-derived base URLs (Origin/Host) feed the worker trigger, which carries the
 // bearer token and storage grant — resolution is centralized and allowlist-guarded.
@@ -653,20 +421,67 @@ async function checkSession(event: FunctionEvent, request: JsonRpcRequest): Prom
   return { ok: true, session };
 }
 
+/**
+ * S4 (surface): "outputSchema + drop the double-encoding (≈2× response tokens)". Every tool
+ * now advertises an outputSchema (see TOOL_METADATA above), so a spec-compliant client reads
+ * `structuredContent` rather than re-parsing `content[0].text` — the two used to carry an
+ * identical JSON.stringify of the same payload on every successful call. `content` on
+ * success is now a short fixed placeholder instead of a second full copy.
+ */
 function toolContent(structuredContent: unknown) {
-  return { content: [{ type: "text", text: JSON.stringify(structuredContent) }], structuredContent };
+  return { content: [{ type: "text", text: "OK. See structuredContent for the full result." }], structuredContent };
+}
+
+/** Error results keep the full duplicate in `content[0].text`: error payloads are small and
+ * infrequent, so the token cost the success-path optimization targets doesn't apply here,
+ * and simple text-only clients (and pdf-tool's own error-inspecting tests) read it directly. */
+function errorContent(structuredContent: unknown) {
+  return { isError: true, content: [{ type: "text", text: JSON.stringify(structuredContent) }], structuredContent };
 }
 
 async function callTool(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {
+  // S4 (surface): set_storage_grant lets a caller attach its grant (+ optional descriptor)
+  // to the session once; any later call on that Mcp-Session-Id that OMITS `storage` falls
+  // back to the session-scoped one here. A per-call `storage` always wins — this only fires
+  // when the call didn't send one — so `storage` keeps working unchanged for every caller
+  // that never calls set_storage_grant.
+  let effectiveArgs = args;
+  if (isKnownTool(name) && name !== "set_storage_grant") {
+    const argsObj = effectiveArgs && typeof effectiveArgs === "object" && !Array.isArray(effectiveArgs) ? effectiveArgs as Record<string, unknown> : {};
+    if (argsObj.storage === undefined) {
+      const sessionGrant = await readSessionGrant(getHeader(event.headers, "mcp-session-id")).catch(() => null);
+      if (sessionGrant) {
+        effectiveArgs = {
+          ...argsObj,
+          storage: forwardableGrant(sessionGrant.grant),
+          ...(argsObj.descriptor === undefined && sessionGrant.descriptor ? { descriptor: sessionGrant.descriptor } : {})
+        };
+      }
+    }
+  }
+
   // The per-request storage grant (the `storage` argument) supplies the client's Blob
   // credentials and the optional `descriptor` supplies project policy; run the whole tool
   // within both so every downstream store call picks them up. The grant is REQUIRED on
   // every storage-touching tool: pdf-tool holds no credentials of its own, so a grantless
   // call fails here with a typed, self-explaining error instead of silently reading an
   // empty store and answering "not found".
-  const extracted = extractRequestContext(args, { requireGrant: isKnownTool(name) && !GRANT_OPTIONAL_TOOLS.has(name!) });
-  if (extracted.error) return { isError: true, ...toolContent({ error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) }) };
-  return runWithRequestContext(extracted.ctx, () => callToolInner(name, args, event, ctx));
+  const extracted = extractRequestContext(effectiveArgs, { requireGrant: isKnownTool(name) && !GRANT_OPTIONAL_TOOLS.has(name!) });
+  if (extracted.error) return errorContent({ error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) });
+
+  // S4 (surface): single zod-sourced validator, enforced here at the transport layer —
+  // exactly once, before any business code runs. create_agent_artifact_job is the one
+  // exception: it already validates itself, deeper, with this exact same schema object
+  // (artifactJobRequestZodSchema) inside createAgentArtifactJob, AFTER model-routing
+  // canonicalizes `model` — validating a second time here, before that canonicalization,
+  // would be redundant work against the identical schema rather than a second source of
+  // truth, so it is intentionally skipped here.
+  if (isMcpToolName(name) && name !== "create_agent_artifact_job") {
+    const validation = validateToolArgs(name, effectiveArgs);
+    if (!validation.success) return errorContent({ error: "Invalid input", issues: validation.issues });
+  }
+
+  return runWithRequestContext(extracted.ctx, () => callToolInner(name, effectiveArgs, event, ctx));
 }
 
 async function callToolInner(name: string | undefined, args: unknown, event: FunctionEvent, ctx: { budgetMs: number }) {
@@ -674,126 +489,145 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     case "create_agent_artifact_job": {
       const result = await createAgentArtifactJob(args as CreateAgentArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_agent_artifact_job_status": {
       const result = await getAgentArtifactJobStatus(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_agent_artifact_by_slot": {
       const result = await getAgentArtifactBySlot(args as never);
-      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return { isError: true, ...toolContent(body) }; }
+      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return errorContent(body); }
       const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
       return toolContent({ ...body, artifactReference: artifact });
     }
     case "get_agent_artifact_by_filename": {
       const result = await getAgentArtifactByFilename(args as never);
-      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return { isError: true, ...toolContent(body) }; }
+      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return errorContent(body); }
       const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
       return toolContent({ ...body, artifactReference: artifact });
     }
     case "verify_agent_artifact": {
       const result = await verifyArtifactMaterialization(args as VerifyArtifactInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "resume_agent_artifact_job": {
       const result = await resumeAgentArtifactJob(args as ResumeArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "create_pdf_template": {
       const result = await createPdfTemplate(args as CreatePdfTemplateInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_pdf_template": {
       const result = await getPdfTemplateRecord(args as GetPdfTemplateInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "list_pdf_templates": {
       const result = await listPdfTemplatesResult(args as ListPdfTemplatesInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "publish_pdf_template": {
       const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "validate_pdf_template": {
       const result = await startPdfTemplateValidation(args as ValidatePdfTemplateInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_pdf_template_validation": {
       const result = await getPdfTemplateValidation(args as GetPdfTemplateValidationInput);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "search_images": {
       const result = await createImageSearchJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_image_search_job_status": {
       const result = await getImageSearchJobStatus(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_image_search_bank": {
       const result = await getImageSearchBank(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "update_image_search_candidate": {
       const result = await updateImageSearchCandidate(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "import_image_from_url": {
       const result = await importImageFromUrl(args, { budgetMs: ctx.budgetMs });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "import_images_from_url": {
       const result = await createImageImportJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_image_search_policy": {
       const result = await getImageSearchPolicy(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "set_image_search_policy": {
       const result = await setImageSearchPolicy(args as never);
       const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : { isError: true, ...toolContent(body) };
+      return ok ? toolContent(body) : errorContent(body);
     }
     case "get_image_model_policy": {
       const input = args as { projectId?: string };
-      if (!input.projectId) return { isError: true, ...toolContent({ error: "projectId is required" }) };
+      if (!input.projectId) return errorContent({ error: "projectId is required" });
       try {
         const policy = await loadProjectImageModelPolicy(input.projectId);
         return toolContent({ policy });
       } catch (error) {
-        return { isError: true, ...toolContent({ error: error instanceof Error ? error.message : "Failed to load image model policy" }) };
+        return errorContent({ error: error instanceof Error ? error.message : "Failed to load image model policy" });
       }
     }
     case "set_image_model_policy": {
       const input = args as { projectId?: string; policy?: unknown };
-      if (!input.projectId) return { isError: true, ...toolContent({ error: "projectId is required" }) };
+      if (!input.projectId) return errorContent({ error: "projectId is required" });
       const issues = validateImageModelPolicyPatch(input.policy);
-      if (issues.length > 0) return { isError: true, ...toolContent({ error: "Invalid image model policy", issues }) };
+      if (issues.length > 0) return errorContent({ error: "Invalid image model policy", issues });
       try {
         const policy = await saveProjectImageModelPolicy(input.projectId, input.policy);
         return toolContent({ policy });
       } catch (error) {
-        return { isError: true, ...toolContent({ error: error instanceof Error ? error.message : "Failed to save image model policy" }) };
+        return errorContent({ error: error instanceof Error ? error.message : "Failed to save image model policy" });
       }
+    }
+    case "set_storage_grant": {
+      const sessionId = getHeader(event.headers, "mcp-session-id");
+      const grant = currentStorageGrant();
+      if (!grant) return errorContent({ error: "storage grant is required to call set_storage_grant" });
+      try {
+        const record = await setSessionGrant(sessionId, grant, currentProjectDescriptor());
+        return toolContent({ ok: true, sessionId: record.sessionId, expiresAt: record.expiresAt, storesGranted: Object.keys(grant.explicitStores), grant: redactGrant(grant) });
+      } catch (error) {
+        if (error instanceof SessionGrantRequiresLiveSessionError) {
+          return errorContent({ error: error.message, errorCode: error.code });
+        }
+        return errorContent({ error: safeError(error) });
+      }
+    }
+    case "health": {
+      const probe = await probePdfToolOwnStorage();
+      const manifest = buildCapabilityManifest({ name: "pdf-tool-agent-artifacts", version: SERVER_VERSION });
+      return toolContent({ status: probe.ok ? "ok" : "degraded", blobStore: probe, manifest });
     }
     default:
       return undefined;
@@ -825,6 +659,10 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
     if (!sessionId) return rpcError(null, -32000, "Mcp-Session-Id header is required to end a session", undefined, 400);
     if (isStatelessMcpSessionId(sessionId)) return emptyResponse(204);
     const deleted = await deleteMcpSession(sessionId);
+    // S4: scrub any session-scoped storage grant set via set_storage_grant. Best-effort and
+    // unconditional (even when the session record itself was already gone) — a grant record
+    // must never outlive its session.
+    await clearSessionGrant(sessionId).catch(() => {});
     if (!deleted) return rpcError(null, -32001, "Session not found or expired", undefined, 404);
     return emptyResponse(204);
   }
@@ -867,7 +705,7 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
     }
     return rpcResult(request.id, {
       protocolVersion,
-      serverInfo: { name: "pdf-tool-agent-artifacts", version: "0.2.0" },
+      serverInfo: { name: "pdf-tool-agent-artifacts", version: SERVER_VERSION },
       capabilities: { tools: {} },
       instructions: SERVER_INSTRUCTIONS
     }, 200, sessionHeaders);
@@ -894,7 +732,7 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
     } catch (error) {
       // A tool implementation throwing (e.g. a Blobs outage on a write) must surface as a
       // tool error result, never crash the function into an origin 5xx / gateway 502.
-      return rpcResult(request.id, { isError: true, ...toolContent({ error: safeError(error) }) });
+      return rpcResult(request.id, errorContent({ error: safeError(error) }));
     }
   }
   return rpcError(request.id, -32601, "Method not found", { method: request.method });
