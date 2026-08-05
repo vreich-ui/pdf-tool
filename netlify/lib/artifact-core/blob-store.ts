@@ -94,7 +94,7 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
   // credential for its own stores and always wins over caller-passed static options.
   // grantBlobCredentials() is the grantType switch point (netlify-pat today; a future
   // exchange type resolves its real credential there). With no grant, options credentials
-  // (if any) apply, else the platform's built-in same-site context — which, post-stateless
+  // (if any) apply, else the platform's built-in same-site context -- which, post-stateless
   // refactor, is only ever pdf-tool's OWN state (sessions, OAuth, health probes): client
   // data access without a grant is rejected at every entrypoint before reaching here.
   const grant = currentStorageGrant();
@@ -124,11 +124,27 @@ export async function projectBlobStore(name: string, options: ProjectBlobStoreOp
 
 /**
  * Store for pdf-tool's OWN operational state: MCP sessions, OAuth single-use tracking, and
- * the health probe. Always the built-in same-site Blobs context — the PDF_TOOL_SITE_ID /
- * PDF_TOOL_BLOBS_TOKEN manual-credential path was removed with the stateless refactor
- * (client data lives exclusively behind per-request storage grants; pdf-tool's own state
- * never needs a manual credential on its own site).
+ * the health probe.
+ *
+ * Prefers the built-in same-site Blobs context, same as the stateless refactor intended --
+ * client data lives exclusively behind per-request storage grants, and pdf-tool's own state
+ * was assumed to never need a manual credential on its own site, so the PDF_TOOL_SITE_ID /
+ * PDF_TOOL_BLOBS_TOKEN path was removed outright.
+ *
+ * That assumption doesn't hold in production. Live logs on the deployed site show `initialize`
+ * failing with "The environment has not been configured to use Netlify Blobs" -- @netlify/blobs's
+ * automatic same-site context injection is not present in this deployment, for reasons outside
+ * this repo (see the pdf-tool-gap-closure-plan doc, Track 0.2). Provisioned storage should not be
+ * optional: if PDF_TOOL_SITE_ID / PDF_TOOL_BLOBS_TOKEN are set in the environment, use them
+ * explicitly rather than gambling on auto-context; if unset, fall back to the bare same-site call
+ * exactly as before, so a correctly-auto-configured deployment is unaffected. A caller-supplied
+ * grant (if one is ever active for an own-state call, which is not expected in practice) still
+ * wins over both, per projectBlobStore's existing precedence.
  */
 export async function jobBlobStore(name: string, options: ProjectBlobStoreOptions = {}): Promise<ProjectBlobStore> {
-  return projectBlobStore(name, options);
+  return projectBlobStore(name, {
+    ...options,
+    siteID: options.siteID ?? process.env.PDF_TOOL_SITE_ID,
+    token: options.token ?? process.env.PDF_TOOL_BLOBS_TOKEN
+  });
 }
