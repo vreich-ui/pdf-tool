@@ -15,6 +15,7 @@
     "@pdfme/common": "^6.1.10",
     "@pdfme/generator": "^6.1.10",
     "@pdfme/pdf-lib": "^6.1.11",
+    "@pdfme/schemas": "^6.1.10",
     "@react-pdf/renderer": "^4.5.1",
     "ajv": "^8.20.0",
     "fflate": "^0.8.3",
