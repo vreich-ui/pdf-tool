@@ -1,10 +1,10 @@
 import type { PdfRendererMetadata, TemplateValidationResult } from "../types.js";
 
 /**
- * pdfme metadata: id/executedIn/publishGate/validateTemplate only — deliberately NOT the full
+ * pdfme metadata: id/executedIn/publishGate/validateTemplate only -- deliberately NOT the full
  * render-capable engine. mcp.ts's reachable graph (pdf-template-mcp.ts, mcp-tool-schemas.ts,
  * pdf-template-store.ts's publish gating) only ever needs this half. The render half (which
- * pulls in @pdfme/generator, and transitively @pdfme/schemas's heavy main entry — bwip-js,
+ * pulls in @pdfme/generator, and transitively @pdfme/schemas's heavy main entry -- bwip-js,
  * date-fns, the full lucide icon set, air-datepicker, dompurify) lives in pdfme-render.ts,
  * imported only by pdf-render/render-registry.ts, imported only by pdf-render/render.ts,
  * imported only by the worker functions. Without this split, esbuild cannot tree-shake
@@ -21,6 +21,15 @@ export function validatePdfmeTemplate(templateJson: unknown): TemplateValidation
   const obj = templateJson as Record<string, unknown>;
   if (!("basePdf" in obj)) {
     issues.push("templateJson.basePdf is required");
+  } else if (Array.isArray(obj.basePdf)) {
+    // typeof [] === "object", so an array basePdf used to pass this check, then get silently
+    // swapped for a single-page BLANK_PDF at render time. Callers reached for it expecting
+    // one base page per schema page; point them at the shape that actually does that.
+    issues.push(
+      "templateJson.basePdf must not be an array; multi-page templates come from multiple " +
+        "entries in `schemas` (schemas[0] is page 1, schemas[1] is page 2, ...), and basePdf is " +
+        "either a base64 PDF string or a single { width, height, padding } object"
+    );
   } else {
     const t = typeof obj.basePdf;
     if (t !== "string" && (t !== "object" || obj.basePdf === null)) {
