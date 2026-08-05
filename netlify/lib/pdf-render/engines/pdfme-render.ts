@@ -1,12 +1,13 @@
 import { RenderError } from "../errors.js";
 import { pdfmeMetadata } from "./pdfme.js";
+import { buildPdfmePlugins } from "./pdfme-plugins.js";
 import type { PdfRendererEngine, RenderInput, RenderOutput } from "../types.js";
 
 /**
- * The heavy half of the pdfme engine — see pdfme.ts for why it's split out. This module (and
+ * The heavy half of the pdfme engine -- see pdfme.ts for why it's split out. This module (and
  * therefore @pdfme/generator) is reachable ONLY via pdf-render/render-registry.ts, imported
  * only by pdf-render/render.ts, imported only by the worker functions
- * (agent-artifact-worker-background.ts, agent-pdf-editing.ts, pdf-template-validation-worker.ts) —
+ * (agent-artifact-worker-background.ts, agent-pdf-editing.ts, pdf-template-validation-worker.ts) --
  * never by mcp.ts.
  */
 async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
@@ -16,7 +17,7 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   type PdfmeTemplate = Parameters<typeof generate>[0]["template"];
 
   // basePdf must be a base64 string for generate(); the store also accepts
-  // designer-format objects ({ width, height }) — normalize those to BLANK_PDF.
+  // designer-format objects ({ width, height }) -- normalize those to BLANK_PDF.
   const storedTemplate = input.template.templateJson as Record<string, unknown>;
   const normalizedTemplate: PdfmeTemplate = {
     ...storedTemplate,
@@ -29,9 +30,14 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
       : {}
   ];
 
+  // Without an explicit plugin map, generate() registers `text` and nothing else -- every
+  // other schema type fails with "Plugin or renderer for type <X> not found". See
+  // pdfme-plugins.ts for why builtInPlugins is not a substitute for this.
+  const plugins = await buildPdfmePlugins();
+
   let pdfBytes: Uint8Array;
   try {
-    pdfBytes = await generate({ template: normalizedTemplate, inputs });
+    pdfBytes = await generate({ template: normalizedTemplate, inputs, plugins });
   } catch (error) {
     throw new RenderError("RENDER_ENGINE_ERROR", `pdfme generate failed: ${error instanceof Error ? error.message : String(error)}`);
   }
