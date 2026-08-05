@@ -10,18 +10,67 @@ import type { PdfRendererEngine, RenderInput, RenderOutput } from "../types.js";
  * (agent-artifact-worker-background.ts, agent-pdf-editing.ts, pdf-template-validation-worker.ts) --
  * never by mcp.ts.
  */
+/**
+ * Resolve the stored `basePdf` into something generate() accepts, WITHOUT collapsing page count.
+ *
+ * This used to read `typeof basePdf === "string" ? basePdf : BLANK_PDF`, which silently replaced
+ * every object basePdf with BLANK_PDF -- a SINGLE-PAGE base64 A4 blank. pdfme caps output at the
+ * basePdf page count, so a template with N schema pages rendered as 1 page and pages 2..N were
+ * dropped with no error, no warning and no diagnostic. Verified against @pdfme/generator 6.1.x:
+ *
+ *     basePdf: BLANK_PDF,                 schemas: 2 pages  ->  1 page   (the bug)
+ *     basePdf: {width,height,padding},    schemas: 2 pages  ->  2 pages  (correct)
+ *
+ * pdfme v6 supports the BlankPdf object form natively and creates one blank page per schema page,
+ * so the fix is simply to stop throwing the object away.
+ *
+ * Two shapes still need handling:
+ *  - `{width, height}` with no `padding` is REJECTED by @pdfme/common ("Invalid argument:
+ *    template.basePdf"), and the store's own validator accepts it, so templates in this shape
+ *    already exist. Synthesize a zero padding rather than failing a template that used to render.
+ *  - An ARRAY basePdf was never valid pdfme input. It previously hit the `: BLANK_PDF` branch and
+ *    silently produced a wrong single-page document. Fail loudly instead -- a caller who wrote one
+ *    was reaching for multi-page support, and should be told it lives in `schemas`, not `basePdf`.
+ */
+function normalizeBasePdf(basePdf: unknown, blankPdf: string): unknown {
+  // A base64 / data-URI string, or a static PDF the caller supplied: pass through untouched.
+  // Page count then comes from that PDF, which is the caller's explicit choice.
+  if (typeof basePdf === "string") return basePdf;
+
+  if (Array.isArray(basePdf)) {
+    throw new RenderError(
+      "TEMPLATE_INVALID",
+      "templateJson.basePdf must be a base64 PDF string or a { width, height, padding } object; " +
+        "an array is not valid pdfme input. Multi-page templates come from multiple entries in " +
+        "`schemas` (schemas[0] is page 1, schemas[1] is page 2, ...), not from an array basePdf.",
+      { basePdfType: "array", length: basePdf.length }
+    );
+  }
+
+  if (basePdf && typeof basePdf === "object") {
+    const candidate = basePdf as Record<string, unknown>;
+    // Only the BlankPdf shape is meaningful here; anything else falls through to BLANK_PDF
+    // exactly as before, preserving the old behaviour for shapes we do not understand.
+    if (typeof candidate.width === "number" && typeof candidate.height === "number") {
+      return Array.isArray(candidate.padding)
+        ? candidate
+        : { ...candidate, padding: [0, 0, 0, 0] };
+    }
+  }
+
+  return blankPdf;
+}
+
 async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   const { generate } = await import("@pdfme/generator");
   const { BLANK_PDF } = await import("@pdfme/common");
 
   type PdfmeTemplate = Parameters<typeof generate>[0]["template"];
 
-  // basePdf must be a base64 string for generate(); the store also accepts
-  // designer-format objects ({ width, height }) -- normalize those to BLANK_PDF.
   const storedTemplate = input.template.templateJson as Record<string, unknown>;
   const normalizedTemplate: PdfmeTemplate = {
     ...storedTemplate,
-    basePdf: typeof storedTemplate.basePdf === "string" ? storedTemplate.basePdf : BLANK_PDF,
+    basePdf: normalizeBasePdf(storedTemplate.basePdf, BLANK_PDF),
   } as PdfmeTemplate;
 
   const inputs: Record<string, string>[] = [
