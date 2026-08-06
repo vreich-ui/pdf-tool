@@ -80,6 +80,8 @@ Artifact destinations are explicit metadata contracts containing `projectId`, `r
 
 `create_agent_artifact_job` accepts structured job fields rather than requiring agents to hide requirements in prompts. Image jobs support `requirements.image` (`size`, `outputFormat`, `role`, `usageContext`) and `requirements.maxBytes`. Image edit jobs set `operation: "edit"`, lock a `sourceArtifact` by `expectedSha256`, choose an `editMode`, and can supply `maskRef` plus `editInstructions`. Template PDF jobs use `artifactKind: "pdf"` with `templateId` or `templateRef`, structured `data`, optional `assets.images`, and both nested `requirements.pdf` and top-level `requirements` fields for `pageCount`, `format`, `orientation`, and `margins`. PDF templates remain project-owned assets in the configured project template Blob store; pdf-tool renders/saves artifacts and never mutates workflow JSON.
 
+Every image field — a pdfme `data` value bound to an `image`-type schema field, an `assets.images[].dataUri`, or a react-pdf docTree `dataUri` image — must be a `data:<mime>;base64,...` data URI that decodes to a real, complete image; a corrupted/truncated payload fails the job immediately with `IMAGE_DECODE_ERROR` naming the field (see `netlify/lib/pdf-render/image-decode.ts`), and an `http(s)://` value is rejected the same way rather than being decoded as image bytes (fetch and store it first with `import_image_from_url`/`import_images_from_url`, then reference the result). `assets.images[]` binds to a template differently per renderer — chromium via `https://render.assets.invalid/<assetId>` in HTML/CSS, typst via `image("assets/<assetId>")`, react-pdf docTree via an image node's `src: {kind:"jobAsset", assetId}` — and is not consumed at all by pdfme templates (see the top-of-file comment in `netlify/lib/pdf-render/job-assets.ts` for the full reference).
+
 #### MCP endpoint (ChatGPT Agents, Claude, MCP Inspector)
 
 - `POST https://pdf-x.netlify.app/mcp`
@@ -446,12 +448,36 @@ gets the defaults.
 
 Never expose `OPENAI_API_KEY` to browsers, ChatGPT-hosted clients, MCP tool schemas, logs, or workflow JSON.
 
+### Job lifecycle and timeouts
+
+`complete` and `failed` are the only terminal `create_agent_artifact_job` statuses; a
+job cannot stay `running` forever regardless of cause. Two layers enforce this:
+1. In-process: the worker races the actual render/generate call against its own deadline
+   (`withWorkerDeadlineTimeout` in `netlify/lib/worker-budget.ts`) and fails cleanly
+   (`WORKER_TIMEOUT_APPROACHING`) ~30s before Netlify's 15-minute background-function
+   hard kill.
+2. Reactive backstop: `get_agent_artifact_job_status` itself auto-fails
+   (`JOB_EXECUTION_TIMEOUT`) any job still `running` more than ~12 minutes after
+   `startedAt`, so a caller polling normally always observes a terminal state — even if
+   the worker process was killed outright and never got to persist a failure itself.
+
 ### Output limits
 
-Image and binary artifact output is limited to `5_000_000` bytes before persistence. PDF
+Image and binary artifact output targets `5_000_000` bytes (`MAX_IMAGE_OUTPUT_BYTES`) by
+default, or `requirements.maxBytes` when supplied. The policy is **warn, not block**: an
+image job runs best-effort optimization (format/quality/dimension reduction) to fit that
+ceiling, but if it still doesn't fit, the result is stored anyway and the job's
+`get_agent_artifact_job_status` response carries a `warnings` array (and the artifact's
+`metadata.sizeWarning`) instead of failing the job with no artifact at all. PDF
 artifacts have no product size cap; `requirements.maxBytes` may be set up to a 100 MB
 worker memory-safety backstop (`MAX_PDF_OUTPUT_BYTES`), which also applies when no
-`maxBytes` is provided. Image validation also runs inside `saveArtifactBytes()`.
+`maxBytes` is provided — PDF over-budget enforcement is block (not warn): a PDF exceeding
+`maxBytes` fails the job with `PDF_REQ_MAX_BYTES`. Image validation also runs inside
+`saveArtifactBytes()`.
+
+`requirements.image.size` accepts only `1024x1024`, `1024x1792`, `1792x1024`,
+`1536x1024`, `1024x1536` — any other value (including smaller sizes like `256x256` or
+`512x512`) is rejected by name in the response's `error` string, not just in `issues`.
 
 
 ### Client-agnostic project model (no adapters, no registry)
