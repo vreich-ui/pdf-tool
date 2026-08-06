@@ -33,7 +33,9 @@ export type RenderErrorCode =
   | "IMAGE_PROVIDER_ERROR"
   | "EDIT_MODE_UNSUPPORTED"
   | "WORKER_TIMEOUT_APPROACHING"
-  | "PROVIDER_RATE_LIMITED";
+  | "PROVIDER_RATE_LIMITED"
+  | "IMAGE_DECODE_ERROR"
+  | "JOB_EXECUTION_TIMEOUT";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

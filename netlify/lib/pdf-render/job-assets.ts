@@ -8,11 +8,32 @@
  * Store names are constrained to the stores this render is entitled to (the project's own
  * artifact/template stores plus whatever an active storage grant names) — Blobs tokens are
  * site-wide, so the store NAME is the access boundary.
+ *
+ * F3 — BINDING CONVENTION (how a template field actually references an assets.images entry;
+ * this was previously undocumented anywhere in the codebase):
+ *   - chromium: the entry's `assetId` (falling back to `name`/`id`) becomes the last path
+ *     segment of a virtual URL the template's HTML/CSS references directly, e.g.
+ *     `<img src="https://render.assets.invalid/<assetId>">` (see render-service/src/engines/
+ *     chromium.ts's VIRTUAL_ASSET_HOST / assetMap).
+ *   - typst: the entry is written to `assets/<assetId>` inside the render sandbox; the
+ *     template's .typ source loads it with `image("assets/<assetId>")` (see render-service/
+ *     src/engines/typst.ts).
+ *   - react-pdf (docTree): an `image` node's `src` is `{ kind: "jobAsset", assetId }`; the
+ *     interpreter looks up that exact `assetId` against `assets.images` at render time (see
+ *     doc-tree/interpreter.ts + engines/react-pdf-render.ts's resolveImages). This path does
+ *     NOT go through resolveJobAssetsForService (below) — react-pdf resolves images directly.
+ *   - pdfme: NOT SUPPORTED. pdfme templates bind image data directly through the per-render
+ *     `data` object (a data-URI string keyed by the schema field's `name`), never through
+ *     `assets.images` — a pdfme job's `assets` parameter is accepted by the input schema but
+ *     silently has no effect. If a pdfme image-binding-via-assets use case shows up, this is
+ *     the mismatch to close (either wire it in pdfme-render.ts, or reject `assets` on pdfme
+ *     jobs with a clear "not supported for pdfme" error instead of the current silent no-op).
  */
 import { projectBlobStore } from "../artifact-core/blob-store.js";
 import { projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
 import { RenderError } from "./errors.js";
 import { DOC_TREE_LIMITS } from "./doc-tree/schema.js";
+import { assertImageBytesDecodable, assertNotRemoteUrl } from "./image-decode.js";
 import type { RenderServiceAsset } from "./render-service-client.js";
 
 interface JobImageAssetEntry {
@@ -82,6 +103,7 @@ export async function resolveJobAssetsForService(projectId: string, assets: { im
     let contentType = entry.contentType ?? entry.artifactReference?.contentType;
 
     if (typeof entry.dataUri === "string") {
+      assertNotRemoteUrl(id, entry.dataUri);
       const comma = entry.dataUri.indexOf(",");
       if (comma < 0) continue;
       contentType = contentType ?? entry.dataUri.slice(entry.dataUri.indexOf(":") + 1, entry.dataUri.indexOf(";"));
@@ -107,6 +129,11 @@ export async function resolveJobAssetsForService(projectId: string, assets: { im
     if (totalBytes > DOC_TREE_LIMITS.maxAssetBytesTotal) {
       throw new RenderError("ASSET_TOO_LARGE", `Job assets exceed the ${DOC_TREE_LIMITS.maxAssetBytesTotal}-byte per-render budget`, { totalBytes });
     }
+
+    // F1: fail fast (IMAGE_DECODE_ERROR naming this asset) on corrupted/truncated image
+    // bytes here, BEFORE dispatching to the render service — a bad image handed to the
+    // downstream renderer is not guaranteed to fail cleanly (see image-decode.ts).
+    await assertImageBytesDecodable(id, bytes);
 
     resolved.push({
       name: safeAssetName(id),
