@@ -166,6 +166,33 @@ test("successful tool calls drop the content/structuredContent double-encoding; 
   assert.deepEqual(JSON.parse(failed.content[0].text), failed.structuredContent);
 });
 
+// ── MCP bridge parity: a tool error's statusCode must survive into structuredContent,
+// since the standalone bridge functions return it as the HTTP status and an MCP caller
+// otherwise loses the 400/404/409/503 distinction entirely. ──
+
+test("a tool error result's structuredContent carries the original statusCode", async () => {
+  const failed = await callTool("get_agent_artifact_by_slot", { projectId: "dr-lurie", requestId: "req-x", slot: "missing", storage: STORAGE });
+  assert.equal(failed.isError, true);
+  assert.equal(failed.structuredContent.statusCode, 404, "get-agent-artifact-by-slot.ts returns 404 for a missing artifact");
+  assert.equal(failed.structuredContent.error, "Artifact not found");
+
+  // A business-logic (not transport-zod) 400: slot passes the zod min(1) check but fails
+  // the path-safety check inside getAgentArtifactBySlot itself.
+  const badInput = await callTool("get_agent_artifact_by_slot", { projectId: "dr-lurie", requestId: "req-x", slot: "../escape", storage: STORAGE });
+  assert.equal(badInput.isError, true);
+  assert.equal(badInput.structuredContent.statusCode, 400);
+});
+
+test("a successful result is unchanged apart from statusCode (no statusCode added to success payloads unless it was already there)", async () => {
+  const ok = await callTool("get_image_search_policy", { projectId: "dr-lurie", storage: STORAGE });
+  assert.equal(ok.isError, undefined);
+  assert.equal("statusCode" in ok.structuredContent, false, "success payloads must not gain a statusCode field");
+
+  const okSlot = await callTool("set_image_search_policy", { projectId: "dr-lurie", storage: STORAGE, policy: {} });
+  assert.equal(okSlot.isError, undefined);
+  assert.equal("statusCode" in okSlot.structuredContent, false);
+});
+
 // ── Single zod-sourced validator enforced at the transport layer ──
 
 test("transport-layer validation rejects malformed args before business code runs, for a non-create_agent_artifact_job tool", async () => {
