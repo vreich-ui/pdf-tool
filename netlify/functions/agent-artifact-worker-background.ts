@@ -15,6 +15,7 @@ type FunctionEvent = {
   httpMethod: string;
   headers?: Record<string, string | undefined>;
   body?: string | null;
+  queryStringParameters?: Record<string, string | undefined> | null;
 };
 
 function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown } {
@@ -22,6 +23,17 @@ function parseWorkerInput(event: FunctionEvent): { projectId?: string; jobId?: s
 }
 
 export async function handler(event: FunctionEvent) {
+  // Cheap, unauthenticated liveness probe: a target for the scheduled warm-ping that keeps
+  // this function's container warm. Pre-warms the @pdfme/generator dynamic import (~2.9s)
+  // so real jobs don't pay the cold-start cost. Deliberately does no Blobs/auth work so it
+  // stays fast even on a cold container.
+  if (event.httpMethod === "GET" && event.queryStringParameters?.health === "1") {
+    // pre-warm the render engine's module graph on the warm ping so a real job does not
+    // pay the ~2.9s dynamic import; failure here must never fail the probe
+    void import("@pdfme/generator").catch(() => {});
+    return jsonResponse(200, { ok: true, function: "agent-artifact-worker-background" });
+  }
+
   if (event.httpMethod !== "POST") {
     return jsonResponse(405, { error: "Method not allowed" });
   }
