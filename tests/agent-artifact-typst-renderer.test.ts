@@ -178,7 +178,9 @@ test("typst template: create validates source shape and rejects junk", async () 
   });
   assert.equal(bad.statusCode, 400);
   const body = JSON.parse(bad.body);
-  assert.equal(body.error, "Invalid templateJson");
+  // F5: `error` folds in the field-path detail instead of the bare, uninformative message.
+  assert.match(body.error, /^Invalid templateJson: /);
+  assert.ok(body.error.includes("source"));
   assert.ok(body.issues.some((issue: string) => issue.includes("source")));
 
   const good = await createHandler({

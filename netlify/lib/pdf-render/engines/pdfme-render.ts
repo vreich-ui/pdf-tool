@@ -1,4 +1,5 @@
 import { RenderError } from "../errors.js";
+import { assertImageDataUriDecodable } from "../image-decode.js";
 import { pdfmeMetadata } from "./pdfme.js";
 import { buildPdfmePlugins } from "./pdfme-plugins.js";
 import type { PdfRendererEngine, RenderInput, RenderOutput } from "../types.js";
@@ -61,6 +62,28 @@ function normalizeBasePdf(basePdf: unknown, blankPdf: string): unknown {
   return blankPdf;
 }
 
+/**
+ * F1: pdfme's `image` plugin hands the raw data URI straight to pdf-lib's embedPng/embedJpg
+ * with no decode-failure handling of its own (see pdfme-render.ts's caller for the fuller
+ * story) — a corrupted/truncated image input must not reach that call. Collects every
+ * schema field of type "image" across all pages so its bound `data` value (if present and a
+ * string) can be decode-checked BEFORE generate() is invoked.
+ */
+function collectImageFieldNames(schemas: unknown): string[] {
+  const names: string[] = [];
+  if (!Array.isArray(schemas)) return names;
+  for (const page of schemas) {
+    if (!Array.isArray(page)) continue;
+    for (const field of page) {
+      if (field && typeof field === "object" && (field as Record<string, unknown>).type === "image") {
+        const name = (field as Record<string, unknown>).name;
+        if (typeof name === "string") names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
 async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   const { generate } = await import("@pdfme/generator");
   const { BLANK_PDF } = await import("@pdfme/common");
@@ -78,6 +101,13 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
       ? (input.data as Record<string, string>)
       : {}
   ];
+
+  for (const fieldName of collectImageFieldNames(storedTemplate.schemas)) {
+    const value = inputs[0][fieldName];
+    if (typeof value === "string" && value.length > 0) {
+      await assertImageDataUriDecodable(fieldName, value);
+    }
+  }
 
   // Without an explicit plugin map, generate() registers `text` and nothing else -- every
   // other schema type fails with "Plugin or renderer for type <X> not found". See

@@ -52,7 +52,12 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
   }
 
   const validation = validateTemplateJsonForRenderer(renderer, input.templateJson);
-  if (!validation.valid) return { ok: false as const, statusCode: 400, error: "Invalid templateJson", issues: validation.issues };
+  // F5: the bare string "Invalid templateJson" told a caller nothing about WHAT was wrong —
+  // four structurally different malformed payloads all produced the identical message, with
+  // the actual field-path detail buried in `issues` (which not every client surfaces).
+  // Fold the detail into `error` itself so it is never lost, matching the quality bar this
+  // codebase already hits for e.g. PDF_REQ_MAX_BYTES ("... actual 5364").
+  if (!validation.valid) return { ok: false as const, statusCode: 400, error: `Invalid templateJson: ${validation.issues.join("; ")}`, issues: validation.issues };
 
   try {
     const record = await savePdfTemplate({

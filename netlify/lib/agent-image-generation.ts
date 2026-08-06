@@ -3,6 +3,13 @@ import { MAX_ARTIFACT_OUTPUT_BYTES } from "./agent-artifact-jobs.js";
 export interface GeneratedImageBytes {
   bytes: Buffer;
   contentType: "image/png" | "image/jpeg" | "image/webp";
+  /**
+   * F4: the documented media policy is `over_budget: "warn"` — an image that still exceeds
+   * maxBytes after every optimization attempt is stored WITH this flag set rather than
+   * rejected outright with no artifact stored at all. Present only when the final bytes
+   * exceed the requested ceiling.
+   */
+  sizeWarning?: { maxBytes: number; actualBytes: number };
 }
 
 export interface ImageGenerationClient {
@@ -60,6 +67,14 @@ export function imageGenerationRequest(options: {
   return request;
 }
 
+export interface OptimizedImageBytes {
+  bytes: Buffer;
+  /** F4: set when the best-effort optimization still could not get under maxBytes — the
+   * media policy is warn, not block, so the caller stores these bytes anyway and surfaces
+   * this instead of failing the job with no artifact at all. */
+  sizeWarning?: { maxBytes: number; actualBytes: number };
+}
+
 export async function optimizeImageBytes(
   bytes: Buffer,
   options: {
@@ -68,12 +83,12 @@ export async function optimizeImageBytes(
     maxBytes?: number;
     inputFormat?: string;
   }
-): Promise<Buffer> {
+): Promise<OptimizedImageBytes> {
   const outputFormat = options.outputFormat ?? "png";
   const inputFormat = options.inputFormat;
 
   if (!options.size && outputFormat === inputFormat && (!options.maxBytes || bytes.byteLength <= options.maxBytes)) {
-    return bytes;
+    return { bytes };
   }
 
   const { default: sharp } = await import("sharp");
@@ -122,11 +137,14 @@ export async function optimizeImageBytes(
     }
   }
 
+  // F4: the documented media policy is warn, not block (over_budget: "warn") — this
+  // previously threw here, hard-rejecting the job with NO artifact stored even when the
+  // overage was tiny (e.g. ~2% over cap). Store the best-effort result and flag it instead.
   if (options.maxBytes && currentBytes.byteLength > options.maxBytes) {
-    throw new Error(`Generated artifact exceeds maximum size of ${options.maxBytes} bytes (got ${currentBytes.byteLength})`);
+    return { bytes: currentBytes, sizeWarning: { maxBytes: options.maxBytes, actualBytes: currentBytes.byteLength } };
   }
 
-  return currentBytes;
+  return { bytes: currentBytes };
 }
 
 /** Explicit request timeout when the caller supplies no budget-derived one. */
@@ -164,14 +182,14 @@ export async function generateImageArtifactBytes(options: {
 }): Promise<GeneratedImageBytes> {
   const outputFormat = options.outputFormat ?? "png";
   if (!options.client && process.env.NODE_ENV === "test" && process.env.AGENT_ARTIFACT_TEST_IMAGE_B64) {
-    let bytes = Buffer.from(process.env.AGENT_ARTIFACT_TEST_IMAGE_B64, "base64");
-    bytes = await optimizeImageBytes(bytes, {
+    const raw = Buffer.from(process.env.AGENT_ARTIFACT_TEST_IMAGE_B64, "base64");
+    const optimized = await optimizeImageBytes(raw, {
       size: options.size,
       outputFormat,
       maxBytes: options.maxBytes,
       inputFormat: "png"
     });
-    return { bytes, contentType: contentTypeFromFormat(outputFormat) };
+    return { bytes: optimized.bytes, contentType: contentTypeFromFormat(outputFormat), ...(optimized.sizeWarning ? { sizeWarning: optimized.sizeWarning } : {}) };
   }
 
   const client = options.client ?? await defaultOpenAIClient(options.apiKey, options.timeoutMs);
@@ -185,12 +203,12 @@ export async function generateImageArtifactBytes(options: {
   if (!b64) {
     throw new Error("Image generation response did not include base64 image data");
   }
-  let bytes = Buffer.from(b64, "base64");
-  bytes = await optimizeImageBytes(bytes, {
+  const raw = Buffer.from(b64, "base64");
+  const optimized = await optimizeImageBytes(raw, {
     size: options.size,
     outputFormat,
     maxBytes: options.maxBytes,
     inputFormat: outputFormat
   });
-  return { bytes, contentType: contentTypeFromFormat(outputFormat) };
+  return { bytes: optimized.bytes, contentType: contentTypeFromFormat(outputFormat), ...(optimized.sizeWarning ? { sizeWarning: optimized.sizeWarning } : {}) };
 }

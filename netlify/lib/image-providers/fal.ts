@@ -118,8 +118,8 @@ async function runFalModel(options: {
   let bytes = Buffer.from(await downloadResponse.arrayBuffer());
 
   const outputFormat = options.outputFormat ?? "png";
-  bytes = await optimizeImageBytes(bytes, { outputFormat, size: options.size, maxBytes: options.maxBytes });
-  return { bytes, contentType: contentTypeForImageOutputFormat(outputFormat) };
+  const optimized = await optimizeImageBytes(bytes, { outputFormat, size: options.size, maxBytes: options.maxBytes });
+  return { bytes: optimized.bytes, contentType: contentTypeForImageOutputFormat(outputFormat), ...(optimized.sizeWarning ? { sizeWarning: optimized.sizeWarning } : {}) };
 }
 
 export const falImageProvider: ImageProvider = {

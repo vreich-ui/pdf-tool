@@ -62,6 +62,35 @@ export function assertWorkerBudget(deadline: WorkerDeadline | undefined, what: s
   }
 }
 
+/**
+ * F1 backstop: races `promise` against the worker's own deadline so a job that hangs
+ * (rather than throwing) is failed cleanly ~30s before Netlify's hard platform kill,
+ * instead of sitting in `status: "running"` forever with no failure ever persisted. This
+ * only guards against I/O-bound hangs (a stalled fetch, an async decode that never
+ * settles) — a genuinely synchronous, CPU-bound infinite loop still blocks the event loop
+ * and this cannot preempt it; the proactive image-decode validation in image-decode.ts is
+ * the primary defense for that class of input. When no deadline is in scope (tests, local
+ * tooling) this is a no-op passthrough.
+ */
+export function withWorkerDeadlineTimeout<T>(promise: Promise<T>, deadline: WorkerDeadline | undefined, what: string): Promise<T> {
+  if (!deadline) return promise;
+  const remaining = remainingWorkerBudgetMs(deadline);
+  if (!Number.isFinite(remaining)) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new RenderError(
+        "WORKER_TIMEOUT_APPROACHING",
+        `Worker deadline reached during ${what}; failing cleanly instead of hanging past the platform background cap`,
+        { what, startedAtMs: deadline.startedAtMs, deadlineMs: deadline.deadlineMs }
+      ));
+    }, remaining);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); }
+    );
+  });
+}
+
 /** Case-insensitive header lookup supporting both Headers-like objects and plain records. */
 export function httpHeaderValue(headers: unknown, name: string): string | undefined {
   if (!headers) return undefined;

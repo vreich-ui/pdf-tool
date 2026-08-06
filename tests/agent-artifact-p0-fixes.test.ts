@@ -152,7 +152,9 @@ test("F4: request-derived hosts resolve only against the configured allowlist", 
 
 // --- F5: image byte ceiling enforced by default --------------------------------------------
 
-test("F5: an image job with no requirements.maxBytes rejects output above the 5 MB ceiling", async () => {
+test("F4/F5: an image job with no requirements.maxBytes WARNS (not rejects) output above the 5 MB ceiling", async () => {
+  // F4: the documented media policy is over_budget: "warn" — an oversize image is stored
+  // with a warning flag, not rejected outright with no artifact stored at all.
   const big = await oversizedNoisePng();
   const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-p0-f5-src", artifactKind: "image", filename: "big.png", contentType: "image/png", bytes: big, tags: [] });
   const job = await createArtifactJob({
@@ -169,11 +171,14 @@ test("F5: an image job with no requirements.maxBytes rejects output above the 5 
   });
   assert.equal(job.requirements?.maxBytes, undefined, "fixture precondition: job carries no explicit maxBytes");
   const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
-  assert.equal(response.statusCode, 500);
-  assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.status, "complete");
+  assert.ok(Array.isArray(body.warnings) && body.warnings.length > 0, "over-budget result must be flagged, not silently accepted");
   const stored = await readArtifactJob("dr-lurie", job.jobId);
-  assert.equal(stored?.status, "failed");
-  assert.equal(stored?.artifactReference, undefined);
+  assert.equal(stored?.status, "complete");
+  assert.ok(stored?.artifactReference, "the artifact must be stored despite being over budget (warn, not block)");
+  assert.ok(stored?.warnings?.some((w) => /exceeds requested maxBytes/.test(w)));
 });
 
 // --- F6: approval gate is part of the advertised input schema ------------------------------

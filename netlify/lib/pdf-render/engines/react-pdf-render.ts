@@ -18,6 +18,7 @@ import { resolveFonts, type FontRequest } from "../fonts.js";
 import { BUNDLED_FONT_FAMILIES, DOC_TREE_LIMITS } from "../doc-tree/schema.js";
 import { collectDocTreeRefs, imageSrcKey, validateDocTree, type DocTreeImageRef } from "../doc-tree/validate.js";
 import { interpretDocTree, type ResolvedImage } from "../doc-tree/interpreter.js";
+import { assertImageBytesDecodable, assertNotRemoteUrl } from "../image-decode.js";
 import { reactPdfMetadata } from "./react-pdf.js";
 import type { PdfRendererEngine, RenderInput, RenderOutput } from "../types.js";
 
@@ -44,6 +45,11 @@ function sniffImageFormat(bytes: Buffer): "png" | "jpg" | "webp" | undefined {
 
 async function toRenderableImage(bytes: Buffer, ref: string): Promise<ResolvedImage> {
   const format = sniffImageFormat(bytes);
+  // F1: magic-byte sniffing above only inspects the first few bytes — a truncated/corrupted
+  // body can carry a valid-looking header and still sail through. Force a full decode here,
+  // before handing bytes to @react-pdf/renderer, which is not hardened to fail fast (or at
+  // all) on malformed input; see image-decode.ts.
+  await assertImageBytesDecodable(ref, bytes);
   if (format === "png" || format === "jpg") return { data: bytes, format };
   if (format === "webp") {
     // react-pdf renders PNG/JPG only; transcode webp via sharp (already a dependency).
@@ -86,6 +92,9 @@ async function readArtifactImage(projectId: string, storeName: string | undefine
 }
 
 function decodeDataUri(value: string, ref: string): Buffer {
+  // F3: reject a remote URL with a clear message instead of decoding the URL string itself
+  // as image bytes (which fails opaquely downstream — see image-decode.ts).
+  assertNotRemoteUrl(ref, value);
   const comma = value.indexOf(",");
   if (comma < 0) throw new RenderError("ASSET_NOT_FOUND", `Malformed data URI for image "${ref}"`, { ref });
   const bytes = Buffer.from(value.slice(comma + 1), "base64");
