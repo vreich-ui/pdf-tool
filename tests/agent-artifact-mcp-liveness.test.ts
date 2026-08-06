@@ -55,4 +55,41 @@ test("MCP request logging includes instance age, cold-start flag, and remaining 
   assert.equal(typeof entry.instanceInvocations, "number");
   assert.equal(typeof entry.coldStart, "boolean");
   assert.equal(entry.remainingBudgetMs, 6_000); // 8000ms platform clock minus the 2s safety margin
+  assert.equal("tool" in entry, false, "tools/list has no single tool name; `tool` must be omitted");
+});
+
+// ── Observability: the per-request log's `method` is the literal string "tools/call" for
+// every tool call, which is useless for per-tool breakdowns — the tool name itself must be
+// logged separately so e.g. error-rate-by-tool is measurable from logs alone. ──
+
+async function loggedMcpRequest(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  process.env.AGENT_RUN_TOKEN = "test-token";
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (line: string) => { lines.push(line); };
+  try {
+    await mcpHandler(
+      { httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify(body) },
+      { getRemainingTimeInMillis: () => 8_000 }
+    );
+  } finally {
+    console.log = originalLog;
+  }
+  const entry = lines.map((line) => { try { return JSON.parse(line); } catch { return undefined; } }).find((parsed) => parsed?.event === "mcp_request");
+  assert.ok(entry, "expected a logged mcp_request entry");
+  return entry;
+}
+
+test("MCP request logging includes `tool` for tools/call", async () => {
+  const entry = await loggedMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "health", arguments: {} } });
+  assert.equal(entry.method, "tools/call");
+  assert.equal(entry.tool, "health");
+});
+
+test("MCP request logging omits `tool` for tools/list and initialize", async () => {
+  const listEntry = await loggedMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal("tool" in listEntry, false);
+
+  const initEntry = await loggedMcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+  assert.equal("tool" in initEntry, false);
 });

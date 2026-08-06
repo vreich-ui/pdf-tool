@@ -498,110 +498,110 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
   switch (name as ToolName) {
     case "create_agent_artifact_job": {
       const result = await createAgentArtifactJob(args as CreateAgentArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_agent_artifact_job_status": {
       const result = await getAgentArtifactJobStatus(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_agent_artifact_by_slot": {
       const result = await getAgentArtifactBySlot(args as never);
-      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return errorContent(body); }
+      if (!result.ok) { const { statusCode, ok: _ok, ...body } = result; return errorContent({ ...body, statusCode }); }
       const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
       return toolContent({ ...body, artifactReference: artifact });
     }
     case "get_agent_artifact_by_filename": {
       const result = await getAgentArtifactByFilename(args as never);
-      if (!result.ok) { const { statusCode: _statusCode, ok: _ok, ...body } = result; return errorContent(body); }
+      if (!result.ok) { const { statusCode, ok: _ok, ...body } = result; return errorContent({ ...body, statusCode }); }
       const { statusCode: _statusCode, ok: _ok, artifact, ...body } = result;
       return toolContent({ ...body, artifactReference: artifact });
     }
     case "verify_agent_artifact": {
       const result = await verifyArtifactMaterialization(args as VerifyArtifactInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "resume_agent_artifact_job": {
       const result = await resumeAgentArtifactJob(args as ResumeArtifactJobInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "create_pdf_template": {
       const result = await createPdfTemplate(args as CreatePdfTemplateInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_pdf_template": {
       const result = await getPdfTemplateRecord(args as GetPdfTemplateInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "list_pdf_templates": {
       const result = await listPdfTemplatesResult(args as ListPdfTemplatesInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "publish_pdf_template": {
       const result = await publishPdfTemplateRecord(args as PublishPdfTemplateInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "delete_pdf_template": {
       const result = await archivePdfTemplateRecord(args as ArchivePdfTemplateInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "validate_pdf_template": {
       const result = await startPdfTemplateValidation(args as ValidatePdfTemplateInput, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_pdf_template_validation": {
       const result = await getPdfTemplateValidation(args as GetPdfTemplateValidationInput);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "search_images": {
       const result = await createImageSearchJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_image_search_job_status": {
       const result = await getImageSearchJobStatus(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_image_search_bank": {
       const result = await getImageSearchBank(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "update_image_search_candidate": {
       const result = await updateImageSearchCandidate(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "import_image_from_url": {
       const result = await importImageFromUrl(args, { budgetMs: ctx.budgetMs });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "import_images_from_url": {
       const result = await createImageImportJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_image_search_policy": {
       const result = await getImageSearchPolicy(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "set_image_search_policy": {
       const result = await setImageSearchPolicy(args as never);
-      const { statusCode: _statusCode, ok, ...body } = result;
-      return ok ? toolContent(body) : errorContent(body);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }
     case "get_image_model_policy": {
       const input = args as { projectId?: string };
@@ -697,6 +697,8 @@ export async function handler(event: FunctionEvent, context?: NetlifyFunctionCon
   console.log(JSON.stringify({
     event: "mcp_request",
     method: request.method,
+    ...(request.method === "tools/call" && typeof request.params?.name === "string"
+      ? { tool: request.params.name } : {}),
     instanceAgeMs: instance.instanceAgeMs,
     instanceInvocations: instance.instanceInvocations,
     coldStart: instance.isColdStart,
