@@ -215,8 +215,13 @@ test("react-pdf template: invalid docTree is rejected at create time with issues
   const created = await createReactPdfTemplate("rp-invalid", bad);
   assert.equal(created.statusCode, 400);
   const body = JSON.parse(created.body);
-  assert.equal(body.error, "Invalid templateJson");
+  // F5: the bare "Invalid templateJson" message told a caller nothing about WHAT was wrong;
+  // `error` must now fold in the same field-path detail as `issues` so it is never lost.
+  assert.match(body.error, /^Invalid templateJson: /);
   assert.ok(Array.isArray(body.issues) && body.issues.length > 0, "validation issues must be listed");
+  for (const issue of body.issues) {
+    assert.ok(body.error.includes(issue), `error must include issue detail: ${issue}`);
+  }
 });
 
 test("react-pdf end-to-end: job renders a real two-page A4 PDF with Hebrew text and a jobAsset image", async () => {

@@ -316,8 +316,10 @@ test("worker: pdfme job stores executor=pdfme, requiresAI=false, selectedModel=u
     label: undefined,
   });
 
-  // selectedModel is set to the project default at creation time, before route resolution
-  assert.equal(job.selectedModel, "gpt-image-1", "selectedModel is stale at creation (pre-fix baseline)");
+  // F5 (cosmetic): pdf jobs never route through a model — selectedModel is no longer set at
+  // all at creation time for artifactKind "pdf" (previously it carried the misleading project
+  // default, e.g. "gpt-image-1", until the worker's route resolution cleared it).
+  assert.equal(job.selectedModel, undefined, "selectedModel must not be set for pdf jobs, even at creation");
   assert.equal(job.executor, undefined, "executor is absent at creation");
   assert.equal(job.requiresAI, undefined, "requiresAI is absent at creation");
 

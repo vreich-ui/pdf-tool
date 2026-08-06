@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { validateArtifactJobRequest, createArtifactJob, getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError, updateArtifactJob } from "../lib/agent-artifact-jobs.js";
+import { validateArtifactJobRequest, createArtifactJob, formatValidationIssues, getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError, updateArtifactJob } from "../lib/agent-artifact-jobs.js";
 import { artifactWorkerBaseUrl, triggerWorker } from "../lib/agent-artifact-worker-trigger.js";
 import { extractRequestContextFromBody, runWithRequestContext } from "../lib/project-descriptor.js";
 import { buildBlockedState, evaluateApprovalRequirement } from "../lib/agent-artifact-approval.js";
@@ -31,7 +31,8 @@ export async function handler(event: FunctionEvent) {
   return runWithRequestContext(ctx.ctx, async () => {
     const parsed = await validateArtifactJobRequest(parsedBody);
     if (!parsed.success) {
-      return jsonResponse(400, { error: "Invalid artifact job input", issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
+      // F5: name the offending field(s) in `error` itself instead of the generic message.
+      return jsonResponse(400, { error: `Invalid artifact job input: ${formatValidationIssues(parsed.error.issues)}`, issues: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
     }
     // Operator-approval gate: hold the job in a resumable blocked state instead of running it.
     const requirement = evaluateApprovalRequirement(parsed.data);
