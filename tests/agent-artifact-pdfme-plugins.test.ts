@@ -138,12 +138,14 @@ const BROKEN_TYPES: Array<{
     data: { pic: TINY_PNG },
   },
   {
-    // NOTE: the table plugin reads headStyles/bodyStyles/tableStyles unguarded. A schema
-    // carrying only head/headWidthPercentages/content -- which looks complete, and which the
-    // store's structural validator accepts -- dies inside generate() with
-    // "Cannot read properties of undefined (reading 'alignment')". So this fixture mirrors
-    // @pdfme/schemas' own table.propPanel.defaultSchema. Tightening template validation to
-    // catch that at authoring time is tracked separately; it is not a registration bug.
+    // NOTE: the table plugin reads headWidthPercentages/tableStyles/headStyles/bodyStyles/
+    // columnStyles unguarded (getTableOptions in @pdfme/schemas). A schema omitting any of
+    // these previously looked complete to the store's structural validator and died inside
+    // generate() with "Cannot read properties of undefined (reading 'reduce'/'alignment')".
+    // validatePdfmeTemplate (pdfme.ts) now rejects an incomplete table schema at create time
+    // instead — see the negative-path tests below — so this fixture mirrors @pdfme/schemas'
+    // own table.propPanel.defaultSchema, which is exactly what create_pdf_template now
+    // requires.
     type: "table",
     element: {
       name: "grid",
@@ -283,4 +285,104 @@ test("pdfme plugins: an unknown schema type still fails with a named error, not 
       return true;
     }
   );
+});
+
+// -- F2: an incomplete table schema field is rejected at CREATE time, not render time ------
+
+test("pdfme plugins: table schema missing headWidthPercentages is rejected at create time", async () => {
+  const template = templateWith({
+    name: "grid",
+    type: "table",
+    position: { x: 10, y: 10 },
+    width: 150,
+    height: 40,
+    head: ["A", "B"],
+    // headWidthPercentages, tableStyles, headStyles, bodyStyles, columnStyles all omitted --
+    // this is exactly the shape that used to be accepted here and then die inside generate()
+    // with "Cannot read properties of undefined (reading 'reduce')".
+  });
+  const created = await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "table-incomplete", templateJson: template }),
+  });
+  assert.equal(created.statusCode, 400, `expected create to reject an incomplete table schema, got: ${created.body}`);
+  const body = JSON.parse(created.body);
+  assert.match(body.error, /headWidthPercentages/);
+  assert.ok(body.issues.some((issue: string) => issue.includes("tableStyles")));
+  assert.ok(body.issues.some((issue: string) => issue.includes("headStyles")));
+  assert.ok(body.issues.some((issue: string) => issue.includes("bodyStyles")));
+  assert.ok(body.issues.some((issue: string) => issue.includes("columnStyles")));
+});
+
+test("pdfme plugins: table schema with a mismatched head/headWidthPercentages length is rejected at create time", async () => {
+  const template = templateWith({
+    name: "grid",
+    type: "table",
+    position: { x: 10, y: 10 },
+    width: 150,
+    height: 40,
+    head: ["A", "B", "C"],
+    headWidthPercentages: [50, 50],
+    tableStyles: {},
+    headStyles: {},
+    bodyStyles: {},
+    columnStyles: {},
+  });
+  const created = await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "table-mismatched", templateJson: template }),
+  });
+  assert.equal(created.statusCode, 400);
+  const body = JSON.parse(created.body);
+  assert.ok(body.issues.some((issue: string) => issue.includes("headWidthPercentages") && issue.includes("same length")));
+});
+
+test("pdfme plugins: a raw (non-stringified) table content array is rejected, not a stringified one", async () => {
+  const template = templateWith({
+    name: "grid",
+    type: "table",
+    position: { x: 10, y: 10 },
+    width: 150,
+    height: 40,
+    head: ["A", "B"],
+    headWidthPercentages: [50, 50],
+    tableStyles: {},
+    headStyles: {},
+    bodyStyles: {},
+    columnStyles: {},
+    content: [["1", "2"]], // raw array, not JSON.stringify(...)
+  });
+  const created = await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "table-raw-content", templateJson: template }),
+  });
+  assert.equal(created.statusCode, 400);
+  const body = JSON.parse(created.body);
+  assert.ok(body.issues.some((issue: string) => issue.includes("content") && issue.includes("JSON-stringified")));
+});
+
+test("pdfme plugins: a complete table schema (matching @pdfme/schemas defaultSchema) is accepted", async () => {
+  const template = templateWith({
+    name: "grid",
+    type: "table",
+    position: { x: 10, y: 10 },
+    width: 150,
+    height: 40,
+    showHead: true,
+    head: ["A", "B"],
+    headWidthPercentages: [50, 50],
+    tableStyles: { borderColor: "#000000", borderWidth: 0.3 },
+    headStyles: {},
+    bodyStyles: {},
+    columnStyles: {},
+  });
+  const created = await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "table-complete", templateJson: template }),
+  });
+  assert.equal(created.statusCode, 201, `expected a complete table schema to be accepted, got: ${created.body}`);
 });
