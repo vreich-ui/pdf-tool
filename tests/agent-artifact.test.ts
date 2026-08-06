@@ -312,6 +312,9 @@ test("structured image requirements reject unsupported values and enforce maxByt
   assert.equal(response.statusCode, 400);
   assert.deepEqual(JSON.parse(response.body).issues[0].path, ["filename"]);
 
+  // F4: maxBytes still applies (best-effort optimization runs), but the media policy is
+  // warn, not block — a result that still can't fit is returned with sizeWarning set
+  // rather than the workflow rejecting outright.
   const tooLarge = pngBytes.toString("base64");
   const job = await createArtifactJob({
     projectId: "dr-lurie",
@@ -323,7 +326,9 @@ test("structured image requirements reject unsupported values and enforce maxByt
     label: undefined,
     requirements: { maxBytes: 10, image: { size: "1024x1024", outputFormat: "png", role: "featured" } }
   });
-  await assert.rejects(() => executeAgentArtifactWorkflow(job, { imageClient: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
+  const result = await executeAgentArtifactWorkflow(job, { imageClient: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } });
+  assert.ok(result.sizeWarning, "still-oversize result must be flagged with sizeWarning");
+  assert.equal(result.sizeWarning?.maxBytes, 10);
 });
 
 test("structured image role and usageContext are stored as artifact metadata", async () => {
@@ -484,9 +489,11 @@ test("failed generation updates job as failed", async () => {
   assert.equal(stored?.status, "failed");
 });
 
-test("output over max bytes is rejected", async () => {
+test("output still over max bytes after optimization is stored WITH a sizeWarning (F4: warn, not block)", async () => {
   const tooLarge = pngBytes.toString("base64");
-  await assert.rejects(() => generateImageArtifactBytes({ prompt: "x", model: "test-image-model", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } }), /maximum size/);
+  const result = await generateImageArtifactBytes({ prompt: "x", model: "test-image-model", maxBytes: 10, client: { images: { generate: async () => ({ data: [{ b64_json: tooLarge }] }) } } });
+  assert.ok(result.bytes.byteLength > 0, "bytes must still be produced, not discarded");
+  assert.deepEqual(result.sizeWarning, { maxBytes: 10, actualBytes: result.bytes.byteLength });
 });
 
 
@@ -1082,7 +1089,7 @@ test("deterministic compression to WebP", async () => {
   assert.ok(body.artifactReference.blobKey.endsWith(".webp"));
 });
 
-test("maxBytes is enforced in deterministic_transform", async () => {
+test("maxBytes over-budget in deterministic_transform WARNS (F4: warn, not block)", async () => {
   const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-src-max", artifactKind: "image", filename: "source.png", contentType: "image/png", bytes: pngBytes, tags: [] });
   const job = await createArtifactJob({
     projectId: "dr-lurie",
@@ -1097,8 +1104,10 @@ test("maxBytes is enforced in deterministic_transform", async () => {
     requirements: { maxBytes: 10 }
   });
   const response = await workerHandler({ httpMethod: "POST", headers: { authorization: "Bearer test-token" }, body: JSON.stringify({ storage: STORAGE, projectId: job.projectId, jobId: job.jobId }) });
-  assert.equal(response.statusCode, 500);
-  assert.match(JSON.parse(response.body).error, /exceeds maximum size/);
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.status, "complete");
+  assert.ok(body.warnings?.some((w: string) => /exceeds requested maxBytes/.test(w)));
 });
 
 test("explicit 175KB maxBytes is NOT stripped and is enforced", async () => {
