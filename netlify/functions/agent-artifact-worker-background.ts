@@ -157,7 +157,11 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
       }
     });
     const workflowPatchStatus = "skipped_by_design";
-    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...(warnings ? { warnings } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
+    // Filename collision handling (artifact-layout.saveArtifactBytes) may have appended a
+    // -2/-3/... suffix to the normalized name actually stored; reflect that back onto the job
+    // record so job-status polling and by-filename lookups agree on the real name.
+    const filenameAfterCollisionHandling = artifact.filename && artifact.filename !== runningJob.filename ? artifact.filename : undefined;
+    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...(filenameAfterCollisionHandling ? { filename: filenameAfterCollisionHandling } : {}), ...(warnings ? { warnings } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
     return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, artifactReference: complete.artifactReference, ...(complete.warnings ? { warnings: complete.warnings } : {}) });
   } catch (error) {
     const { code, detail } = structuredError(error);

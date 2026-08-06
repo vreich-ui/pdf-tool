@@ -81,7 +81,13 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
   // F5: name the offending field(s) in `error` itself (e.g. bad image size, or maxBytes
   // misplacement) instead of the generic "Invalid artifact job input" — `issues` still
   // carries the full structured list for clients that read it.
-  if (!parsed.success) return { ok: false as const, statusCode: 400, error: `Invalid artifact job input: ${formatValidationIssues(parsed.error.issues)}`, issues: parsed.error.issues };
+  if (!parsed.success) {
+    // Filename normalization rejections (FILENAME_TOO_GENERIC / FILENAME_INVALID) carry a
+    // typed code on their issue; surface it at the top level too so a caller does not have
+    // to dig into `issues` to branch on it programmatically.
+    const filenameIssueCode = parsed.error.issues.find((issue) => issue.code)?.code;
+    return { ok: false as const, statusCode: 400, error: `Invalid artifact job input: ${formatValidationIssues(parsed.error.issues)}`, issues: parsed.error.issues, ...(filenameIssueCode ? { errorCode: filenameIssueCode } : {}) };
+  }
 
   // Cost estimate (output-only record field, source: "config") for the model this job will run.
   if (parsed.data.artifactKind === "image") {
@@ -106,7 +112,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     } catch (error) {
       return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
     }
-    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
+    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
 
   let job: Awaited<ReturnType<typeof createArtifactJob>>;
@@ -123,7 +129,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {

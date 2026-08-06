@@ -184,6 +184,9 @@ export function isSafeOptionalPathSegment(value: string): boolean {
 export interface ValidationIssue {
   path: string[];
   message: string;
+  /** Machine-readable code for issues that need one beyond the generic zod "invalid" shape
+   * (currently only the filename-normalization rejections). */
+  code?: string;
 }
 
 /** F5: "Invalid artifact job input" alone never named the offending field — this folds the
@@ -194,6 +197,151 @@ export function formatValidationIssues(issues: ValidationIssue[]): string {
   return issues
     .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "(root)"}: ${issue.message}`)
     .join("; ");
+}
+
+/**
+ * Filename normalization (choke point: applied inside validateArtifactJobRequest, once, for
+ * every job — see call site below). Real filenames arriving from the content pipeline are
+ * mixed-case, mixed-separator, sometimes carry a baked-in version suffix, and sometimes reuse
+ * a generic stem ("header.webp") across completely different bytes. Normalizing here means
+ * every downstream consumer (the stored job record, the artifact index, the by-filename
+ * lookup, the CMS) sees one predictable, URL-safe form instead of the raw agent-submitted
+ * string.
+ */
+
+/** Stems that carry no information about what the artifact actually is. Rejected outright
+ * rather than silently accepted, so the calling agent is forced to name the artifact after
+ * the document's own title/topic instead of a placeholder that will collide with every other
+ * "header.webp" in the same request. Exact-match only: "header-photo" is fine, "header" alone
+ * is not. */
+export const GENERIC_ARTIFACT_FILENAME_STEMS: ReadonlySet<string> = new Set([
+  "header", "image", "img", "photo", "document", "doc", "file", "output",
+  "untitled", "artifact", "pdf", "temp", "test", "new", "final", "draft"
+]);
+
+export type FilenameValidationCode = "FILENAME_TOO_GENERIC" | "FILENAME_INVALID";
+
+/** Typed rejection thrown by normalizeArtifactFilename for the two cases a mechanical
+ * transform cannot fix by itself: a placeholder stem, or a stem that normalizes to nothing.
+ * Caught at the call site in validateArtifactJobRequest and folded into a ValidationIssue. */
+export class FilenameValidationError extends Error {
+  readonly code: FilenameValidationCode;
+  constructor(code: FilenameValidationCode, message: string) {
+    super(message);
+    this.name = "FilenameValidationError";
+    this.code = code;
+  }
+}
+
+/** Best-effort ASCII transliteration for the handful of common non-ASCII characters that do
+ * NOT decompose under Unicode NFKD (accented Latin letters like "é" DO decompose into "e" +
+ * a combining acute, which the NFKD + combining-mark strip below already handles). Anything
+ * still outside ASCII after this table is applied is simply dropped rather than guessed at. */
+const FILENAME_TRANSLITERATION_MAP: Record<string, string> = {
+  "ß": "ss", // ß
+  "æ": "ae", "Æ": "AE", // æ / Æ
+  "œ": "oe", "Œ": "OE", // œ / Œ
+  "ø": "o", "Ø": "O", // ø / Ø
+  "đ": "d", "Đ": "D", // đ / Đ
+  "þ": "th", "Þ": "Th", // þ / Þ
+  "—": "-", "–": "-", // em dash / en dash
+  "‘": "'", "’": "'", "“": "\"", "”": "\""
+};
+
+function transliterateToAscii(input: string): string {
+  let out = "";
+  for (const char of input) out += FILENAME_TRANSLITERATION_MAP[char] ?? char;
+  return out;
+}
+
+/** Total filename length ceiling (stem + "." + extension), enforced by cutting at the last
+ * '-' boundary at-or-before the limit rather than mid-word. */
+const MAX_ARTIFACT_FILENAME_LENGTH = 60;
+
+/**
+ * Normalizes a raw, agent-submitted filename into one predictable, human-facing, URL-safe
+ * form. `ext` is the extension this artifactKind/job actually requires (e.g. "pdf" for a PDF
+ * job, or the outputFormat-derived extension for an image job) — the caller resolves which
+ * extension is "valid" for the job; this function decides whether the raw filename's own
+ * extension already matches it (kept) or the artifactKind-derived one wins.
+ *
+ * Throws FilenameValidationError (FILENAME_TOO_GENERIC / FILENAME_INVALID) rather than
+ * returning a string when the input cannot be turned into a usable name.
+ */
+export function normalizeArtifactFilename(raw: string, ext: string): string {
+  const normalizedExt = ext.replace(/^\.+/, "").toLowerCase() || "bin";
+
+  // 1. Split off the extension. Whatever trailing extension the raw filename carried is
+  //    discarded here — the final extension is always the one the caller resolved as valid
+  //    for this artifactKind (schema validation already enforces that raw's own extension
+  //    matches it for image/pdf jobs before we ever get here).
+  const rawExtMatch = raw.match(/\.([a-zA-Z0-9]+)$/);
+  const stemSource = rawExtMatch ? raw.slice(0, raw.length - rawExtMatch[0].length) : raw;
+
+  // 2. Unicode NFKD normalize + strip combining marks (handles accented Latin letters),
+  //    transliterate the handful of common non-decomposing symbols we know how to map, then
+  //    drop anything still outside ASCII rather than guessing at it.
+  let stem = stemSource.normalize("NFKD").replace(/[̀-ͯ]/g, "");
+  stem = transliterateToAscii(stem);
+  stem = stem.replace(/[^\x00-\x7F]/g, "");
+
+  // 3. lowercase
+  stem = stem.toLowerCase();
+
+  // 4. collapse any run of one-or-more non-[a-z0-9] characters to a single '-'
+  stem = stem.replace(/[^a-z0-9]+/g, "-");
+
+  // 5. trim leading/trailing '-'
+  stem = stem.replace(/^-+|-+$/g, "");
+
+  // 6. strip a trailing version suffix — version belongs in templateVersion + the content
+  //    sha, not baked into the display name.
+  stem = stem.replace(/-v\d+$/, "");
+  stem = stem.replace(/^-+|-+$/g, "");
+
+  // 7. collapse to <= 60 characters TOTAL (stem + "." + ext), cutting at the last '-'
+  //    boundary at-or-before the limit rather than mid-word.
+  const suffix = `.${normalizedExt}`;
+  const maxStemLength = Math.max(0, MAX_ARTIFACT_FILENAME_LENGTH - suffix.length);
+  if (stem.length > maxStemLength) {
+    const truncated = stem.slice(0, maxStemLength);
+    const lastDash = truncated.lastIndexOf("-");
+    stem = lastDash > 0 ? truncated.slice(0, lastDash) : truncated;
+    stem = stem.replace(/-+$/, "");
+  }
+
+  // 8. reject generic placeholder stems outright — tell the caller what to do instead.
+  if (GENERIC_ARTIFACT_FILENAME_STEMS.has(stem)) {
+    throw new FilenameValidationError(
+      "FILENAME_TOO_GENERIC",
+      `Filename stem "${stem}" is too generic to be a usable artifact name. Derive the name from the document's own title/topic (e.g. the article headline, product name, or section heading) instead of a generic placeholder like "${stem}".`
+    );
+  }
+
+  // 9. reject a stem that normalized away to nothing.
+  if (!stem) {
+    throw new FilenameValidationError(
+      "FILENAME_INVALID",
+      "Filename normalizes to an empty name. Provide a descriptive filename derived from the document's own title/topic."
+    );
+  }
+
+  return `${stem}${suffix}`;
+}
+
+/** Resolves which extension normalizeArtifactFilename should treat as "valid" for this job:
+ * pdf jobs always get .pdf; image jobs get the requested/grant-preferred output format
+ * (schema validation already guarantees the raw filename matches it); anything else (binary)
+ * keeps whatever extension the raw filename already carries, defaulting to "bin" when there
+ * is none. */
+function targetFilenameExtension(artifactKind: ArtifactKind, filename: string, requirements: NormalizedArtifactJobRequirements | undefined): string {
+  if (artifactKind === "pdf") return "pdf";
+  if (artifactKind === "image") {
+    const outputFormat = requirements?.image?.outputFormat ?? projectGrantLimits().preferredImageFormat ?? "png";
+    return outputFormat === "jpeg" ? "jpg" : outputFormat;
+  }
+  const match = filename.match(/\.([a-zA-Z0-9]+)$/);
+  return match ? match[1].toLowerCase() : "bin";
 }
 
 function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind, projectId?: string): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
@@ -326,7 +474,8 @@ export function buildArtifactJobRequestSchema() {
     artifactKind: z.enum(["image", "pdf", "binary"]).default("image"),
     operation: z.enum(["generate", "edit"]).default("generate"),
     prompt: z.string().min(1).optional(),
-    filename: z.string().min(1),
+    filename: z.string().min(1)
+      .describe("A descriptive filename derived from THIS document's own title/topic (e.g. the article headline or product name) — never a generic placeholder. The server normalizes it (after validation succeeds) into one predictable, URL-safe form before storing the job: Unicode is transliterated to ASCII and lowercased, any run of non [a-z0-9] characters collapses to a single '-', a baked-in trailing version suffix like \"-v2\" is stripped (version lives in templateVersion + the content sha, not the display name), and the result is capped at 60 characters (cut at a '-' boundary, never mid-word). The extension is normalized too: pdf jobs always get .pdf, image jobs get the extension matching requirements.image.outputFormat. A resulting stem that is EXACTLY one of these generic placeholders is rejected with errorCode FILENAME_TOO_GENERIC — derive the name from the document's own title/topic instead: header, image, img, photo, document, doc, file, output, untitled, artifact, pdf, temp, test, new, final, draft. (A stem merely containing one of these, e.g. \"header-photo\", is fine — only an exact match is rejected.) A name that normalizes to nothing is rejected with errorCode FILENAME_INVALID. If the normalized name collides with a different-content artifact already stored under the same {projectId, requestId, filename}, the stored artifact's name is suffixed -2, -3, ... automatically; resubmitting the SAME bytes under the same or a similar name dedupes instead of being renamed."),
     templateId: z.string().min(1).optional(),
     templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
     data: z.unknown().optional(),
@@ -453,7 +602,24 @@ export async function validateArtifactJobRequest(input: unknown): Promise<{ succ
   }
   const normalized = normalizeArtifactJobRequirements(result.data.requirements, result.data.artifactKind as ArtifactKind, result.data.projectId);
   if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
-  return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements } };
+
+  // Filename normalization is applied HERE, after schema validation succeeds, so the stored
+  // job record and every downstream consumer (artifact index, by-filename lookup, the CMS)
+  // see the normalized value rather than the raw agent-submitted string. This is the single
+  // choke point every create_agent_artifact_job call passes through.
+  const artifactKind = result.data.artifactKind as ArtifactKind;
+  const targetExt = targetFilenameExtension(artifactKind, result.data.filename, normalized.requirements);
+  let normalizedFilename: string;
+  try {
+    normalizedFilename = normalizeArtifactFilename(result.data.filename, targetExt);
+  } catch (error) {
+    if (error instanceof FilenameValidationError) {
+      return { success: false, error: { issues: [{ path: ["filename"], message: error.message, code: error.code }] } };
+    }
+    throw error;
+  }
+
+  return { success: true, data: { ...(result.data as ArtifactJobRequest), requirements: normalized.requirements, filename: normalizedFilename } };
 }
 
 export type ArtifactJobStatus = "pending" | "running" | "complete" | "failed" | "blocked";
@@ -551,7 +717,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt" | "warnings">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt" | "warnings" | "filename">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,

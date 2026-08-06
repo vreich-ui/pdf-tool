@@ -1,6 +1,6 @@
 import { projectBlobStore } from "./blob-store.js";
 import { sha256Hex, type ArtifactKind, type ArtifactReference, type SaveArtifactBytesInput } from "./artifact-core/index.js";
-import { writeArtifactReferenceIndexes } from "./artifact-core/artifact-index.js";
+import { resolveArtifactFilenameCollision, writeArtifactReferenceIndexes } from "./artifact-core/artifact-index.js";
 import { projectStoreNames } from "./project-descriptor.js";
 
 /**
@@ -88,7 +88,19 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
   const requestId = safePathSegment(input.requestId);
   const kind = safePathSegment(input.artifactKind);
   const extension = extensionForContentType(input.contentType, input.filename);
+  // blobKey stays purely content-addressed (kind/requestId/sha256+ext) — collision handling
+  // below only ever changes the DISPLAY name used for the by-filename index and the stored
+  // reference, never the blob's own key or its sha256.
   const blobKey = `${kind}/${requestId}/${sha256}${extension}`;
+  const stores = projectStoreNames();
+  // Collision handling: a by-filename pointer already at {projectId, requestId, filename}
+  // for DIFFERENT bytes gets -2, -3, ... appended until an unused name is found. Identical
+  // bytes resubmitted under the same or a similar name are never renamed — the loop returns
+  // the existing name the moment it finds a pointer whose sha256 already matches, which is
+  // exactly today's same-bytes-same-name dedupe behavior, preserved unchanged.
+  const resolvedFilename = input.filename
+    ? await resolveArtifactFilenameCollision(input.projectId, input.requestId, input.filename, sha256, { storeName: stores.artifactIndex })
+    : input.filename;
   const artifact: ArtifactReference = {
     blobKey,
     sizeBytes: bytes.byteLength,
@@ -97,14 +109,14 @@ export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<
     createdAtISO: new Date().toISOString(),
     artifactKind: input.artifactKind,
     originalFilename: input.filename,
+    filename: resolvedFilename,
     label: input.label,
     tags: input.tags ?? [],
     metadata: input.metadata ?? {}
   };
-  const stores = projectStoreNames();
   const store = await projectBlobStore(stores.artifacts);
   await store.set(blobKey, bytes, { metadata: { requestId: input.requestId, sha256, contentType: input.contentType, artifactKind: input.artifactKind } });
   await store.setJSON(`${blobKey}.json`, artifact);
-  await writeArtifactReferenceIndexes(input.requestId, artifact, { storeName: stores.artifactIndex, projectId: input.projectId, slot: input.slot, filename: input.filename });
+  await writeArtifactReferenceIndexes(input.requestId, artifact, { storeName: stores.artifactIndex, projectId: input.projectId, slot: input.slot, filename: resolvedFilename });
   return artifact;
 }

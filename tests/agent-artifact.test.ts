@@ -439,7 +439,9 @@ test("canonical layout writes grant-named stores under grant credentials with ca
   assert.equal(body.filename, "hero.png");
   assert.equal(body.workflowPatchStatus, "skipped_by_design");
   const artifactKeys = Object.keys(body.artifactReference).sort();
-  assert.deepEqual(artifactKeys, ["artifactKind", "blobKey", "contentType", "createdAtISO", "label", "metadata", "originalFilename", "sha256", "sizeBytes", "tags"].sort());
+  // "filename" (the collision-resolved display name; see artifact-layout.saveArtifactBytes)
+  // now travels alongside "originalFilename" (the as-submitted name) on every ArtifactReference.
+  assert.deepEqual(artifactKeys, ["artifactKind", "blobKey", "contentType", "createdAtISO", "filename", "label", "metadata", "originalFilename", "sha256", "sizeBytes", "tags"].sort());
   assert.equal(body.artifactReference.metadata.projectId, undefined);
   assert.equal(body.artifactReference.metadata.requestId, undefined);
   assert.match(body.artifactReference.blobKey, /^image\/req-store\/[a-f0-9]{64}\.png$/);
