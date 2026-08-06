@@ -127,6 +127,35 @@ export async function readArtifactReferenceByFilename(projectId: string, request
   return readArtifactReferenceAtKey(legacyArtifactFilenamePointerKey(requestId, filename), options);
 }
 
+/**
+ * Resolves a filename collision at the by-filename pointer index: the caller's normalized
+ * `filename` is returned unchanged unless a pointer already exists at
+ * {projectId, requestId, filename} for DIFFERENT bytes (a different sha256), in which case
+ * -2, -3, ... is appended to the stem until an unused name (or a same-bytes match) is found.
+ *
+ * Deliberately does NOT touch blobKey construction or sha256 computation — those stay
+ * content-addressed exactly as before; this only changes which display name the by-filename
+ * index (and the stored ArtifactReference.filename) uses. Identical bytes resubmitted under
+ * the same or a similar name are never renamed: the loop stops the moment it finds either no
+ * existing pointer, or one whose sha256 already matches — that is the pre-existing
+ * same-bytes-same-name dedupe path, preserved as-is.
+ */
+export async function resolveArtifactFilenameCollision(projectId: string, requestId: string, filename: string, sha256: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<string> {
+  const dot = filename.lastIndexOf(".");
+  const stem = dot > 0 ? filename.slice(0, dot) : filename;
+  const ext = dot > 0 ? filename.slice(dot) : "";
+  let candidate = filename;
+  // Bounded rather than a `while(true)`: a real collision chain this long would mean
+  // something else is wrong, and an unbounded loop against a pathological index should
+  // never be possible from user input alone.
+  for (let suffix = 2; suffix <= 1000; suffix++) {
+    const existing = await readArtifactReferenceByFilename(projectId, requestId, candidate, options);
+    if (!existing || existing.sha256 === sha256) return candidate;
+    candidate = `${stem}-${suffix}${ext}`;
+  }
+  return candidate;
+}
+
 type BlobListItem = { key: string };
 type BlobListPage = { blobs?: BlobListItem[] };
 
