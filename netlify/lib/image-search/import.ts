@@ -218,7 +218,15 @@ export async function saveImportedImageArtifact(input: SaveImportedImageInput, r
   const maxBytes = Math.min(input.maxBytes ?? MAX_IMAGE_OUTPUT_BYTES, MAX_IMAGE_OUTPUT_BYTES);
 
   const normalized = await normalizeToSupportedFormat(rawBytes);
-  const bytes = await optimizeImageBytes(normalized.bytes, { outputFormat: normalized.format, maxBytes, inputFormat: normalized.format });
+  const optimized = await optimizeImageBytes(normalized.bytes, { outputFormat: normalized.format, maxBytes, inputFormat: normalized.format });
+  // Unlike create_agent_artifact_job's media policy (warn — see agent-image-generation.ts),
+  // an imported image that still exceeds the byte cap after optimization is rejected here:
+  // this path has no job record to attach a warning to, and no existing caller expects a
+  // silently-oversize import to succeed.
+  if (optimized.sizeWarning) {
+    throw new Error(`Generated artifact exceeds maximum size of ${optimized.sizeWarning.maxBytes} bytes (got ${optimized.sizeWarning.actualBytes})`);
+  }
+  const bytes = optimized.bytes;
   const contentType = contentTypeForImageOutputFormat(normalized.format);
 
   return saveArtifactBytes({

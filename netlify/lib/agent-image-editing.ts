@@ -83,10 +83,12 @@ export async function editImageArtifactBytes(options: {
     else transform = transform.png();
 
     const bytes = await transform.toBuffer();
-    if (options.maxBytes && bytes.byteLength > options.maxBytes) {
-      throw new Error(`Generated artifact exceeds maximum size of ${options.maxBytes} bytes (got ${bytes.byteLength})`);
-    }
-    return { bytes, contentType: contentTypeFromFormat(outputFormat) };
+    // F4: warn, not block — store the result and flag it rather than discarding the edit
+    // entirely (see agent-image-generation.ts's optimizeImageBytes for the same policy).
+    const sizeWarning = options.maxBytes && bytes.byteLength > options.maxBytes
+      ? { maxBytes: options.maxBytes, actualBytes: bytes.byteLength }
+      : undefined;
+    return { bytes, contentType: contentTypeFromFormat(outputFormat), ...(sizeWarning ? { sizeWarning } : {}) };
   }
   const client = options.client ?? await defaultOpenAIClient(options.apiKey, options.timeoutMs);
   const prompt = options.instructions?.change;
@@ -99,6 +101,8 @@ export async function editImageArtifactBytes(options: {
   const b64 = extractB64Json(response);
   if (!b64) throw new Error("Image edit response did not include base64 image data");
   const bytes = Buffer.from(b64, "base64");
-  if (options.maxBytes && bytes.byteLength > options.maxBytes) throw new Error(`Generated artifact exceeds maximum size of ${options.maxBytes} bytes`);
-  return { bytes, contentType: contentTypeFromFormat(outputFormat) };
+  const sizeWarning = options.maxBytes && bytes.byteLength > options.maxBytes
+    ? { maxBytes: options.maxBytes, actualBytes: bytes.byteLength }
+    : undefined;
+  return { bytes, contentType: contentTypeFromFormat(outputFormat), ...(sizeWarning ? { sizeWarning } : {}) };
 }

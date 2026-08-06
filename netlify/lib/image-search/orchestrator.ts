@@ -202,7 +202,14 @@ export async function runImageSearch(job: ImageSearchJobRecord, options: RunImag
         const rawBytes = await fetchImportBytes(result.imageUrl, policy.quotas.maxImportBytes, fetchImpl);
         const inputFormat = sniffImageFormat(rawBytes);
         const outputFormat = inputFormat ?? "jpeg";
-        const bytes = await optimizeImageBytes(rawBytes, { outputFormat, maxBytes: policy.quotas.maxImportBytes, inputFormat: inputFormat ?? "unknown" });
+        const optimizedCandidate = await optimizeImageBytes(rawBytes, { outputFormat, maxBytes: policy.quotas.maxImportBytes, inputFormat: inputFormat ?? "unknown" });
+        // See saveImportedImageArtifact's comment in image-search/import.ts: this path keeps
+        // the pre-existing hard-reject behavior for an over-budget candidate (no job record
+        // to attach a warning to).
+        if (optimizedCandidate.sizeWarning) {
+          throw new Error(`Generated artifact exceeds maximum size of ${optimizedCandidate.sizeWarning.maxBytes} bytes (got ${optimizedCandidate.sizeWarning.actualBytes})`);
+        }
+        const bytes = optimizedCandidate.bytes;
         const contentType = contentTypeForImageOutputFormat(outputFormat);
         const filename = `search-${run.searchId.slice(0, 8)}-${newCandidates.length + 1}.${outputFormat === "jpeg" ? "jpg" : outputFormat}`;
         const artifact = await saveArtifactBytes({

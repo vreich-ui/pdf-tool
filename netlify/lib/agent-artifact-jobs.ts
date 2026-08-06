@@ -186,6 +186,16 @@ export interface ValidationIssue {
   message: string;
 }
 
+/** F5: "Invalid artifact job input" alone never named the offending field — this folds the
+ * per-issue field path into a single human-readable string so the detail survives even when
+ * a caller only surfaces the top-level `error` string (the `issues` array remains available
+ * in full alongside it). */
+export function formatValidationIssues(issues: ValidationIssue[]): string {
+  return issues
+    .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "(root)"}: ${issue.message}`)
+    .join("; ");
+}
+
 function normalizeArtifactJobRequirements(input: unknown, artifactKind: ArtifactKind, projectId?: string): { requirements?: NormalizedArtifactJobRequirements; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
   // Grant-limits defaulting: a job that omits requirements (or individual image fields)
@@ -320,7 +330,8 @@ export function buildArtifactJobRequestSchema() {
     templateId: z.string().min(1).optional(),
     templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
     data: z.unknown().optional(),
-    assets: z.object({ images: z.array(z.unknown()).optional() }).optional(),
+    assets: z.object({ images: z.array(z.unknown()).optional() }).optional()
+      .describe("Job-supplied binary assets for template renders: images[] entries are {assetId, dataUri} or {assetId, blobKey/artifactReference}. Binding is renderer-specific: chromium templates reference assetId via https://render.assets.invalid/<assetId> in HTML/CSS; typst via image(\"assets/<assetId>\"); react-pdf docTree via an image node's src:{kind:\"jobAsset\",assetId}. pdfme templates do NOT consume assets.images at all — bind image data through the per-render `data` object instead. Every dataUri must decode to a real image (IMAGE_DECODE_ERROR otherwise) and must not be an http(s):// URL."),
     slot: z.string().optional(),
     tags: z.array(z.string()).default([]),
     label: z.string().optional(),
@@ -358,7 +369,8 @@ export function buildArtifactJobRequestSchema() {
         // string here while the advertised schema claimed a fixed enum; that mismatch is
         // exactly the drift class this session's single-validator work closes, so the
         // enforced schema now matches the (unchanged) advertised contract.
-        size: z.enum(["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"]).optional(),
+        size: z.enum(["1024x1024", "1024x1792", "1792x1024", "1536x1024", "1024x1536"]).optional()
+          .describe("Supported sizes only: 1024x1024, 1024x1792, 1792x1024, 1536x1024, 1024x1536. Any other value (e.g. 256x256, 512x512) is rejected — there is no generic small-size tier."),
         outputFormat: z.enum(["png", "webp", "jpeg"]).optional(),
         role: z.enum(["featured"]).optional(),
         // usageContext stays a free string: the routing policy (image-routing/policy.ts)
@@ -458,6 +470,10 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   errorDetail?: Record<string, unknown>;
   renderMetadata?: Record<string, unknown>;
   validationResults?: Record<string, unknown>;
+  /** F4: non-fatal warnings about an otherwise-successful job — e.g. the generated image
+   * still exceeded requirements.maxBytes after best-effort optimization (media policy is
+   * warn, not block: the artifact is stored anyway and flagged here). */
+  warnings?: string[];
   adapterVersion: string;
   selectedModel?: string;
   executor?: string;
@@ -503,7 +519,12 @@ export async function jobRecordStore() {
 
 export async function createArtifactJob(input: ArtifactJobRequest, overrides: { status?: ArtifactJobStatus; blocked?: BlockedArtifactState; jobId?: string } = {}): Promise<ArtifactJobRecord> {
   const adapterVersion = PROJECT_DESCRIPTOR_VERSION;
-  const selectedModel = resolveProjectModel(input.projectId, input.model);
+  // F5 (cosmetic): template-driven PDF jobs (pdfme/react-pdf/typst/chromium) never route
+  // through a model — resolveOperationRoute always resolves requiresModel: false for
+  // artifactKind "pdf". Resolving/persisting a model default for them anyway meant every
+  // pdfme job's response carried a misleading selectedModel:"gpt-image-1" that no code path
+  // ever used. Only image jobs get a resolved model at all.
+  const selectedModel = input.artifactKind === "image" ? resolveProjectModel(input.projectId, input.model) : undefined;
   const now = new Date().toISOString();
   const job: ArtifactJobRecord = {
     ...input,
@@ -530,7 +551,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt" | "warnings">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,
