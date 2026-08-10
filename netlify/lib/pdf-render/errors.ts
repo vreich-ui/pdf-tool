@@ -35,7 +35,9 @@ export type RenderErrorCode =
   | "WORKER_TIMEOUT_APPROACHING"
   | "PROVIDER_RATE_LIMITED"
   | "IMAGE_DECODE_ERROR"
-  | "JOB_EXECUTION_TIMEOUT";
+  | "JOB_EXECUTION_TIMEOUT"
+  /** D2: this job would push its requestId past the per-request generation budget. */
+  | "GENERATION_BUDGET_EXCEEDED";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

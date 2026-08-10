@@ -1,5 +1,6 @@
 import { RenderError } from "../errors.js";
 import { assertImageDataUriDecodable } from "../image-decode.js";
+import { inspectPdf } from "../inspect.js";
 import { pdfmeMetadata } from "./pdfme.js";
 import { buildPdfmePlugins } from "./pdfme-plugins.js";
 import type { PdfRendererEngine, RenderInput, RenderOutput } from "../types.js";
@@ -84,6 +85,73 @@ function collectImageFieldNames(schemas: unknown): string[] {
   return names;
 }
 
+interface NamedSchemaField {
+  name: string;
+  type?: string;
+  content?: unknown;
+}
+
+function collectNamedFields(schemas: unknown): NamedSchemaField[] {
+  const fields: NamedSchemaField[] = [];
+  if (!Array.isArray(schemas)) return fields;
+  for (const page of schemas) {
+    if (!Array.isArray(page)) continue;
+    for (const field of page) {
+      if (!field || typeof field !== "object" || Array.isArray(field)) continue;
+      const record = field as Record<string, unknown>;
+      if (typeof record.name !== "string" || !record.name) continue;
+      fields.push({
+        name: record.name,
+        type: typeof record.type === "string" ? record.type : undefined,
+        content: record.content,
+      });
+    }
+  }
+  return fields;
+}
+
+/**
+ * A schema element's own `content` is a DESIGN-TIME DEFAULT ONLY in stock pdfme: generate()
+ * sources every field's value from inputs[0][schema.name], so a `data` payload that omits a
+ * key renders that field empty -- silently. No error, no diagnostic, a structurally valid PDF
+ * that simply says nothing. That is a genuinely dangerous default: a caller can ship a
+ * "successful" render of a blank document and only discover it by opening the file.
+ *
+ * Two changes here, together:
+ *   1. `content` becomes a real fallback. When `data` has no entry for a field name, the
+ *      field's own `content` (if it is a string) is used. This makes `content: "..."` mean
+ *      what any template author would reasonably assume it means.
+ *   2. Whatever is still unbound after that fallback is REPORTED, per field, in
+ *      diagnostics.engineWarnings -- so a genuinely empty field is visible in the job record
+ *      instead of being invisible.
+ *
+ * An explicit value in `data` always wins, including an explicit empty string: `""` is a
+ * deliberate "render this blank" and must not be overridden by the design-time default. The
+ * test is key PRESENCE (`in`), not truthiness.
+ */
+function resolveRenderInputs(schemas: unknown, data: unknown): { inputs: Record<string, string>[]; unbound: string[]; defaulted: string[] } {
+  const provided = data !== null && typeof data === "object" && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : {};
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(provided)) {
+    resolved[key] = typeof value === "string" ? value : String(value ?? "");
+  }
+
+  const unbound: string[] = [];
+  const defaulted: string[] = [];
+  for (const field of collectNamedFields(schemas)) {
+    if (field.name in provided) continue;
+    if (typeof field.content === "string" && field.content.length > 0) {
+      resolved[field.name] = field.content;
+      defaulted.push(field.name);
+    } else {
+      unbound.push(field.name);
+    }
+  }
+  return { inputs: [resolved], unbound, defaulted };
+}
+
 async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   const { generate } = await import("@pdfme/generator");
   const { BLANK_PDF } = await import("@pdfme/common");
@@ -96,11 +164,7 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
     basePdf: normalizeBasePdf(storedTemplate.basePdf, BLANK_PDF),
   } as PdfmeTemplate;
 
-  const inputs: Record<string, string>[] = [
-    input.data !== null && typeof input.data === "object" && !Array.isArray(input.data)
-      ? (input.data as Record<string, string>)
-      : {}
-  ];
+  const { inputs, unbound, defaulted } = resolveRenderInputs(storedTemplate.schemas, input.data);
 
   for (const fieldName of collectImageFieldNames(storedTemplate.schemas)) {
     const value = inputs[0][fieldName];
@@ -126,14 +190,65 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
     throw new RenderError("PDF_INVALID_BYTES", "pdfme generate returned invalid PDF bytes");
   }
 
-  // pdfme uses compressed object streams (/ObjStm), so /Type /Page does not appear in raw
-  // bytes. Page count equals the number of schema pages in the template.
+  // Page count is MEASURED from the produced bytes, not assumed from the template.
+  //
+  // This used to be `schemas.length` -- a proxy, on the assumption that pdfme emits exactly
+  // one page per schema page. That assumption does not hold. A `table` field whose declared
+  // `height` is below what pdfme's internal overflow check computes for its rows triggers a
+  // page break even though the table renders completely and correctly in the space it has;
+  // whatever follows the table in the field list (typically a footer band) is swept onto a
+  // near-blank extra page. The rendered document then has MORE pages than the template
+  // declares, while this diagnostic confidently reported the smaller, wrong number.
+  //
+  // Measuring closes that gap, and comparing the two surfaces the condition explicitly:
+  // a mismatch is the signature of the overflow bug above, and is worth a warning even
+  // though the render itself succeeded (every authored page is present and correct -- the
+  // extra ones are the problem, and they are easy to miss at the end of a long document).
   const schemasArray = Array.isArray(storedTemplate.schemas) ? (storedTemplate.schemas as unknown[]) : [];
-  const pageCount = Math.max(schemasArray.length, 1);
+  const declaredPageCount = Math.max(schemasArray.length, 1);
+
+  let pageCount = declaredPageCount;
+  let pages: Array<{ widthPt: number; heightPt: number }> | undefined;
+  const engineWarnings: string[] = [];
+  try {
+    const inspection = await inspectPdf(bytes);
+    pageCount = inspection.pageCount;
+    pages = inspection.pages;
+  } catch {
+    // Inspection is diagnostic-only: a PDF that pdf-lib cannot parse still has valid %PDF-
+    // bytes and is returned to the caller. Fall back to the declared count and say so.
+    engineWarnings.push("Could not measure the rendered page count; diagnostics.pageCount falls back to the template's declared page count");
+  }
+
+  if (pages && pageCount !== declaredPageCount) {
+    engineWarnings.push(
+      `Rendered page count (${pageCount}) does not match the template's ${declaredPageCount} schema page(s). ` +
+        (pageCount > declaredPageCount
+          ? "Extra pages are usually caused by a `table` field whose declared `height` is smaller than pdfme's internal per-row estimate, which forces a page break and pushes the elements after it onto a new page. Budget roughly 12-15mm per row (including head) as a floor and re-check."
+          : "Fewer pages than authored usually means a basePdf whose own page count caps the output.")
+    );
+  }
+
+  if (unbound.length > 0) {
+    engineWarnings.push(
+      `${unbound.length} template field(s) rendered empty: no value in \`data\` and no \`content\` default on the schema — ${unbound.join(", ")}`
+    );
+  }
+  if (defaulted.length > 0) {
+    engineWarnings.push(
+      `${defaulted.length} template field(s) fell back to their schema \`content\` default because \`data\` omitted them: ${defaulted.join(", ")}`
+    );
+  }
 
   return {
     bytes,
-    diagnostics: { pageCount, sizeBytes: bytes.byteLength, engine: { id: "pdfme", executedIn: "netlify" } },
+    diagnostics: {
+      pageCount,
+      sizeBytes: bytes.byteLength,
+      ...(pages ? { pages } : {}),
+      ...(engineWarnings.length > 0 ? { engineWarnings } : {}),
+      engine: { id: "pdfme", executedIn: "netlify" },
+    },
   };
 }
 

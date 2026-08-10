@@ -10,6 +10,7 @@
 import { projectBlobStore } from "../blob-store.js";
 import { allowedProjectModels, projectStoreNames, validateProjectAccess } from "../project-descriptor.js";
 import { canonicalImageModel, findImageProvider } from "../image-providers/registry.js";
+import { modelSupportsLoras, type ImageLoraRef } from "../image-providers/types.js";
 
 export const IMAGE_MODEL_POLICY_KEY = "image-model-policy.json";
 
@@ -25,10 +26,37 @@ export const IMAGE_USAGE_CONTEXTS = [
 ] as const;
 export type ImageUsageContext = (typeof IMAGE_USAGE_CONTEXTS)[number];
 
+/**
+ * C3: how a job's seed is chosen when the policy entry drives generation.
+ *   - "none"    (default): no seed sent; fal picks its own, output is not reproducible.
+ *   - "derived": the caller derives a stable seed per artifact (e.g. from a brand seedBase
+ *                plus the slot), so re-running the same slot reproduces the same image.
+ *   - "fixed":  every generation for this usageContext uses `seed` verbatim.
+ */
+export type ImageSeedStrategy = "none" | "derived" | "fixed";
+
+/** C3: durable per-brand style reference attached to a usageContext. */
+export interface ImageStyleRef {
+  /** Trained LoRA — the only durable per-brand style artifact that survives regeneration. */
+  lora?: ImageLoraRef;
+  /** Optional trigger phrase the LoRA was trained with, prepended by the prompt assembler. */
+  triggerPhrase?: string;
+}
+
+export interface ImageModelPolicyEntry {
+  model: string;
+  styleRef?: ImageStyleRef;
+  seedStrategy?: ImageSeedStrategy;
+  /** Required when seedStrategy is "fixed". */
+  seed?: number;
+}
+
 export interface ImageModelPolicy {
   version: 1;
-  byUsageContext: Partial<Record<ImageUsageContext, { model: string }>>;
+  byUsageContext: Partial<Record<ImageUsageContext, ImageModelPolicyEntry>>;
 }
+
+const SEED_STRATEGIES: readonly ImageSeedStrategy[] = ["none", "derived", "fixed"];
 
 export const DEFAULT_IMAGE_MODEL_POLICY: ImageModelPolicy = {
   version: 1,
@@ -68,12 +96,67 @@ export function validateImageModelPolicyPatch(input: unknown): PolicyValidationI
         // null clears the entry (fall back to the project default backend).
         if (entry === null) continue;
         if (!entry || typeof entry !== "object" || typeof (entry as { model?: unknown }).model !== "string") {
-          issues.push({ path: `policy.byUsageContext.${context}`, message: "entry must be { model: string } or null" });
+          issues.push({ path: `policy.byUsageContext.${context}`, message: "entry must be { model: string, styleRef?, seedStrategy?, seed? } or null" });
           continue;
         }
-        const model = (entry as { model: string }).model;
+        const candidate = entry as Record<string, unknown>;
+        for (const field of Object.keys(candidate)) {
+          if (!["model", "styleRef", "seedStrategy", "seed"].includes(field)) {
+            issues.push({ path: `policy.byUsageContext.${context}.${field}`, message: "unknown entry field" });
+          }
+        }
+        const model = candidate.model as string;
+        const canonical = canonicalImageModel(model);
         if (!findImageProvider(model)) {
           issues.push({ path: `policy.byUsageContext.${context}.model`, message: `unknown model "${model}" (no provider routes it)` });
+        }
+
+        let lora: unknown;
+        if (candidate.styleRef !== undefined && candidate.styleRef !== null) {
+          const styleRef = candidate.styleRef;
+          if (typeof styleRef !== "object" || Array.isArray(styleRef)) {
+            issues.push({ path: `policy.byUsageContext.${context}.styleRef`, message: "styleRef must be an object" });
+          } else {
+            const styleObj = styleRef as Record<string, unknown>;
+            for (const field of Object.keys(styleObj)) {
+              if (!["lora", "triggerPhrase"].includes(field)) {
+                issues.push({ path: `policy.byUsageContext.${context}.styleRef.${field}`, message: "unknown styleRef field" });
+              }
+            }
+            if (styleObj.triggerPhrase !== undefined && typeof styleObj.triggerPhrase !== "string") {
+              issues.push({ path: `policy.byUsageContext.${context}.styleRef.triggerPhrase`, message: "triggerPhrase must be a string" });
+            }
+            if (styleObj.lora !== undefined && styleObj.lora !== null) {
+              lora = styleObj.lora;
+              const loraObj = styleObj.lora as Record<string, unknown>;
+              if (typeof loraObj !== "object" || Array.isArray(loraObj) || typeof loraObj.path !== "string" || !loraObj.path.trim()) {
+                issues.push({ path: `policy.byUsageContext.${context}.styleRef.lora`, message: "lora must be { path: string, scale?: number }" });
+              } else if (loraObj.scale !== undefined && (typeof loraObj.scale !== "number" || !Number.isFinite(loraObj.scale))) {
+                issues.push({ path: `policy.byUsageContext.${context}.styleRef.lora.scale`, message: "lora.scale must be a finite number" });
+              }
+            }
+          }
+        }
+
+        // C3's headline guard: standardising a usageContext on a pro model silently forfeits
+        // style-lock, because flux-2-pro's schema has no `loras` field at all — fal drops it
+        // without error and returns a plausible, off-brand image. Refuse the combination at
+        // configuration time rather than discovering it in the output.
+        if (lora && !modelSupportsLoras(canonical)) {
+          issues.push({
+            path: `policy.byUsageContext.${context}.model`,
+            message: `model "${model}" cannot carry a LoRA (its endpoint accepts no "loras" field); brand style-lock would be silently dropped — use a LoRA-capable model such as fal-ai/flux-2/klein/9b`,
+          });
+        }
+
+        if (candidate.seedStrategy !== undefined && !SEED_STRATEGIES.includes(candidate.seedStrategy as ImageSeedStrategy)) {
+          issues.push({ path: `policy.byUsageContext.${context}.seedStrategy`, message: `seedStrategy must be one of: ${SEED_STRATEGIES.join(", ")}` });
+        }
+        if (candidate.seed !== undefined && (!Number.isInteger(candidate.seed) || (candidate.seed as number) < 0)) {
+          issues.push({ path: `policy.byUsageContext.${context}.seed`, message: "seed must be a non-negative integer" });
+        }
+        if (candidate.seedStrategy === "fixed" && candidate.seed === undefined) {
+          issues.push({ path: `policy.byUsageContext.${context}.seed`, message: 'seed is required when seedStrategy is "fixed"' });
         }
       }
     }
@@ -83,12 +166,24 @@ export function validateImageModelPolicyPatch(input: unknown): PolicyValidationI
 
 export function mergeImageModelPolicy(base: ImageModelPolicy, patch: unknown): ImageModelPolicy {
   if (!patch || typeof patch !== "object" || Array.isArray(patch)) return base;
-  const patchObj = patch as { byUsageContext?: Record<string, { model: string } | null> };
+  const patchObj = patch as { byUsageContext?: Record<string, Partial<ImageModelPolicyEntry> | null> };
   const merged: ImageModelPolicy = { version: 1, byUsageContext: { ...base.byUsageContext } };
   for (const [context, entry] of Object.entries(patchObj.byUsageContext ?? {})) {
     if (!(IMAGE_USAGE_CONTEXTS as readonly string[]).includes(context)) continue;
-    if (entry === null) delete merged.byUsageContext[context as ImageUsageContext];
-    else if (entry && typeof entry.model === "string") merged.byUsageContext[context as ImageUsageContext] = { model: canonicalImageModel(entry.model) };
+    if (entry === null) {
+      delete merged.byUsageContext[context as ImageUsageContext];
+      continue;
+    }
+    if (!entry || typeof entry.model !== "string") continue;
+    // Whole-entry replacement (not a deep merge): styleRef/seed are a coherent set, and a
+    // partial overlay could leave a LoRA from a previous entry attached to a new model that
+    // cannot carry it — exactly the failure the validator above exists to prevent.
+    merged.byUsageContext[context as ImageUsageContext] = {
+      model: canonicalImageModel(entry.model),
+      ...(entry.styleRef ? { styleRef: entry.styleRef } : {}),
+      ...(entry.seedStrategy ? { seedStrategy: entry.seedStrategy } : {}),
+      ...(entry.seed === undefined ? {} : { seed: entry.seed }),
+    };
   }
   return merged;
 }
@@ -126,10 +221,16 @@ export async function saveProjectImageModelPolicy(projectId: string, patch: unkn
   return merged;
 }
 
+/** C3: full routing decision (model + style/seed) for a usageContext, or undefined when the
+ * context has no policy entry → caller falls back to the project default backend. */
+export async function policyEntryForUsageContext(projectId: string, usageContext: string | undefined): Promise<ImageModelPolicyEntry | undefined> {
+  if (!usageContext || !(IMAGE_USAGE_CONTEXTS as readonly string[]).includes(usageContext)) return undefined;
+  const policy = await loadProjectImageModelPolicy(projectId).catch(() => DEFAULT_IMAGE_MODEL_POLICY);
+  return policy.byUsageContext[usageContext as ImageUsageContext];
+}
+
 /** Routing decision for a new image-generate job that OMITTED `model`. Returns the policy
  * model for the usageContext, or undefined → caller falls back to the project default. */
 export async function policyModelForUsageContext(projectId: string, usageContext: string | undefined): Promise<string | undefined> {
-  if (!usageContext || !(IMAGE_USAGE_CONTEXTS as readonly string[]).includes(usageContext)) return undefined;
-  const policy = await loadProjectImageModelPolicy(projectId).catch(() => DEFAULT_IMAGE_MODEL_POLICY);
-  return policy.byUsageContext[usageContext as ImageUsageContext]?.model;
+  return (await policyEntryForUsageContext(projectId, usageContext))?.model;
 }
