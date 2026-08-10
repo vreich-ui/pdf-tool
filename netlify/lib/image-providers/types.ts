@@ -8,6 +8,31 @@ import type { ImageEditInstructions } from "../agent-artifact-jobs.js";
 
 export type ImageEditFeature = "masked_edit" | "image_variation";
 
+/**
+ * C2: a trained per-brand LoRA reference. `path` is the HTTPS URL of the .safetensors
+ * (fal's own CDN retains trainer output for ~7 days, so the durable copy is expected to
+ * live in the caller's storage and be referenced from the brand record).
+ */
+export interface ImageLoraRef {
+  path: string;
+  scale?: number;
+}
+
+/** Providers that accept no `loras` array at all — see modelSupportsLoras(). */
+export const LORA_INCAPABLE_MODELS: readonly string[] = [
+  // flux-2-pro's text-to-image schema is only prompt/image_size/seed/safety_tolerance/
+  // enable_safety_checker/output_format/sync_mode. Sending `loras` here is silently
+  // dropped by fal, which forfeits brand style-lock without any error — hence the
+  // explicit guard rather than "pass it and hope".
+  "fal-ai/flux-2-pro",
+];
+
+/** True when the canonical model string can carry a `loras` array. */
+export function modelSupportsLoras(model: string): boolean {
+  if (!model.startsWith("fal-ai/")) return false;
+  return !LORA_INCAPABLE_MODELS.includes(model);
+}
+
 export interface ImageProviderGenerateInput {
   prompt: string;
   /** Canonical model string (aliases already resolved by the registry). */
@@ -17,6 +42,11 @@ export interface ImageProviderGenerateInput {
   maxBytes?: number;
   /** Explicit per-request provider timeout, budget-derived by the worker (F9). */
   timeoutMs?: number;
+  /** C2: deterministic seed. Providers without a seed parameter (all OpenAI GPT Image
+   * models) ignore it — reproducibility is a fal-only capability today. */
+  seed?: number;
+  /** C2: per-brand LoRA references (fal only, max 3 per fal's schema). */
+  loras?: ImageLoraRef[];
   /** Test/DI seams: OpenAI-style client object, explicit API key, fetch override. */
   client?: unknown;
   apiKey?: string;

@@ -127,6 +127,11 @@ export interface ArtifactJobRequest {
    * schema — the three-copies rule does not apply). Static-config price estimate for the
    * routed image model. */
   costEstimate?: import("./image-providers/types.js").ImageJobCostEstimate;
+  /** OUTPUT-ONLY (server-computed at job creation, same rule as costEstimate above). D1's
+   * uniform cost record, present on EVERY job — including deterministic PDF renders, which
+   * record an explicit zero. costEstimate above remains the image-only per-megapixel
+   * breakdown and is also carried inside this receipt's `detail`. */
+  costReceipt?: import("./cost-receipt.js").CostReceipt;
   slot?: string;
   tags: string[];
   label?: string;

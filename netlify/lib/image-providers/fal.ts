@@ -10,7 +10,8 @@ import { httpHeaderValue, parseRetryAfterMs } from "../worker-budget.js";
 import { optimizeImageBytes, type GeneratedImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
 import { unitPriceUsdPerMegapixel } from "./pricing.js";
-import type { ImageEditFeature, ImageProvider, ImageProviderEditInput, ImageProviderGenerateInput } from "./types.js";
+import { modelSupportsLoras } from "./types.js";
+import type { ImageEditFeature, ImageLoraRef, ImageProvider, ImageProviderEditInput, ImageProviderGenerateInput } from "./types.js";
 
 const FAL_QUEUE_BASE = "https://queue.fal.run";
 /** Models whose endpoint accepts a reference image (image-to-image / editing). */
@@ -74,6 +75,50 @@ function sizePayload(size: string | undefined): Record<string, unknown> {
   return { image_size: { width: Number(match[1]), height: Number(match[2]) } };
 }
 
+/** fal accepts at most 3 LoRAs per request. */
+const MAX_FAL_LORAS = 3;
+
+/**
+ * C2: deterministic-generation payload. Two separate concerns, both needed for brand
+ * style-lock to actually hold across regenerations:
+ *   - `seed` makes a given (prompt, model, seed) reproducible.
+ *   - `acceleration: "none"` disables fal's speed-optimised sampling path, which is what
+ *     makes the seed numerically stable; with acceleration on, the same seed can drift.
+ * Both are only emitted when a seed was actually requested, so unseeded jobs keep today's
+ * (faster, cheaper) default behaviour untouched.
+ */
+function determinismPayload(seed: number | undefined): Record<string, unknown> {
+  if (seed === undefined) return {};
+  if (!Number.isInteger(seed) || seed < 0) {
+    throw new RenderError("IMAGE_PROVIDER_ERROR", `seed must be a non-negative integer; received ${seed}`, { seed });
+  }
+  return { seed, acceleration: "none" };
+}
+
+/**
+ * C3 enforcement point, at the provider rather than only at policy-save time: a LoRA sent
+ * to a model whose schema has no `loras` field is silently ignored by fal, producing an
+ * off-brand image that reports success. Fail loudly instead.
+ */
+function loraPayload(model: string, loras: ImageLoraRef[] | undefined): Record<string, unknown> {
+  if (!loras || loras.length === 0) return {};
+  if (!modelSupportsLoras(model)) {
+    throw new RenderError("IMAGE_PROVIDER_ERROR", `Model ${model} does not accept LoRAs; its schema has no "loras" field, so brand style-lock would be silently dropped`, {
+      model,
+      loraCount: loras.length,
+    });
+  }
+  if (loras.length > MAX_FAL_LORAS) {
+    throw new RenderError("IMAGE_PROVIDER_ERROR", `fal accepts at most ${MAX_FAL_LORAS} LoRAs per request; received ${loras.length}`, { model, loraCount: loras.length });
+  }
+  for (const lora of loras) {
+    if (!lora || typeof lora.path !== "string" || !lora.path.trim()) {
+      throw new RenderError("IMAGE_PROVIDER_ERROR", "each LoRA requires a non-empty path (the .safetensors URL)", { model });
+    }
+  }
+  return { loras: loras.map((lora) => ({ path: lora.path, ...(lora.scale === undefined ? {} : { scale: lora.scale }) })) };
+}
+
 async function runFalModel(options: {
   model: string;
   payload: Record<string, unknown>;
@@ -132,7 +177,13 @@ export const falImageProvider: ImageProvider = {
   async generate(input: ImageProviderGenerateInput): Promise<GeneratedImageBytes> {
     return runFalModel({
       model: input.model,
-      payload: { prompt: input.prompt, ...sizePayload(input.size), num_images: 1 },
+      payload: {
+        prompt: input.prompt,
+        ...sizePayload(input.size),
+        ...determinismPayload(input.seed),
+        ...loraPayload(input.model, input.loras),
+        num_images: 1,
+      },
       fetchImpl: input.fetchImpl,
       outputFormat: input.outputFormat,
       size: input.size,
@@ -157,7 +208,14 @@ export const falImageProvider: ImageProvider = {
     const imageUrl = `data:${sourceMime};base64,${input.sourceBytes.toString("base64")}`;
     return runFalModel({
       model: input.model,
-      payload: { prompt, image_url: imageUrl, ...sizePayload(input.size), num_images: 1 },
+      payload: {
+        prompt,
+        image_url: imageUrl,
+        ...sizePayload(input.size),
+        ...determinismPayload(input.seed),
+        ...loraPayload(input.model, input.loras),
+        num_images: 1,
+      },
       fetchImpl: input.fetchImpl,
       outputFormat: input.outputFormat,
       size: input.size,

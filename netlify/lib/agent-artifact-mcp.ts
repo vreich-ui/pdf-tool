@@ -8,6 +8,9 @@ import { buildBlockedState, evaluateApprovalRequirement, refreshedBlockedState, 
 import { canonicalImageModel, findImageProvider } from "./image-providers/registry.js";
 import { estimateImageJobCost } from "./image-providers/pricing.js";
 import { policyModelForUsageContext } from "./image-routing/policy.js";
+import { deterministicRenderCostReceipt, imageCostReceipt } from "./cost-receipt.js";
+import { chargeGenerationBudget } from "./generation-budget.js";
+import { RenderError } from "./pdf-render/errors.js";
 
 export interface CreateAgentArtifactJobInput {
   projectId: string;
@@ -94,8 +97,26 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const selected = resolveProjectModel(parsed.data.projectId, parsed.data.model);
     const provider = selected ? findImageProvider(selected) : undefined;
     if (selected && provider) {
-      parsed.data.costEstimate = estimateImageJobCost(provider.id, canonicalImageModel(selected), parsed.data.requirements?.image?.size);
+      const model = canonicalImageModel(selected);
+      parsed.data.costEstimate = estimateImageJobCost(provider.id, model, parsed.data.requirements?.image?.size);
+      parsed.data.costReceipt = imageCostReceipt(provider.id, model, parsed.data.requirements?.image?.size);
     }
+  } else if (parsed.data.artifactKind === "pdf") {
+    // D1: a PDF render is free, and recording that explicitly is the point — a per-request
+    // total is only trustworthy if every job contributed a receipt, including the zero ones.
+    parsed.data.costReceipt = deterministicRenderCostReceipt("pdf");
+  }
+
+  // D2: charge the per-request ledger BEFORE any worker is triggered, so the ceiling actually
+  // bounds spend rather than reporting it after the fact. Deterministic renders are free and
+  // pass through untouched; the guard fails open on a storage error (see chargeGenerationBudget).
+  try {
+    await chargeGenerationBudget({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, receipt: parsed.data.costReceipt });
+  } catch (error) {
+    if (error instanceof RenderError && error.code === "GENERATION_BUDGET_EXCEEDED") {
+      return { ok: false as const, statusCode: 429, error: error.message, errorCode: error.code, errorDetail: error.detail };
+    }
+    throw error;
   }
 
   // Operator-approval gate: when approval is required, persist the job in a resumable
@@ -112,7 +133,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     } catch (error) {
       return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
     }
-    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
+    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
 
   let job: Awaited<ReturnType<typeof createArtifactJob>>;
@@ -129,7 +150,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
@@ -156,7 +177,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const artifactReference = job.artifactReference ?? job.artifact;
   // A completed artifact carries a materialization proof so the CMS can verify it later.
   const materializationProof = job.status === "complete" && artifactReference ? attestArtifactReference(job.projectId, job.requestId, artifactReference) : undefined;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}) };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}) };
 }
 
 

@@ -6,6 +6,15 @@
  */
 import type { ImageJobCostEstimate } from "./types.js";
 
+/**
+ * D1 provenance. A stored cost receipt outlives the table that produced it, so both of these
+ * are stamped onto every receipt: without them, a six-week-old number cannot be told apart
+ * from a current one, and re-pricing history silently becomes indistinguishable from
+ * recording it correctly the first time. Bump BOTH whenever a price below changes.
+ */
+export const IMAGE_PRICE_TABLE_VERSION = "fal-list-prices-2026-07-20";
+export const IMAGE_PRICES_PRICED_AT = "2026-07-20";
+
 export const IMAGE_MODEL_PRICES_USD_PER_MEGAPIXEL: Record<string, number> = {
   "fal-ai/flux-2/klein/4b": 0.005,
   "fal-ai/flux-2/klein/9b": 0.006,
