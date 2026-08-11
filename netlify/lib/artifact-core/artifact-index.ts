@@ -156,6 +156,70 @@ export async function resolveArtifactFilenameCollision(projectId: string, reques
   return candidate;
 }
 
+/**
+ * Parses a public artifact path -- `/img/{requestId}/{sha256}.{ext}` or
+ * `/pdf/{requestId}/{sha256}.{ext}` -- into the two components needed to address the
+ * artifact's own index entry. Returns undefined for anything that is not a public
+ * artifact path (an external URL, a repo-relative asset path, a malformed key).
+ */
+export function parsePublicArtifactPath(publicPath: string): { requestId: string; sha256: string } | undefined {
+  if (typeof publicPath !== "string") return undefined;
+  const match = /^\/(?:img|pdf|video|doc|audio|data|attachment|other)\/([^/]+)\/([0-9a-f]{64})\.[A-Za-z0-9]+$/.exec(publicPath.trim());
+  if (!match) return undefined;
+  return { requestId: decodeURIComponent(match[1]), sha256: match[2] };
+}
+
+/**
+ * Strongly-consistent existence check for a single artifact.
+ *
+ * This exists because `readArtifactIndexKeys` (below) is built on Blobs `list()`, which is
+ * EVENTUALLY consistent even when the store is opened with `consistency: "strong"` -- strong
+ * consistency covers `get`, not `list`. A just-written artifact is therefore routinely absent
+ * from a listing for some time after `saveArtifactBytes` has returned and the artifact is
+ * already retrievable by key. Callers that ask "does this artifact exist?" and answer from a
+ * listing will report a live artifact as missing.
+ *
+ * The artifact's own reference is written at a deterministic key
+ * (`request-artifacts/{requestId}/{sha256}.json`), so existence can be answered with a direct,
+ * strongly-consistent `get` instead. Prefer this over scanning a listing whenever the caller
+ * already knows (or can derive) the requestId and sha256 -- which a public artifact path always
+ * carries; see parsePublicArtifactPath.
+ *
+ * Returns "present" | "absent" | "unavailable" -- never conflating "the index could not be
+ * read" with "the artifact does not exist", so a caller can degrade to not-verified instead of
+ * failing a valid artifact.
+ */
+export async function artifactExistenceByKey(
+  requestId: string,
+  sha256: string,
+  options: { storeName?: string; siteID?: string; token?: string } = {}
+): Promise<"present" | "absent" | "unavailable"> {
+  let indexStore: ProjectBlobStore;
+  try {
+    indexStore = await artifactIndexStore(options);
+  } catch {
+    return "unavailable";
+  }
+  try {
+    const existing = await indexStore.get(requestArtifactReferenceKey(requestId, sha256), { type: "json" });
+    return existing ? "present" : "absent";
+  } catch {
+    // A transport/auth failure is not evidence of absence.
+    return "unavailable";
+  }
+}
+
+/** Convenience wrapper: existence for a public artifact path. A path this function cannot
+ * parse is reported "unavailable" (not "absent") -- it is outside this index's authority. */
+export async function artifactExistenceByPublicPath(
+  publicPath: string,
+  options: { storeName?: string; siteID?: string; token?: string } = {}
+): Promise<"present" | "absent" | "unavailable"> {
+  const parsed = parsePublicArtifactPath(publicPath);
+  if (!parsed) return "unavailable";
+  return artifactExistenceByKey(parsed.requestId, parsed.sha256, options);
+}
+
 type BlobListItem = { key: string };
 type BlobListPage = { blobs?: BlobListItem[] };
 
@@ -169,6 +233,15 @@ function collectBlobKeys(items: BlobListItem[] | undefined, keys: string[]): voi
   }
 }
 
+/**
+ * Lists index keys under `prefix`.
+ *
+ * CONSISTENCY: this is built on Blobs `list()`, which is EVENTUALLY consistent regardless of
+ * the store's `consistency` setting. An empty result does NOT mean "no such artifact" -- a
+ * recently written artifact can be missing here while already readable by key. Do not use this
+ * to decide whether a specific artifact exists; use artifactExistenceByKey /
+ * artifactExistenceByPublicPath, which answer from a strongly-consistent `get`.
+ */
 export async function readArtifactIndexKeys(prefix: string, options: { storeName?: string; siteID?: string; token?: string } = {}): Promise<string[]> {
   const indexStore = await artifactIndexStore(options);
   if (!indexStore.list) return [];
