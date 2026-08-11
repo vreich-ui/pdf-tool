@@ -34,6 +34,8 @@ const VIRTUAL_ASSET_HOST = "render.assets.invalid";
 const MAX_BLOCKED_WARNINGS = 20;
 const MAX_OVERFLOW_ENTRIES = 20;
 const SET_CONTENT_TIMEOUT_MS = 30000;
+/** Upper bound on waiting for images to decode before capture (see waitForImagesDecoded). */
+const IMAGE_DECODE_TIMEOUT_MS = 15000;
 
 // ---------------------------------------------------------------------------
 // Browser singleton
@@ -335,6 +337,63 @@ function collectOverflows(maxEntries: number): OverflowEntry[] {
 }
 
 // ---------------------------------------------------------------------------
+// Image readiness (runs before page.pdf)
+// ---------------------------------------------------------------------------
+
+/**
+ * `setContent`'s `waitUntil` only tracks navigation/network lifecycle. An image whose bytes are
+ * inline in the document -- a `data:` URI produced by Liquid substitution -- issues NO network
+ * request, so a network-based wait can resolve before that image has finished decoding, and
+ * `page.pdf()` then captures whatever has been painted so far. The observed failure is a
+ * partially decoded raster: correct at the top, blank below a horizontal line, embedded in an
+ * otherwise valid PDF that reports success. Nothing downstream can detect it.
+ *
+ * This waits for every image to reach a decoded state before the PDF is taken, and reports any
+ * image that did not, so a bad render surfaces as a diagnostic instead of shipping silently.
+ * Assets served over the virtual origin are unaffected by the underlying race (they ARE network
+ * requests) but are covered here too, at no extra cost.
+ *
+ * Runs in Playwright's isolated world, which is still available with `javaScriptEnabled: false`
+ * -- page-authored script stays inert, so this does not widen the sandbox.
+ */
+async function waitForImagesDecoded(page: {
+  evaluate: <T>(fn: (arg: number) => T | Promise<T>, arg: number) => Promise<T>;
+}, timeoutMs: number): Promise<{ total: number; undecoded: string[] }> {
+  return page.evaluate(async (deadlineMs: number) => {
+    const images: any[] = Array.from(document.images ?? []);
+    const describe = (img: any): string => {
+      const raw = String(img.currentSrc || img.getAttribute("src") || "(no src)");
+      return raw.startsWith("data:") ? `${raw.slice(0, 32)}… (${raw.length} chars, inline)` : raw;
+    };
+    const settle = (img: any) =>
+      new Promise<void>((resolve) => {
+        if (img.complete) return resolve();
+        const done = () => resolve();
+        img.addEventListener("load", done, { once: true });
+        img.addEventListener("error", done, { once: true });
+      });
+    const withDeadline = <T,>(p: Promise<T>) =>
+      Promise.race([p, new Promise<void>((r) => setTimeout(r, deadlineMs))]);
+
+    await withDeadline(Promise.all(images.map(settle)));
+    // decode() resolves only once the frame is fully decoded and paintable — the property the
+    // load event alone does not guarantee.
+    await withDeadline(
+      Promise.all(images.map(async (img) => {
+        if (typeof img.decode === "function") {
+          try { await img.decode(); } catch { /* broken/aborted image — reported below */ }
+        }
+      }))
+    );
+
+    const undecoded = images
+      .filter((img) => !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0)
+      .map(describe);
+    return { total: images.length, undecoded };
+  }, timeoutMs);
+}
+
+// ---------------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------------
 
@@ -438,6 +497,17 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
           } catch (error) {
             warnings.push(`overflow diagnostics unavailable: ${errMsg(error)}`);
           }
+        }
+
+        // Must run BEFORE page.pdf(): an image still decoding at capture time is embedded
+        // half-painted, in a PDF that is otherwise valid and reports success.
+        try {
+          const imageState = await waitForImagesDecoded(page as never, Math.min(request.timeoutMs, IMAGE_DECODE_TIMEOUT_MS));
+          for (const src of imageState.undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
+            warnings.push(`image did not finish decoding before capture and may be incomplete in the output: ${src}`);
+          }
+        } catch (error) {
+          warnings.push(`image readiness check unavailable: ${errMsg(error)}`);
         }
 
         const pdfBytes = await page.pdf(buildPdfOptions(request.requirements));
