@@ -184,6 +184,27 @@ export const MCP_TOOL_SCHEMAS = {
     policy: z.object({}).passthrough().describe("Partial ImageModelPolicy JSON: { byUsageContext: { article_header: { model: \"flux-2\" }, ... } }")
   }).strict(),
 
+  // ── T12.8 capture plane ──
+
+  create_capture_job: z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1).describe("Idempotency scope: while a capture job for this requestId is non-terminal, a repeated create re-attaches to it (continuing its crawl from the frontier) instead of starting a parallel crawl"),
+    url: z.string().min(1).describe("https seed URL; must be inside the policy's allowedCrawlOrigins + allowedPathPrefixes"),
+    policy: z.object({}).passthrough().describe("The frozen ProjectCapturePolicy (T12.7 shape, verbatim): maxPages, allowedCrawlOrigins, allowedPathPrefixes, sameOriginOnly (must be true), respectRobots (must be true), concurrency, delayMs, authenticatedAccess (must be \"prohibited\"), rights, designReferences, fidelity. Bounds are CEILINGS enforced on both the create side and the worker side — a caller cannot widen them."),
+    viewports: z.array(z.object({
+      id: z.string().min(1).max(32),
+      width: z.number().int(),
+      height: z.number().int(),
+      deviceScaleFactor: z.number().optional()
+    }).strict()).min(1).max(4).optional().describe("Capture viewports; defaults to mobile 390x844 + desktop 1440x1000"),
+    label: z.string().optional()
+  }).strict(),
+
+  get_capture_job_status: z.object({
+    projectId: z.string().min(1),
+    jobId: z.string().min(1)
+  }).strict(),
+
   // ── New in S4a ──
 
   set_storage_grant: z.object({}).strict(),

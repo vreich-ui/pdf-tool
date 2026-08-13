@@ -37,7 +37,12 @@ export type RenderErrorCode =
   | "IMAGE_DECODE_ERROR"
   | "JOB_EXECUTION_TIMEOUT"
   /** D2: this job would push its requestId past the per-request generation budget. */
-  | "GENERATION_BUDGET_EXCEEDED";
+  | "GENERATION_BUDGET_EXCEEDED"
+  /** T12.8: a capture job's stored policy fails worker-side re-validation (bounds are
+   * ceilings enforced on BOTH sides — a record that bypassed create is still refused). */
+  | "CAPTURE_POLICY_VIOLATION"
+  /** T12.8: robots.txt could not be fetched/parsed; the crawl refuses rather than guessing. */
+  | "CAPTURE_ROBOTS_UNAVAILABLE";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

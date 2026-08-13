@@ -190,6 +190,44 @@ Failure (always JSON, never bytes):
   default `body { font-family: "NotoSans", sans-serif; }` rule the template's own CSS can
   override).
 
+### `POST /capture/page` (T12.8 capture plane)
+
+Captures ONE live page as a `snapshot.v1` page payload for pdf-tool's Netlify capture
+worker (the crawl loop lives there; this endpoint is called once per page). The
+extraction/measurement logic is ported from the platform repo's capture engine
+(`packages/core/cli/capture/capture.mjs`) — same DOM outline, per-block boxes + computed
+styles per viewport, full-page + per-block screenshots.
+
+Request (auth: same `x-render-secret` as the render routes):
+
+```jsonc
+{
+  "url": "https://www.example.com/",            // https, DNS hostname (SSRF-guarded)
+  "viewports": [                                  // optional, ≤ 4; default mobile 390x844 + desktop 1440x1000
+    { "id": "desktop", "width": 1440, "height": 1000, "deviceScaleFactor": 1 }
+  ],
+  "networkAllowlist": ["https://www.example.com"], // required https origins; must include url's origin
+  "budgetMs": 90000,                               // clamped to [5000, 240000]
+  "userAgent": "W12Capture/1.0"                    // optional; the worker passes its robots UA
+}
+```
+
+Response: `{ ok: true, page, screenshots, diagnostics }` where `page` is the snapshot.v1
+`pages[]` entry (screenshot entries carry `path`/`sha256`/`byteLength` metadata only) and
+`screenshots[]` carries the PNG binaries as `bytesBase64` (combined cap 60 MB) for the
+worker to persist through the caller's storage grant. Blocked network requests are
+recorded in `diagnostics.blockedRequests` (capped at 20).
+
+Unlike the print path, this navigates with **JavaScript ENABLED** — inside its own fresh
+per-request `BrowserContext` whose `context.route("**/*")` aborts every request to an
+origin outside `networkAllowlist` (non-allowlisted **navigations** included). The print
+contexts' lockdown is untouched; the two paths share only the warm browser process.
+Errors: 400 `CAPTURE_REQUEST_INVALID`, 401 `RENDER_SERVICE_AUTH`, 502
+`CAPTURE_NAVIGATION_FAILED` (no response / HTTP ≥ 400 / non-HTML), 500
+`CAPTURE_SCREENSHOT_FAILED` / `CAPTURE_ENGINE_ERROR`, 504 `CAPTURE_TIMEOUT`.
+`CAPTURE_TEST_ALLOW_HTTP=1` (test-only, never in production) relaxes the https/DNS-host
+SSRF guard so integration tests can capture from a loopback fixture server.
+
 ## How `data`/`requirements` reach a typst template
 
 The server spawns:

@@ -53,6 +53,12 @@ export const MCP_CAPABILITIES: McpCapability[] = [
     optionalTools: ["import_image_from_url", "import_images_from_url", "get_image_search_policy", "set_image_search_policy"]
   },
   {
+    id: "site_capture",
+    description: "Crawl a policy-bounded site into a snapshot.v1 + screenshots artifact set (T12.8 capture plane; drafts only, never publish/release/deploy).",
+    requiredTools: ["create_capture_job", "get_capture_job_status"],
+    optionalTools: ["get_agent_artifact_by_filename", "verify_agent_artifact"]
+  },
+  {
     id: "operator_approval",
     description: "Resume a job that is blocked awaiting human approval before it generates.",
     requiredTools: ["resume_agent_artifact_job"],

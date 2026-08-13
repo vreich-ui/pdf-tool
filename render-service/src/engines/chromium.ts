@@ -63,6 +63,13 @@ function getBrowser(): Promise<Browser> {
   return browserPromise;
 }
 
+/** The capture engine (capture.ts) shares the SAME warm browser process; isolation lives at
+ * the BrowserContext level (the print path's deny-all context config is untouched — capture
+ * creates its own per-request context with its own routing). */
+export function getWarmChromiumBrowser(): Promise<Browser> {
+  return getBrowser();
+}
+
 /** Probes the browser once and caches only a SUCCESSFUL result (mirrors typstVersion's
  * "don't cache failures" policy, so /health recovers once the browser becomes available). */
 export async function chromiumAvailable(): Promise<{ available: boolean; version?: string }> {

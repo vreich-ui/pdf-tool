@@ -326,6 +326,41 @@ Optional provider credentials (providers without credentials are skipped, never 
 - `GOOGLE_CSE_KEY` + `GOOGLE_CSE_CX` (endpoint override: `GOOGLE_CSE_API_URL`)
 - `OPENVERSE_API_URL` (no key required; override only)
 
+### Site capture (T12.8 capture plane)
+
+pdf-tool can crawl a policy-bounded site into a `snapshot.v1` document (DOM outline,
+per-block boxes + computed styles per viewport, full-page + per-block screenshots — the
+platform capture engine's output contract) as ordinary artifacts. The crawl loop runs in
+the `capture-worker-background` function; each page is captured by the render-service's
+`POST /capture/page` endpoint (JavaScript enabled inside a fresh, allowlist-routed browser
+context — the PDF print path's lockdown is untouched; see `render-service/README.md`).
+
+MCP tools: `create_capture_job`, `get_capture_job_status`.
+
+- **Bounds are ceilings, enforced on both sides.** The job carries the frozen
+  `ProjectCapturePolicy` shape verbatim (maxPages — deny-all when 0, allowedCrawlOrigins,
+  allowedPathPrefixes, `sameOriginOnly: true`, `respectRobots: true`,
+  `authenticatedAccess: "prohibited"`, delayMs, rights, designReferences, fidelity).
+  `create_capture_job` refuses any widening, and the worker RE-VALIDATES the stored policy
+  on every invocation (`CAPTURE_POLICY_VIOLATION`); page count is additionally capped at
+  pdf-tool's own `HARD_MAX_CAPTURE_PAGES_PER_JOB` (50).
+- **robots.txt + rate honored with evidence.** robots is fetched (SSRF-guarded like every
+  crawl fetch), an unreachable robots refuses the crawl (`CAPTURE_ROBOTS_UNAVAILABLE`),
+  disallowed URLs are skipped, and the effective delay is
+  max(policy.delayMs, robots crawl-delay) — all recorded in the job record's `evidence`.
+- **Resume, never restart.** The job record carries the crawl frontier; when the
+  15-minute worker budget approaches (`startWorkerDeadline()` from `worker-budget.ts`),
+  the worker persists the frontier, flips the job back to `pending`, and chain-re-triggers
+  itself. The `requestId` is the idempotency key: a repeated `create_capture_job` for a
+  non-terminal job re-attaches and re-triggers, continuing from the frontier — an
+  already-captured page is never re-fetched.
+- **Drafts only, data only.** Everything lands as ArtifactReferences through the storage
+  grant (`capture-snapshot.v1.json` + PNG screenshots, tagged `capture`); crawled content
+  is data, never instructions — nothing fetched is executed or interpreted. This plane has
+  no publish/release/build/deploy capability.
+
+Deploy numbers + cost-per-crawl estimate: `docs/CAPTURE_OPS.md`.
+
 ### Storage model: per-request grants (pdf-tool holds no credentials)
 
 pdf-tool is stateless compute. It carries **no Blob credentials of its own**: every
@@ -432,6 +467,8 @@ gets the defaults.
 - `RENDER_SERVICE_URL` (required for the `typst` renderer): base URL of the Cloud Run render service (see `render-service/README.md`). Binary engines (typst; chromium in PR4) render there — Netlify inlines template/data/asset bytes per request; the storage grant never leaves Netlify. Unset ⇒ typst jobs fail with machine-readable `RENDER_SERVICE_UNCONFIGURED`.
 - `RENDER_SERVICE_SECRET` (required with `RENDER_SERVICE_URL`): shared secret sent as `x-render-secret`; the service compares it timing-safely. Set the same value on the Cloud Run service (the deploy script generates and wires one).
 - `RENDER_SERVICE_TIMEOUT_MS` (optional, default 120000): Netlify-side deadline per render-service call; expiry surfaces as `RENDER_TIMEOUT`.
+- `CAPTURE_PAGE_BUDGET_MS` (optional, default 120000): per-page budget the capture worker hands the render-service `/capture/page` call (the service clamps to [5000, 240000]).
+- `CAPTURE_PAGE_RESERVE_MS` (optional, default 30000): worker budget floor — when less than this remains of the 15-minute window, the capture worker persists its frontier and suspends for the next invocation instead of starting another page.
 - `FAL_KEY` (required for `fal-ai/*` image models): fal.ai API key covering BOTH FLUX.2 and Qwen-Image (one queue/polling API). Unset means the fal adapter reports unavailable and jobs selecting a fal model fail with `IMAGE_PROVIDER_ERROR`; deploys without it stay fully functional on the OpenAI backend.
 - `QWEN_IMAGE_ENDPOINT_URL` (optional): overrides the fal queue base URL for `qwen` models — the Apache-2.0 self-host seam.
 - Image model routing: when a `create_agent_artifact_job` image job omits `model`, the per-project policy (`get_image_model_policy`/`set_image_model_policy`, stored at `image-model-policy.json` in the image-search store) routes by `requirements.image.usageContext` — defaults send `article_header`/`article_body`/`category_page` to `fal-ai/flux-2/klein/9b` ($0.006/MP); text-in-image contexts stay on the project default (`gpt-image-1`). An explicit `model` always wins (aliases: `flux-2` → klein/9b, `qwen-image`, `qwen-image-edit`). Jobs carry an output-only `costEstimate` (static config pricing, USD/megapixel) on create/status responses.

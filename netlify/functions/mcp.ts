@@ -3,6 +3,7 @@ import { verifyArtifactMaterialization, type VerifyArtifactInput } from "../lib/
 import type { ResumeArtifactJobInput } from "../lib/agent-artifact-approval.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, archivePdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput, type ArchivePdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
+import { createCaptureJob, getCaptureJobStatus } from "../lib/agent-capture-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
@@ -273,6 +274,18 @@ const TOOL_METADATA: ToolMetadata[] = [
     description: "Replace the project's stored image model routing policy with the given partial policy (validated, merged over defaults). Entries map usageContext to { model } (null clears an entry back to the project default backend). Models must be routable (gpt-image*, dall-e*, fal-ai/*, or a known alias like flux-2 / qwen-image) AND in the project's allowedModels.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     outputSchema: outputSchema({ policy: { type: "object" } })
+  },
+  {
+    name: "create_capture_job",
+    description: "Start a site-capture crawl job (T12.8 capture plane): given an https seed URL and the project's frozen ProjectCapturePolicy, a background worker crawls the site one page at a time through the render-service capture endpoint (JavaScript enabled, network restricted to the policy's origins) and saves the snapshot.v1 JSON plus full-page and per-block screenshots as ArtifactReferences through the storage grant. Policy bounds (maxPages — deny-all when 0, allowedCrawlOrigins, allowedPathPrefixes, sameOriginOnly=true, respectRobots=true, authenticatedAccess=\"prohibited\", delayMs) are CEILINGS enforced at create time AND re-validated worker-side; robots.txt is fetched, honored, and recorded as evidence in the job record together with the applied rate delays. Everything produced is draft data — this plane cannot publish, release, build, or deploy. The requestId is the idempotency key: while a capture job for it is non-terminal, a repeated create re-attaches to that job and re-triggers its worker, which CONTINUES the crawl from the stored frontier (a crawl larger than one 15-minute worker window resumes this way — it never restarts and never re-fetches an already-captured page). Returns job metadata and polling instructions only; never page bytes.",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, url: { type: "string" }, effectiveMaxPages: { type: "number" }, resumedExisting: { type: "boolean" }, polling: { type: "object" } })
+  },
+  {
+    name: "get_capture_job_status",
+    description: "Get pending/running/complete/failed status for a capture job. Completed jobs include the snapshot.v1 ArtifactReference and counts; in-flight jobs include crawl progress (pages captured, queue remaining) and the robots + rate evidence. A `pending` job that has a resumeCount > 0 is between budget windows — its worker chain-re-triggers itself; if it stays pending, calling create_capture_job again with the same requestId re-triggers the crawl, which resumes from the frontier. Never returns page bytes.",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, result: { type: "object" }, evidence: { type: "object" }, progress: { type: "object" }, resumeCount: { type: "number" } })
   },
   {
     name: "set_storage_grant",
@@ -590,6 +603,16 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     }
     case "import_images_from_url": {
       const result = await createImageImportJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
+    }
+    case "create_capture_job": {
+      const result = await createCaptureJob(args, { baseUrl: requestBaseUrl(event), token: process.env.AGENT_RUN_TOKEN });
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
+    }
+    case "get_capture_job_status": {
+      const result = await getCaptureJobStatus(args as never);
       const { statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }

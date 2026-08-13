@@ -1,0 +1,55 @@
+import { getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
+import { readCaptureJob, updateCaptureJob } from "../lib/capture/jobs.js";
+import { runCaptureCrawl } from "../lib/capture/worker.js";
+import { structuredError } from "../lib/pdf-render/errors.js";
+import { artifactWorkerBaseUrl } from "../lib/agent-artifact-worker-trigger.js";
+import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
+
+export const config = { name: "capture-worker-background" };
+
+type FunctionEvent = {
+  httpMethod: string;
+  headers?: Record<string, string | undefined>;
+  body?: string | null;
+};
+
+export async function handler(event: FunctionEvent) {
+  if (event.httpMethod !== "POST") return jsonResponse(405, { error: "Method not allowed" });
+  if (!isAuthorized(getHeader(event.headers, "authorization"))) return jsonResponse(401, { error: "Unauthorized" });
+
+  const { projectId, jobId, storage, descriptor } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown }>(event.body) ?? {};
+  if (!projectId || !jobId) return jsonResponse(400, { error: "projectId and jobId are required" });
+
+  // Grant REQUIRED + projectId included so the grant↔descriptor↔project binding runs on
+  // this entrypoint (a grantless run would silently read pdf-tool's own empty stores).
+  const extracted = extractRequestContext({ storage, descriptor, projectId });
+  if (extracted.error) return jsonResponse(400, { error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) });
+  return runWithRequestContext(extracted.ctx, () => runCaptureWorker(projectId, jobId, artifactWorkerBaseUrl(event)));
+}
+
+async function runCaptureWorker(projectId: string, jobId: string, baseUrl: string | undefined) {
+  const job = await readCaptureJob(projectId, jobId);
+  if (!job) return jsonResponse(404, { error: "Capture job not found" });
+  if (job.status === "complete" || job.status === "running" || job.status === "failed") {
+    return jsonResponse(200, { projectId: job.projectId, requestId: job.requestId, jobId: job.jobId, status: job.status, result: job.result, error: job.error });
+  }
+
+  let runningJob = job;
+  try {
+    runningJob = await updateCaptureJob(job, { status: "running", error: undefined, errorCode: undefined, startedAt: new Date().toISOString() });
+    const { job: finished, outcome } = await runCaptureCrawl(runningJob, { baseUrl, token: process.env.AGENT_RUN_TOKEN });
+    return jsonResponse(200, {
+      projectId: finished.projectId,
+      requestId: finished.requestId,
+      jobId: finished.jobId,
+      status: finished.status,
+      outcome,
+      result: finished.result,
+      resumeCount: finished.resumeCount,
+    });
+  } catch (error) {
+    const { code } = structuredError(error);
+    const failed = await updateCaptureJob(runningJob, { status: "failed", error: safeError(error), ...(code ? { errorCode: code } : {}) });
+    return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error, ...(failed.errorCode ? { errorCode: failed.errorCode } : {}) });
+  }
+}

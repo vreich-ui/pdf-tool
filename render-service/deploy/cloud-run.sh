@@ -146,16 +146,18 @@ rm -f "${BUILD_LOG}"
 SECRET="${RENDER_SERVICE_SECRET:-$(openssl rand -hex 32)}"
 
 # --- deploy to Cloud Run ---------------------------------------------------------------------
+# T12.8: the capture endpoint (/capture/page — JS enabled, multi-viewport screenshots) needs
+# more than the print path's old 300s/1Gi/1CPU. Numbers + cost estimate: docs/CAPTURE_OPS.md.
 echo "== Deploying ${SERVICE_NAME} to Cloud Run (${REGION}) =="
 gcloud run deploy "${SERVICE_NAME}" \
   --image="${IMAGE_TAG}" \
   --region="${REGION}" \
   --allow-unauthenticated \
-  --memory=1Gi \
-  --cpu=1 \
-  --timeout=300 \
+  --memory=2Gi \
+  --cpu=2 \
+  --timeout=600 \
   --max-instances=3 \
-  --concurrency=4 \
+  --concurrency=2 \
   --set-env-vars="RENDER_SERVICE_SECRET=${SECRET}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"

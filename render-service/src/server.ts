@@ -5,6 +5,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { checkAuth } from "./auth.js";
 import { validateRenderRequest } from "./contract.js";
+import { capturePage, validateCaptureRequest } from "./capture.js";
 import { chromiumAvailable, renderChromium } from "./engines/chromium.js";
 import { renderTypst, typstVersion } from "./engines/typst.js";
 
@@ -113,6 +114,48 @@ export function buildServer(): FastifyInstance {
         ...result.diagnostics,
         engine: { id: "chromium", executedIn: "render-service" },
       },
+    };
+  });
+
+  // T12.8 capture plane: navigate ONE page with JavaScript enabled inside a fresh,
+  // allowlist-routed context and return the snapshot.v1 page payload + screenshots. The
+  // print routes above keep their lockdown untouched — capture is opt-in per request.
+  fastify.post("/capture/page", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateCaptureRequest(request.body);
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await capturePage(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "CAPTURE_ENGINE_ERROR",
+        message: `Unexpected capture engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status = result.code === "CAPTURE_TIMEOUT" ? 504 : result.code === "CAPTURE_NAVIGATION_FAILED" ? 502 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      page: result.page,
+      screenshots: result.screenshots,
+      diagnostics: { ...result.diagnostics, engine: { id: "chromium-capture", executedIn: "render-service" } },
     };
   });
 
