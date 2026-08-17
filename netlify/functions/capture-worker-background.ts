@@ -1,6 +1,7 @@
 import { getHeader, isAuthorized, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { readCaptureJob, updateCaptureJob } from "../lib/capture/jobs.js";
 import { runCaptureCrawl } from "../lib/capture/worker.js";
+import { runWithCaptureStorage } from "../lib/capture/storage.js";
 import { structuredError } from "../lib/pdf-render/errors.js";
 import { artifactWorkerBaseUrl } from "../lib/agent-artifact-worker-trigger.js";
 import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
@@ -20,11 +21,16 @@ export async function handler(event: FunctionEvent) {
   const { projectId, jobId, storage, descriptor } = parseJsonBody<{ projectId?: string; jobId?: string; storage?: unknown; descriptor?: unknown }>(event.body) ?? {};
   if (!projectId || !jobId) return jsonResponse(400, { error: "projectId and jobId are required" });
 
-  // Grant REQUIRED + projectId included so the grant↔descriptor↔project binding runs on
-  // this entrypoint (a grantless run would silently read pdf-tool's own empty stores).
-  const extracted = extractRequestContext({ storage, descriptor, projectId });
+  // T12.13: the capture plane writes PDF-TOOL'S OWN storage (Wolf's 2026-08-14 "option A"),
+  // so no caller grant is required — and a caller-supplied one is bound only for the
+  // descriptor↔project agreement check, never used for a write: runWithCaptureStorage
+  // REPLACES the ambient grant with pdf-tool's own for the whole crawl. This is what makes a
+  // capture job on a tenant with no PDF_TOOL_STORAGE_TOKEN / PDF_TOOL_STORAGE_SITE_ID work.
+  const extracted = extractRequestContext({ storage, descriptor, projectId }, { requireGrant: false });
   if (extracted.error) return jsonResponse(400, { error: extracted.error, ...(extracted.errorCode ? { errorCode: extracted.errorCode } : {}) });
-  return runWithRequestContext(extracted.ctx, () => runCaptureWorker(projectId, jobId, artifactWorkerBaseUrl(event)));
+  return runWithRequestContext(extracted.ctx, () =>
+    runWithCaptureStorage(projectId, () => runCaptureWorker(projectId, jobId, artifactWorkerBaseUrl(event)))
+  );
 }
 
 async function runCaptureWorker(projectId: string, jobId: string, baseUrl: string | undefined) {

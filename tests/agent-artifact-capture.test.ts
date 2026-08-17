@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020.js";
-import { projectBlobStore, resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
+import { projectBlobStore, projectBlobStoreCallLog, resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
 import { handler as captureWorkerHandler } from "../netlify/functions/capture-worker-background.js";
 import { handler as mcpHandler } from "../netlify/functions/mcp.js";
-import { createCaptureJob, getCaptureJobStatus } from "../netlify/lib/agent-capture-mcp.js";
+import { createCaptureJob, getCaptureJobStatus, getCaptureSnapshot } from "../netlify/lib/agent-capture-mcp.js";
 import { createCaptureJobRecord, readCaptureJob, updateCaptureJob, validateCaptureJobRequest, type CaptureJobRequest } from "../netlify/lib/capture/jobs.js";
 import { HARD_MAX_CAPTURE_PAGES_PER_JOB, stablePageId, validateCapturePolicy, type ProjectCapturePolicy } from "../netlify/lib/capture/policy.js";
+import { captureStorageGrant } from "../netlify/lib/capture/storage.js";
+import { grantBlobCredentials, isPdfToolOwnStorageGrant, parseStorageGrant, PDF_TOOL_OWN_STORAGE_GRANT_TYPE, PDF_TOOL_OWN_STORAGE_SENTINEL } from "../netlify/lib/storage-grant.js";
 import type { CaptureServicePageResult } from "../netlify/lib/capture/service-client.js";
 
 /**
@@ -123,6 +125,11 @@ function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
+  // T12.13: the capture plane must work with NO storage credential of any kind in the
+  // environment — pdf-tool's own site vars included (it then falls back to the built-in
+  // same-site context). Cleared per test so nothing below can quietly depend on one.
+  delete process.env.PDF_TOOL_SITE_ID;
+  delete process.env.PDF_TOOL_BLOBS_TOKEN;
   delete process.env.URL;
   delete process.env.DEPLOY_PRIME_URL;
   delete process.env.CAPTURE_TEST_FIXTURES;
@@ -132,14 +139,6 @@ function env() {
 }
 
 const AUTH = { authorization: "Bearer test-token" };
-
-const STORAGE = {
-  grantType: "netlify-pat",
-  projectId: "dr-lurie",
-  siteId: "dr-site",
-  token: "dr-token",
-  stores: { jobs: "agent-artifact-jobs" }
-};
 
 test.beforeEach(() => {
   resetMemoryBlobStores();
@@ -157,11 +156,14 @@ function jobRequest(overrides: Partial<CaptureJobRequest> = {}): CaptureJobReque
   };
 }
 
-async function invokeWorker(projectId: string, jobId: string) {
+// T12.13: no `storage` in the worker POST body. The capture plane writes pdf-tool's own
+// store, so the worker needs (and gets) no caller credential — which is exactly what makes a
+// capture job on a tenant with PDF_TOOL_STORAGE_TOKEN / PDF_TOOL_STORAGE_SITE_ID unset work.
+async function invokeWorker(projectId: string, jobId: string, body: Record<string, unknown> = {}) {
   const response = await captureWorkerHandler({
     httpMethod: "POST",
     headers: AUTH,
-    body: JSON.stringify({ storage: STORAGE, projectId, jobId }),
+    body: JSON.stringify({ projectId, jobId, ...body }),
   });
   return { response, body: JSON.parse(response.body) };
 }
@@ -381,7 +383,7 @@ test("create_capture_job: requestId is the idempotency key — a repeated create
   }) as typeof fetch;
 
   try {
-    const input = { ...jobRequest({ requestId: "req-idem" }), storage: STORAGE };
+    const input = { ...jobRequest({ requestId: "req-idem" }) };
     const first = await createCaptureJob(input, { baseUrl: process.env.URL, token: "test-token" });
     assert.equal(first.ok, true);
     if (!first.ok) return;
@@ -409,7 +411,7 @@ test("create_capture_job: requestId is the idempotency key — a repeated create
 
 // ── MCP surface (all four seats) ──
 
-test("MCP surface: capture tools advertised with schemas + capability manifest, and grantless calls fail typed", async () => {
+test("MCP surface: capture tools advertised with schemas + capability manifest, and NO tool in the plane requires a storage grant (T12.13)", async () => {
   const list = await mcpHandler({
     httpMethod: "POST",
     headers: AUTH,
@@ -418,21 +420,38 @@ test("MCP surface: capture tools advertised with schemas + capability manifest, 
   const tools = JSON.parse(list.body).result.tools as Array<{ name: string; inputSchema: { required?: string[]; properties: Record<string, unknown> } ; annotations: Record<string, unknown> }>;
   const create = tools.find((tool) => tool.name === "create_capture_job");
   const statusTool = tools.find((tool) => tool.name === "get_capture_job_status");
+  const snapshotTool = tools.find((tool) => tool.name === "get_capture_snapshot");
   assert.ok(create, "create_capture_job advertised");
   assert.ok(statusTool, "get_capture_job_status advertised");
-  assert.ok(create!.inputSchema.required?.includes("storage"), "storage grant required on create");
+  assert.ok(snapshotTool, "get_capture_snapshot advertised");
   assert.ok(create!.inputSchema.properties.policy, "policy in the advertised schema");
   assert.equal(statusTool!.annotations.readOnlyHint, true);
+  assert.equal(snapshotTool!.annotations.readOnlyHint, true);
+  // T12.13 (Wolf, option A): the capture plane writes pdf-tool's OWN store, so a storage
+  // grant is not required on ANY of its tools. This is the advertised half of "capture on a
+  // new tenant needs no per-site Netlify PAT".
+  for (const tool of [create!, statusTool!, snapshotTool!]) {
+    assert.ok(!tool.inputSchema.required?.includes("storage"), `${tool.name} must not require a storage grant`);
+  }
 
-  // Grantless call fails with the typed storage-grant error (switch seat wired).
-  const grantless = await mcpHandler({
-    httpMethod: "POST",
-    headers: AUTH,
-    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "create_capture_job", arguments: { projectId: "dr-lurie", requestId: "r1", url: SEED, policy: policyFixture() } } })
-  });
-  const grantlessResult = JSON.parse(grantless.body).result;
-  assert.equal(grantlessResult.isError, true);
-  assert.equal(grantlessResult.structuredContent.errorCode, "STORAGE_GRANT_REQUIRED");
+  // A GRANTLESS create now succeeds — the pre-T12.13 STORAGE_GRANT_REQUIRED refusal is gone.
+  process.env.URL = "https://pdf-tool.example.netlify.app";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  let grantlessResult: { isError?: boolean; structuredContent: Record<string, unknown> };
+  try {
+    const grantless = await mcpHandler({
+      httpMethod: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "create_capture_job", arguments: { projectId: "dr-lurie", requestId: "req-grantless", url: SEED, policy: policyFixture() } } })
+    });
+    grantlessResult = JSON.parse(grantless.body).result;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(!grantlessResult.isError, JSON.stringify(grantlessResult.structuredContent));
+  assert.ok(typeof grantlessResult.structuredContent.jobId === "string", "a grantless create produced a job");
+  assert.notEqual(grantlessResult.structuredContent.errorCode, "STORAGE_GRANT_REQUIRED");
 
   // Capability manifest (health tool) lists the capture capability.
   const health = await mcpHandler({
@@ -443,6 +462,150 @@ test("MCP surface: capture tools advertised with schemas + capability manifest, 
   const manifest = JSON.parse(health.body).result.structuredContent.manifest;
   const capture = manifest.capabilities.find((capability: { id: string }) => capability.id === "site_capture");
   assert.ok(capture, "site_capture capability listed");
-  assert.deepEqual(capture.requiredTools, ["create_capture_job", "get_capture_job_status"]);
-  assert.ok(manifest.tools.includes("create_capture_job") && manifest.tools.includes("get_capture_job_status"));
+  assert.deepEqual(capture.requiredTools, ["create_capture_job", "get_capture_job_status", "get_capture_snapshot"]);
+  assert.ok(["create_capture_job", "get_capture_job_status", "get_capture_snapshot"].every((tool) => manifest.tools.includes(tool)));
+});
+
+// ── T12.13: the per-site PAT is gone (Wolf, 2026-08-14 — "option A, same-site writes") ──
+
+test("T12.13: a capture job runs end to end with NO storage credential anywhere — the per-site Netlify PAT is not required", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED), [ABOUT]: pageFixture(ABOUT) } });
+  // No PDF_TOOL_STORAGE_TOKEN / PDF_TOOL_STORAGE_SITE_ID anywhere (this suite never sets
+  // them), no PDF_TOOL_SITE_ID / PDF_TOOL_BLOBS_TOKEN (cleared in env()), and no `storage`
+  // argument on create, on the worker POST, on the status poll, or on the snapshot read.
+  process.env.URL = "https://pdf-tool.example.netlify.app";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({ ok: true, status: 200 }) as Response) as typeof fetch;
+  let created: Awaited<ReturnType<typeof createCaptureJob>>;
+  try {
+    created = await createCaptureJob(jobRequest({ requestId: "req-no-pat" }), { baseUrl: process.env.URL, token: "test-token" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(created.ok, true, JSON.stringify(created));
+  if (!created.ok) return;
+
+  const worked = await invokeWorker("dr-lurie", created.jobId);
+  assert.equal(worked.response.statusCode, 200, worked.response.body);
+  assert.equal(worked.body.status, "complete");
+
+  const status = await getCaptureJobStatus({ projectId: "dr-lurie", jobId: created.jobId });
+  assert.equal(status.ok, true);
+  if (!status.ok) return;
+  assert.equal(status.status, "complete");
+  assert.equal(status.result!.capturedPages, 2);
+  assert.equal(status.result!.screenshotArtifacts, 4);
+
+  // Every blob store this plane opened resolved to pdf-tool's OWN storage: no siteID and no
+  // token were ever handed to @netlify/blobs, i.e. the bare same-site context.
+  const opened = projectBlobStoreCallLog();
+  assert.ok(opened.length > 0, "the plane did open blob stores");
+  for (const call of opened) {
+    assert.equal(call.siteID, undefined, `store ${call.name} was opened with an explicit siteID`);
+    assert.equal(call.token, undefined, `store ${call.name} was opened with an explicit token`);
+  }
+
+  // And the snapshot read path hands back the real snapshot.v1 document.
+  const read = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: created.jobId });
+  assert.equal(read.ok, true, JSON.stringify(read));
+  if (!read.ok) return;
+  assert.equal(read.schemaVersion, "snapshot.v1");
+  assert.equal((read.snapshot as { schemaVersion: string }).schemaVersion, "snapshot.v1");
+  assert.equal((read.snapshot as { pages: unknown[] }).pages.length, 2);
+  assert.equal(read.requestId, "req-no-pat");
+});
+
+test("T12.13: pdf-tool's own-storage grant carries no credential, cannot be named by a caller, and is never forwarded to a worker", async () => {
+  // (1) The internally-minted grant contains no secret at all — nothing to leak, nothing to
+  //     redact: its credential fields are non-credential sentinels.
+  const own = captureStorageGrant("dr-lurie");
+  assert.equal(own.grantType, PDF_TOOL_OWN_STORAGE_GRANT_TYPE);
+  assert.equal(own.siteID, PDF_TOOL_OWN_STORAGE_SENTINEL);
+  assert.equal(own.token, PDF_TOOL_OWN_STORAGE_SENTINEL);
+  assert.equal(isPdfToolOwnStorageGrant(own), true);
+  // Its Blob credentials come from pdf-tool's OWN env, never from the grant body.
+  assert.deepEqual(grantBlobCredentials(own), { siteID: undefined, token: undefined });
+  process.env.PDF_TOOL_SITE_ID = "pdf-tool-own-site-id";
+  process.env.PDF_TOOL_BLOBS_TOKEN = "pdf-tool-own-token";
+  assert.deepEqual(grantBlobCredentials(own), { siteID: "pdf-tool-own-site-id", token: "pdf-tool-own-token" });
+  delete process.env.PDF_TOOL_SITE_ID;
+  delete process.env.PDF_TOOL_BLOBS_TOKEN;
+
+  // (2) A CALLER cannot name it: it is deliberately absent from SUPPORTED_GRANT_TYPES, so
+  //     nobody can talk pdf-tool into writing its own store on their behalf by guessing it.
+  const spoofed = parseStorageGrant({ grantType: PDF_TOOL_OWN_STORAGE_GRANT_TYPE, siteId: "s", token: "t" });
+  assert.equal(spoofed.ok, false);
+  if (!spoofed.ok) assert.match(spoofed.error, /Unsupported storage grantType/);
+
+  // (3) It is never put on the wire to a background worker.
+  process.env.URL = "https://pdf-tool.example.netlify.app";
+  const bodies: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    bodies.push(String(init?.body ?? ""));
+    return { ok: true, status: 200 } as Response;
+  }) as typeof fetch;
+  try {
+    await createCaptureJob(jobRequest({ requestId: "req-no-forward" }), { baseUrl: process.env.URL, token: "test-token" });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(bodies.length, 1);
+  const forwarded = JSON.parse(bodies[0]) as Record<string, unknown>;
+  assert.equal(forwarded.storage, undefined, "pdf-tool's own-storage grant must never be forwarded");
+  assert.ok(!bodies[0].includes(PDF_TOOL_OWN_STORAGE_SENTINEL));
+});
+
+test("T12.13: a caller-supplied storage grant is accepted by the transport and never used for a capture write", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED) } });
+  const CALLER_TOKEN = "caller-token-never-used";
+  const callerGrant = { grantType: "netlify-pat", projectId: "dr-lurie", siteId: "caller-site", token: CALLER_TOKEN };
+
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-caller-grant" }));
+  const worked = await invokeWorker("dr-lurie", job.jobId, { storage: callerGrant });
+  assert.equal(worked.response.statusCode, 200, worked.response.body);
+  assert.equal(worked.body.status, "complete");
+
+  // Not one store was opened with the caller's credential: option A means there is no path
+  // by which a caller's token can reach the capture plane's writes.
+  for (const call of projectBlobStoreCallLog()) {
+    assert.notEqual(call.token, CALLER_TOKEN, `store ${call.name} was opened with the caller's token`);
+    assert.notEqual(call.siteID, "caller-site", `store ${call.name} was opened with the caller's site id`);
+  }
+  // Nor does the caller's token appear anywhere in what the plane hands back.
+  const status = await getCaptureJobStatus({ projectId: "dr-lurie", jobId: job.jobId });
+  assert.ok(!JSON.stringify(status).includes(CALLER_TOKEN));
+  const read = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: job.jobId });
+  assert.ok(!JSON.stringify(read).includes(CALLER_TOKEN));
+});
+
+test("T12.13 snapshot read path: refuses a job that is not complete, a missing artifact, and bytes whose digest does not match the job record", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED) } });
+
+  // Not complete yet: a typed, actionable refusal rather than an empty snapshot.
+  const pending = await createCaptureJobRecord(jobRequest({ requestId: "req-pending-read" }));
+  const notReady = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: pending.jobId });
+  assert.equal(notReady.ok, false);
+  if (!notReady.ok) assert.equal(notReady.errorCode, "CAPTURE_SNAPSHOT_NOT_READY");
+
+  // Unknown job.
+  const missingJob = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: "does-not-exist" });
+  assert.equal(missingJob.ok, false);
+  if (!missingJob.ok) assert.equal(missingJob.errorCode, "CAPTURE_JOB_NOT_FOUND");
+
+  // Complete crawl, then tamper with the stored bytes: the digest recorded on the job is the
+  // authority, so a hand-edited blob can never be served as this job's snapshot.
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-digest" }));
+  const worked = await invokeWorker("dr-lurie", job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  const good = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: job.jobId });
+  assert.equal(good.ok, true, JSON.stringify(good));
+  if (!good.ok) return;
+
+  const blobKey = (good.snapshotArtifact as { blobKey: string }).blobKey;
+  const store = await projectBlobStore("artifacts");
+  await store.set(blobKey, Buffer.from('{"schemaVersion":"snapshot.v1","capture":{},"pages":[]}', "utf8"));
+  const tampered = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: job.jobId });
+  assert.equal(tampered.ok, false);
+  if (!tampered.ok) assert.equal(tampered.errorCode, "CAPTURE_SNAPSHOT_DIGEST_MISMATCH");
 });

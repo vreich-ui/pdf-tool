@@ -1,5 +1,5 @@
 import { getHeader } from "./agent-artifact-jobs.js";
-import { currentStorageGrant, forwardableGrant } from "./storage-grant.js";
+import { currentStorageGrant, forwardableGrant, isPdfToolOwnStorageGrant } from "./storage-grant.js";
 import { currentProjectDescriptor } from "./project-descriptor.js";
 
 type TriggerEvent = { headers?: Record<string, string | undefined> };
@@ -62,7 +62,12 @@ export async function triggerWorker(baseUrl: string | undefined, token: string |
   // writes the artifact into the client's Blob store under the same credentials and policy.
   // Server-to-self over https; the grant (with token) travels only in this body and the
   // worker's local scope.
-  const grant = currentStorageGrant();
+  // T12.13: pdf-tool's OWN-storage grant (the capture plane's, see lib/capture/storage.ts)
+  // is never forwarded. It carries no credential to hand over, the worker mints its own
+  // frame anyway, and putting a non-caller-suppliable grantType on the wire would only make
+  // the receiving entrypoint's parseStorageGrant refuse it.
+  const ambientGrant = currentStorageGrant();
+  const grant = isPdfToolOwnStorageGrant(ambientGrant) ? undefined : ambientGrant;
   const descriptor = currentProjectDescriptor();
   const response = await fetch(url, {
     method: "POST",

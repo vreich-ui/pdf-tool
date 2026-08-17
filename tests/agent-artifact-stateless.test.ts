@@ -231,7 +231,11 @@ test("FRONT DOOR: the MCP transport itself (initialize, tools/list) needs no gra
     assert.ok(tool.inputSchema.properties.storage, `${tool.name} must advertise the storage grant`);
     assert.ok(tool.inputSchema.properties.descriptor, `${tool.name} must advertise the descriptor`);
     // S4: health is also grant-optional (a pre-credential liveness/capability check).
-    if (tool.name !== "verify_agent_artifact" && tool.name !== "health") {
+    // T12.13: so is the whole capture plane — it writes pdf-tool's OWN store (Wolf's
+    // 2026-08-14 "option A, same-site writes"), so it has no use for a caller credential
+    // and a new tenant needs no per-site Netlify PAT to capture.
+    const grantOptional = ["verify_agent_artifact", "health", "create_capture_job", "get_capture_job_status", "get_capture_snapshot"];
+    if (!grantOptional.includes(tool.name)) {
       assert.ok(tool.inputSchema.required?.includes("storage"), `${tool.name} must require the storage grant`);
     }
   }

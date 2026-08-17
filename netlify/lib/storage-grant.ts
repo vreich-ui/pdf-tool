@@ -60,6 +60,41 @@ export const CANONICAL_STORAGE_STORES: StorageGrantStores = {
  */
 export const SUPPORTED_GRANT_TYPES = ["netlify-pat"] as const;
 
+/**
+ * T12.13 (Wolf, 2026-08-14 — "option A, same-site writes"): the capture plane writes
+ * pdf-tool's OWN store, so it needs no caller credential at all. Rather than teach every
+ * downstream store opener a second code path, the plane mints THIS grant type internally:
+ * same grant shape, but its siteID/token fields are NON-CREDENTIAL SENTINELS and
+ * grantBlobCredentials() resolves the real access from pdf-tool's own environment
+ * (PDF_TOOL_SITE_ID / PDF_TOOL_BLOBS_TOKEN, else the built-in same-site context) exactly as
+ * jobBlobStore() does. Two consequences worth stating out loud:
+ *
+ *  - the grant object contains no secret, so it is safe in a log, an error, or a job record
+ *    (nothing about it is radioactive — there is nothing to redact);
+ *  - it is deliberately ABSENT from SUPPORTED_GRANT_TYPES, so parseStorageGrant refuses a
+ *    caller that names it. Only pdf-tool itself can mint it, and only for its own storage.
+ */
+export const PDF_TOOL_OWN_STORAGE_GRANT_TYPE = "pdf-tool-own-storage";
+
+/** Placeholder occupying the grant's credential fields; never a site id, never a token. */
+export const PDF_TOOL_OWN_STORAGE_SENTINEL = "pdf-tool-own-storage";
+
+export function pdfToolOwnStorageGrant(projectId: string, storeOverrides: Partial<StorageGrantStores> = {}): StorageGrant {
+  const explicitStores: StorageGrantStores = { ...CANONICAL_STORAGE_STORES, ...storeOverrides };
+  return {
+    grantType: PDF_TOOL_OWN_STORAGE_GRANT_TYPE,
+    projectId,
+    siteID: PDF_TOOL_OWN_STORAGE_SENTINEL,
+    token: PDF_TOOL_OWN_STORAGE_SENTINEL,
+    stores: explicitStores,
+    explicitStores
+  };
+}
+
+export function isPdfToolOwnStorageGrant(grant: StorageGrant | undefined): boolean {
+  return grant?.grantType === PDF_TOOL_OWN_STORAGE_GRANT_TYPE;
+}
+
 export type ParseStorageGrantResult =
   | { ok: true; grant: StorageGrant }
   | { ok: false; error: string };
@@ -156,13 +191,17 @@ export function redactGrant(grant: StorageGrant): Record<string, unknown> {
 
 /**
  * Resolves a grant to the Blob credentials it authorizes — THE grantType switch point.
- * netlify-pat: the token IS the credential. A future exchange type would swap the opaque
- * token for the real credential here (and only here).
+ * netlify-pat: the token IS the credential. pdf-tool-own-storage: the grant carries NO
+ * credential and the access comes from pdf-tool's own environment (or, with neither var
+ * set, the built-in same-site context — hence the optional fields). A future exchange type
+ * would swap the opaque token for the real credential here (and only here).
  */
-export function grantBlobCredentials(grant: StorageGrant): { siteID: string; token: string } {
+export function grantBlobCredentials(grant: StorageGrant): { siteID?: string; token?: string } {
   switch (grant.grantType) {
     case "netlify-pat":
       return { siteID: grant.siteID, token: grant.token };
+    case PDF_TOOL_OWN_STORAGE_GRANT_TYPE:
+      return { siteID: process.env.PDF_TOOL_SITE_ID, token: process.env.PDF_TOOL_BLOBS_TOKEN };
     default:
       throw new Error(`Unsupported storage grantType "${grant.grantType}"; supported types: ${SUPPORTED_GRANT_TYPES.join(", ")}`);
   }

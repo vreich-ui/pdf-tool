@@ -54,8 +54,8 @@ export const MCP_CAPABILITIES: McpCapability[] = [
   },
   {
     id: "site_capture",
-    description: "Crawl a policy-bounded site into a snapshot.v1 + screenshots artifact set (T12.8 capture plane; drafts only, never publish/release/deploy).",
-    requiredTools: ["create_capture_job", "get_capture_job_status"],
+    description: "Crawl a policy-bounded site into a snapshot.v1 + screenshots artifact set (T12.8 capture plane; drafts only, never publish/release/deploy). T12.13: this plane writes pdf-tool's OWN store, so none of its tools needs a storage grant.",
+    requiredTools: ["create_capture_job", "get_capture_job_status", "get_capture_snapshot"],
     optionalTools: ["get_agent_artifact_by_filename", "verify_agent_artifact"]
   },
   {

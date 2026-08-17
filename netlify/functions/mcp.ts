@@ -3,7 +3,7 @@ import { verifyArtifactMaterialization, type VerifyArtifactInput } from "../lib/
 import type { ResumeArtifactJobInput } from "../lib/agent-artifact-approval.js";
 import { createPdfTemplate, getPdfTemplateRecord, listPdfTemplatesResult, publishPdfTemplateRecord, archivePdfTemplateRecord, type CreatePdfTemplateInput, type GetPdfTemplateInput, type ListPdfTemplatesInput, type PublishPdfTemplateInput, type ArchivePdfTemplateInput } from "../lib/pdf-template-mcp.js";
 import { createImageImportJob, createImageSearchJob, getImageSearchBank, getImageSearchJobStatus, getImageSearchPolicy, importImageFromUrl, setImageSearchPolicy, updateImageSearchCandidate } from "../lib/agent-image-search-mcp.js";
-import { createCaptureJob, getCaptureJobStatus } from "../lib/agent-capture-mcp.js";
+import { createCaptureJob, getCaptureJobStatus, getCaptureSnapshot } from "../lib/agent-capture-mcp.js";
 import { getHeader, isAuthorized, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { createMcpSession, createStatelessMcpSessionId, deleteMcpSession, isStatelessMcpSessionId, negotiateMcpProtocolVersion, readMcpSession, touchMcpSession, type McpSessionRecord } from "../lib/mcp-session.js";
 import { publicBaseUrl, verifyMcpAccessToken } from "../lib/mcp-oauth.js";
@@ -95,7 +95,18 @@ const PROJECT_DESCRIPTOR_SCHEMA = {
  * attestation-only, and health is a pre-credential discovery/liveness check (a caller needs
  * to be able to ask "are you there, and what do you offer" before it has a grant to send).
  * Every other tool REQUIRES the storage grant. */
-const GRANT_OPTIONAL_TOOLS = new Set<string>(["verify_agent_artifact", "health"]);
+/* T12.13: the three capture tools joined this set. They are not "grant-optional" in the
+ * verification sense (degrade to attestation-only) — the capture plane writes PDF-TOOL'S OWN
+ * storage and therefore has no use for a caller credential at all (Wolf, 2026-08-14: "option
+ * A, same-site writes"; see lib/capture/storage.ts). A `storage` argument is still ACCEPTED
+ * (old callers keep working) and then never used for a capture read or write. */
+const GRANT_OPTIONAL_TOOLS = new Set<string>([
+  "verify_agent_artifact",
+  "health",
+  "create_capture_job",
+  "get_capture_job_status",
+  "get_capture_snapshot",
+]);
 
 /** Known tool names — the grant requirement applies only to real tools, so an unknown tool
  * still surfaces as a proper JSON-RPC "Unknown tool" error rather than a grant error. Single
@@ -283,9 +294,15 @@ const TOOL_METADATA: ToolMetadata[] = [
   },
   {
     name: "get_capture_job_status",
-    description: "Get pending/running/complete/failed status for a capture job. Completed jobs include the snapshot.v1 ArtifactReference and counts; in-flight jobs include crawl progress (pages captured, queue remaining) and the robots + rate evidence. A `pending` job that has a resumeCount > 0 is between budget windows — its worker chain-re-triggers itself; if it stays pending, calling create_capture_job again with the same requestId re-triggers the crawl, which resumes from the frontier. Never returns page bytes.",
+    description: "Get pending/running/complete/failed status for a capture job. Completed jobs include the snapshot.v1 ArtifactReference and counts; in-flight jobs include crawl progress (pages captured, queue remaining) and the robots + rate evidence. A `pending` job that has a resumeCount > 0 is between budget windows — its worker chain-re-triggers itself; if it stays pending, calling create_capture_job again with the same requestId re-triggers the crawl, which resumes from the frontier. Never returns page bytes. Needs no storage grant (the capture plane reads pdf-tool's own store).",
     annotations: { readOnlyHint: true, openWorldHint: false },
     outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, result: { type: "object" }, evidence: { type: "object" }, progress: { type: "object" }, resumeCount: { type: "number" } })
+  },
+  {
+    name: "get_capture_snapshot",
+    description: "Read a COMPLETED capture job's snapshot.v1 document (T12.13 snapshot read path). get_capture_job_status only ever hands back the snapshot's ArtifactReference; this returns the parsed document itself — the crawl's structured data product (pages, outline/blocks, diagnostics, the recorded policy and robots/rate evidence), as JSON. It is not an artifact-bytes channel: screenshots stay ArtifactReferences and are never inlined, and a snapshot over the 8 MiB inline ceiling is refused with CAPTURE_SNAPSHOT_TOO_LARGE so the reference can be imported instead. Needs no storage grant — the bytes live in pdf-tool's own store and no caller credential exists for this plane. Refusals: CAPTURE_JOB_NOT_FOUND, CAPTURE_SNAPSHOT_NOT_READY (job not complete yet — keep polling), CAPTURE_SNAPSHOT_MISSING, CAPTURE_SNAPSHOT_DIGEST_MISMATCH, CAPTURE_SNAPSHOT_INVALID, CAPTURE_SNAPSHOT_UNREADABLE.",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    outputSchema: outputSchema({ jobId: { type: "string" }, requestId: { type: "string" }, schemaVersion: { type: "string" }, snapshot: { type: "object" }, snapshotArtifact: { type: "object" } })
   },
   {
     name: "set_storage_grant",
@@ -613,6 +630,11 @@ async function callToolInner(name: string | undefined, args: unknown, event: Fun
     }
     case "get_capture_job_status": {
       const result = await getCaptureJobStatus(args as never);
+      const { statusCode, ok, ...body } = result;
+      return ok ? toolContent(body) : errorContent({ ...body, statusCode });
+    }
+    case "get_capture_snapshot": {
+      const result = await getCaptureSnapshot(args as never);
       const { statusCode, ok, ...body } = result;
       return ok ? toolContent(body) : errorContent({ ...body, statusCode });
     }

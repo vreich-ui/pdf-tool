@@ -205,6 +205,11 @@ export const MCP_TOOL_SCHEMAS = {
     jobId: z.string().min(1)
   }).strict(),
 
+  get_capture_snapshot: z.object({
+    projectId: z.string().min(1),
+    jobId: z.string().min(1)
+  }).strict(),
+
   // ── New in S4a ──
 
   set_storage_grant: z.object({}).strict(),
