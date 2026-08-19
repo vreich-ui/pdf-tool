@@ -1,1 +1,175 @@
-test
+/**
+ * Fastify server wiring the wire contract documented in README.md. Exported as
+ * `buildServer()` so tests can drive it via `fastify.inject()` without binding a port.
+ */
+import Fastify, { type FastifyInstance } from "fastify";
+import { checkAuth } from "./auth.js";
+import { validateRenderRequest } from "./contract.js";
+import { capturePage, validateCaptureRequest } from "./capture.js";
+import { chromiumAvailable, renderChromium } from "./engines/chromium.js";
+import { renderTypst, typstVersion } from "./engines/typst.js";
+
+const BODY_LIMIT_BYTES = 32 * 1024 * 1024; // 32 MB
+
+export function buildServer(): FastifyInstance {
+  const fastify = Fastify({
+    bodyLimit: BODY_LIMIT_BYTES,
+    logger: process.env.NODE_ENV === "production",
+  });
+
+  // NOTE: the PRIMARY health path is /health. Google's frontend intercepts the exact path
+  // /healthz on *.run.app (legacy GFE health checking) and answers 404 before the container
+  // is reached; /healthz is kept only as an alias for local dev and tests.
+  // "Which commit is actually live?" was unanswerable from outside this service, and on
+  // 2026-08-19 that cost a diagnosis cycle: a redeploy was performed, a fresh crawl still
+  // produced the pre-fix output, and there was no way to tell a stale IMAGE from a live bug
+  // without GCP console access. deploy/cloud-run.sh stamps the built commit in here and then
+  // asserts /health reports it back, so a deploy that did not actually take now FAILS LOUDLY
+  // instead of reporting success. A git sha is not a credential; nothing else is exposed.
+  const buildInfo = {
+    gitSha: process.env.SERVICE_GIT_SHA || null,
+    deployedAt: process.env.SERVICE_DEPLOYED_AT || null,
+  };
+
+  const healthHandler = async () => {
+    const [typstVer, chromiumInfo] = await Promise.all([typstVersion(), chromiumAvailable()]);
+    return {
+      ok: true,
+      service: "pdf-tool-render",
+      build: buildInfo,
+      engines: {
+        typst: { available: typstVer !== null, ...(typstVer ? { version: typstVer } : {}) },
+        chromium: { available: chromiumInfo.available, ...(chromiumInfo.version ? { version: chromiumInfo.version } : {}) },
+      },
+    };
+  };
+  fastify.get("/health", healthHandler);
+  fastify.get("/healthz", healthHandler);
+
+  fastify.post("/render/typst", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateRenderRequest(request.body, "typst");
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await renderTypst(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "RENDER_ENGINE_ERROR",
+        message: `Unexpected typst engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status = result.code === "RENDER_TIMEOUT" ? 504 : result.code === "PDF_REQ_MAX_BYTES" ? 507 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      pdfBase64: result.pdfBytes.toString("base64"),
+      diagnostics: {
+        ...result.diagnostics,
+        engine: { id: "typst", executedIn: "render-service" },
+      },
+    };
+  });
+
+  fastify.post("/render/chromium", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateRenderRequest(request.body, "chromium");
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await renderChromium(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "RENDER_ENGINE_ERROR",
+        message: `Unexpected chromium engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status =
+        result.code === "RENDER_TIMEOUT" ? 504 : result.code === "PDF_REQ_MAX_BYTES" ? 507 : result.code === "DATA_BINDING_ERROR" ? 400 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      pdfBase64: result.pdfBytes.toString("base64"),
+      diagnostics: {
+        ...result.diagnostics,
+        engine: { id: "chromium", executedIn: "render-service" },
+      },
+    };
+  });
+
+  // T12.8 capture plane: navigate ONE page with JavaScript enabled inside a fresh,
+  // allowlist-routed context and return the snapshot.v1 page payload + screenshots. The
+  // print routes above keep their lockdown untouched — capture is opt-in per request.
+  fastify.post("/capture/page", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateCaptureRequest(request.body);
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await capturePage(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "CAPTURE_ENGINE_ERROR",
+        message: `Unexpected capture engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status = result.code === "CAPTURE_TIMEOUT" ? 504 : result.code === "CAPTURE_NAVIGATION_FAILED" ? 502 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      page: result.page,
+      screenshots: result.screenshots,
+      diagnostics: { ...result.diagnostics, engine: { id: "chromium-capture", executedIn: "render-service" } },
+    };
+  });
+
+  return fastify;
+}
