@@ -305,6 +305,14 @@ test("GET /health (and its /healthz alias) is unauthenticated and reports the ex
   assert.equal(body.service, "pdf-tool-render");
   assert.equal(typeof body.engines.typst.available, "boolean");
   assert.equal(typeof body.engines.chromium.available, "boolean");
+  // The build stamp is what makes "which commit is actually serving?" answerable from outside the
+  // service — deploy/cloud-run.sh asserts this block reports the commit it just deployed, so a
+  // deploy that did not take fails loudly instead of reporting success. Both keys are always
+  // present; they are null when the env vars are unset (local dev, tests), never absent.
+  assert.ok(Object.prototype.hasOwnProperty.call(body, "build"), "/health must carry a build block");
+  assert.ok(Object.prototype.hasOwnProperty.call(body.build, "gitSha"));
+  assert.ok(Object.prototype.hasOwnProperty.call(body.build, "deployedAt"));
+  assert.equal(body.build.gitSha, process.env.SERVICE_GIT_SHA || null);
 });
 
 test("POST /render/chromium (authed) with missing template.html -> 400 TEMPLATE_INVALID", async () => {

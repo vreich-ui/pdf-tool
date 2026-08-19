@@ -143,12 +143,38 @@ fi
 rm -f "${BUILD_LOG}"
 
 # --- secret ---------------------------------------------------------------------------------
-SECRET="${RENDER_SERVICE_SECRET:-$(openssl rand -hex 32)}"
+# A random secret is correct for the FIRST deploy and catastrophic for every one after it: the
+# caller of this service is pdf-tool's Netlify site, which holds RENDER_SERVICE_SECRET in its own
+# env. Minting a fresh one on every redeploy silently 401s every capture job unless
+# NETLIFY_AUTH_TOKEN/NETLIFY_SITE_ID happen to be set in the same shell. So: an explicit
+# RENDER_SERVICE_SECRET always wins; otherwise REUSE the running service's own value; only mint a
+# random one when there is no service yet to reuse from.
+if [[ -n "${RENDER_SERVICE_SECRET:-}" ]]; then
+  SECRET="${RENDER_SERVICE_SECRET}"
+  SECRET_SOURCE="supplied"
+else
+  EXISTING_SECRET="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" \
+    --format='value(spec.template.spec.containers[0].env.filter("name", "RENDER_SERVICE_SECRET").extract("value").flatten())' 2>/dev/null || true)"
+  if [[ -n "${EXISTING_SECRET}" ]]; then
+    SECRET="${EXISTING_SECRET}"
+    SECRET_SOURCE="reused from the running service"
+  else
+    SECRET="$(openssl rand -hex 32)"
+    SECRET_SOURCE="newly minted (no existing service)"
+  fi
+fi
+echo "== RENDER_SERVICE_SECRET: ${SECRET_SOURCE} =="
 
 # --- deploy to Cloud Run ---------------------------------------------------------------------
 # T12.8: the capture endpoint (/capture/page — JS enabled, multi-viewport screenshots) needs
 # more than the print path's old 300s/1Gi/1CPU. Numbers + cost estimate: docs/CAPTURE_OPS.md.
 echo "== Deploying ${SERVICE_NAME} to Cloud Run (${REGION}) =="
+# --update-env-vars, never --set-env-vars: the merge form changes only the keys named and leaves
+# every other variable on the service untouched. The replace form has taken a sibling deployment
+# down twice by deleting variables the command did not happen to list (see CMS-Agent's
+# scripts/deploy-mcp.sh, which exists for that reason). To REMOVE a key, use
+# `gcloud run services update --remove-env-vars KEY`.
+DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 gcloud run deploy "${SERVICE_NAME}" \
   --image="${IMAGE_TAG}" \
   --region="${REGION}" \
@@ -158,10 +184,11 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout=600 \
   --max-instances=3 \
   --concurrency=2 \
-  --set-env-vars="RENDER_SERVICE_SECRET=${SECRET}"
+  --update-env-vars="RENDER_SERVICE_SECRET=${SECRET},SERVICE_GIT_SHA=${GIT_SHA},SERVICE_DEPLOYED_AT=${DEPLOYED_AT}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
 echo "Service URL: ${SERVICE_URL}"
+echo "Deployed commit: ${GIT_SHA}"
 
 # --- smoke test -------------------------------------------------------------------------------
 # /health, not /healthz: Google's frontend intercepts the exact path /healthz on *.run.app
@@ -181,6 +208,18 @@ if ! grep -q '"chromium":{"available":true' <<<"${HEALTH_RESPONSE}"; then
   echo "ERROR: /health reports chromium engine unavailable" >&2
   exit 1
 fi
+
+# THE CHECK THIS SCRIPT WAS MISSING. On 2026-08-19 a redeploy reported success while the running
+# revision still served pre-fix code, and nothing here noticed — "deployed" and "what is actually
+# serving traffic" are different facts (the same distinction the env-var comment above is about).
+# The service now echoes the commit it was built from, so a deploy that did not take fails here.
+if ! grep -q "\"gitSha\":\"${GIT_SHA}\"" <<<"${HEALTH_RESPONSE}"; then
+  echo "ERROR: /health does not report the commit just deployed (${GIT_SHA})." >&2
+  echo "       Traffic is still on an older revision, or the build did not include HEAD." >&2
+  echo "       Reported: $(grep -o '"build":{[^}]*}' <<<"${HEALTH_RESPONSE}" || echo '<no build block — the running image predates build stamping>')" >&2
+  exit 1
+fi
+echo "Verified: /health reports the deployed commit ${GIT_SHA}."
 
 echo "== Smoke test: authenticated sample typst render =="
 SMOKE_BODY_FILE="$(mktemp)"
