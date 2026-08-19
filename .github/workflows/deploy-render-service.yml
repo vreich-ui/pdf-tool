@@ -1,0 +1,117 @@
+# Deploy render-service to Cloud Run from CI — so the deployed image is a function of what is on
+# main, not of which checkout happened to be on someone's laptop.
+#
+# WHY THIS EXISTS. render-service/deploy/cloud-run.sh tags the image with `git rev-parse --short
+# HEAD` of the working copy it runs in. On 2026-08-19 the service was redeployed to pick up the
+# T12.17 srcset fix (f5c230c); the very next crawl still produced truncated `.../v1/fill/w_146`
+# URLs, because the checkout that ran the script predated the commit. Nothing in the pipeline could
+# have caught that: the script reported success, and the running commit was not observable from
+# outside. Both halves are fixed — the service now stamps SERVICE_GIT_SHA into /health and the
+# script asserts it — and this workflow removes the class of mistake entirely by always building
+# from a clean checkout of the ref being deployed.
+#
+# SECRETS. Nothing here is minted or echoed by an agent. Set these once in
+# Settings → Secrets and variables → Actions:
+#
+#   GCP_SERVICE_ACCOUNT_KEY  (required) service-account JSON with Cloud Build, Artifact Registry
+#                            and Cloud Run deploy rights on GCP_PROJECT_ID.
+#   RENDER_SERVICE_SECRET    (recommended) the shared secret pdf-tool's Netlify site already holds.
+#                            If unset, the script REUSES the running service's current value and
+#                            only mints a new one when no service exists — so a redeploy can no
+#                            longer silently 401 every capture job. Set it explicitly to rotate.
+#   NETLIFY_AUTH_TOKEN       (optional) with NETLIFY_SITE_ID, lets the script write
+#   NETLIFY_SITE_ID          (optional) RENDER_SERVICE_URL/SECRET back into Netlify automatically.
+#
+# VARIABLES (Settings → Secrets and variables → Actions → Variables):
+#   GCP_PROJECT_ID (required), GCP_REGION (optional, default europe-west1).
+#
+# Prefer Workload Identity Federation to a long-lived JSON key when you get the chance: swap the
+# `credentials_json` input for `workload_identity_provider` + `service_account` and delete the
+# secret. The rest of this file is unchanged by that migration.
+
+name: Deploy render-service
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this deploy is being run (recorded in the run log)"
+        required: false
+        default: "manual deploy"
+
+# One deploy at a time. A queued second run would race the first for the same Cloud Run service;
+# never cancel one in flight, because a half-applied deploy is worse than a late one.
+concurrency:
+  group: deploy-render-service
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: build + deploy + verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reason
+        run: |
+          echo "Deploy reason: ${{ inputs.reason }}"
+
+      - name: Guard — required configuration is present
+        env:
+          KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          missing=0
+          # Presence only — never the value, and never in a way that could print it.
+          if [ -z "${KEY}" ]; then echo "::error::secret GCP_SERVICE_ACCOUNT_KEY is not set"; missing=1; fi
+          if [ -z "${PROJECT}" ]; then echo "::error::variable GCP_PROJECT_ID is not set"; missing=1; fi
+          [ "$missing" -eq 0 ] || exit 1
+
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_REGION: ${{ vars.GCP_REGION }}
+          # The script accepts a path OR inline JSON; google-github-actions/auth has already written
+          # a key file and exported GOOGLE_APPLICATION_CREDENTIALS pointing at it.
+          GCP_SERVICE_ACCOUNT_KEY: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
+          RENDER_SERVICE_SECRET: ${{ secrets.RENDER_SERVICE_SECRET }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: ./render-service/deploy/cloud-run.sh
+
+      - name: Report what is live
+        if: always()
+        env:
+          GCP_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          region="${GCP_REGION:-europe-west1}"
+          url="$(gcloud run services describe pdf-tool-render --region="$region" --format='value(status.url)' || true)"
+          if [ -n "$url" ]; then
+            echo "### render-service" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            curl -fsS "$url/health" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Commit typst.sha256 if the deploy pinned it
+        if: success()
+        run: |
+          # First trusted deploy computes the digest inside Cloud Build and writes it locally; the
+          # script prints "COMMIT render-service/typst.sha256". Surface it rather than losing it in
+          # an ephemeral runner — the pin is what makes every later build verifiable.
+          if ! git diff --quiet -- render-service/typst.sha256; then
+            echo "::warning::render-service/typst.sha256 was pinned by this deploy and must be committed:"
+            git --no-pager diff -- render-service/typst.sha256
+          fi
