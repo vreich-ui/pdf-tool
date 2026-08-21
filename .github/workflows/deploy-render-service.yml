@@ -112,7 +112,49 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      # T12.27 — setup-gcloud IS the only source of gcloud here, and it is allowed to fail.
+      #
+      # On 2026-08-21 this step died with `unexpected HTTP response: 404` — the action resolving
+      # `version: latest` and then failing to download the SDK tarball. That is a well-known failure
+      # mode across the whole `setup-*` action family, and it has nothing to do with this repo, this
+      # deploy, or the credentials it took all afternoon to get right.
+      #
+      # It also cannot simply be dropped: gcloud USED to be preinstalled on the runner, and was
+      # removed when ubuntu-latest moved to 24.04 (actions/runner-images#10769). So the step stays,
+      # but it is no longer permitted to be the single point of failure for the deploy.
+      #
+      # Fail soft, then verify the TOOL rather than the installer, and install from Google's own apt
+      # repository if it is genuinely missing. A transient 404 now costs about forty seconds instead
+      # of a run — and if gcloud is truly unavailable, the failure says exactly that.
+      - id: setup_gcloud
+        continue-on-error: true
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Ensure gcloud is available
+        env:
+          SETUP_OUTCOME: ${{ steps.setup_gcloud.outcome }}
+        run: |
+          set -euo pipefail
+          if command -v gcloud >/dev/null 2>&1; then
+            echo "gcloud present ($(gcloud --version | head -n1)) — setup-gcloud outcome: ${SETUP_OUTCOME}"
+            exit 0
+          fi
+          echo "::warning::setup-gcloud did not provide gcloud (outcome: ${SETUP_OUTCOME}); installing from Google's apt repository instead."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-transport-https ca-certificates gnupg curl
+          # Google's documented Debian/Ubuntu install. It does not touch the action's version
+          # resolution endpoint, which is the thing that 404'd.
+          curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+            | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq google-cloud-cli
+          command -v gcloud >/dev/null 2>&1 || {
+            echo "::error::gcloud is still unavailable after both setup-gcloud and the apt fallback. The deploy cannot proceed." >&2
+            exit 1
+          }
+          echo "gcloud installed ($(gcloud --version | head -n1))"
 
       - name: Deploy
         env:
