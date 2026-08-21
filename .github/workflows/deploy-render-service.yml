@@ -124,7 +124,19 @@ jobs:
           RENDER_SERVICE_SECRET: ${{ secrets.RENDER_SERVICE_SECRET }}
           NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
           NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
-        run: ./render-service/deploy/cloud-run.sh
+        # T12.25 — invoked THROUGH bash, and the file also carries its executable bit in git.
+        #
+        # The first dispatch of this workflow died in 31s with `exit code 126` — "found, but not
+        # executable". The script was committed 100644: correct shebang, no exec bit. The same
+        # thing had already bitten a local run ("zsh: permission denied"), and the local fix was
+        # to type `bash` in front of it, so the mode was never actually corrected in the repo.
+        #
+        # Both halves are fixed here because they fail differently. The mode bit (now 100755) is
+        # what makes `./cloud-run.sh` work for a human on a fresh clone. Calling it through `bash`
+        # is what keeps CI working even if that bit is ever lost again — and it does get lost:
+        # a zip round-trip, a Windows checkout, or a patch applied without `--binary` all drop it
+        # silently, and the failure surfaces as a bare numeric exit code with no message.
+        run: bash ./render-service/deploy/cloud-run.sh
 
       - name: Report what is live
         if: always()
