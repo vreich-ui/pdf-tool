@@ -64,12 +64,54 @@ trap cleanup EXIT
 
 echo "== Authenticating gcloud =="
 gcloud auth activate-service-account --key-file="${KEY_FILE}"
+
+# T12.26 — `gcloud config set project` IS NOT ENOUGH, and its failure is silent.
+#
+# On 2026-08-21 this script authenticated, ran the line below, and then tried to create the
+# Artifact Registry repo in projects/cms-agent-503015 — a project GCP_PROJECT_ID never named.
+# gcloud resolves the active project from ENVIRONMENT FIRST and only then from config, and
+# google-github-actions/auth exports CLOUDSDK_PROJECT / CLOUDSDK_CORE_PROJECT / GCLOUD_PROJECT /
+# GOOGLE_CLOUD_PROJECT derived from the key file's own project_id. Those beat `config set`, so
+# every call went somewhere nobody asked for and the only symptom was a PERMISSION_DENIED naming
+# a project that appears nowhere in this repo's configuration.
+#
+# So the environment is set to agree with GCP_PROJECT_ID rather than fought with, AND every call
+# below carries an explicit --project. Either alone would fix today's bug; both together mean a
+# future gcloud that changes its precedence rules, or an action that exports a variable this list
+# does not know about, still cannot silently redirect a deploy.
 gcloud config set project "${GCP_PROJECT_ID}" >/dev/null
+export CLOUDSDK_CORE_PROJECT="${GCP_PROJECT_ID}"
+export CLOUDSDK_PROJECT="${GCP_PROJECT_ID}"
+export GCLOUD_PROJECT="${GCP_PROJECT_ID}"
+export GOOGLE_CLOUD_PROJECT="${GCP_PROJECT_ID}"
+
+ACTIVE_ACCOUNT="$(gcloud config get-value account 2>/dev/null || echo unknown)"
+ACTIVE_PROJECT="$(gcloud config get-value project 2>/dev/null || echo unknown)"
+echo "authenticated as: ${ACTIVE_ACCOUNT}"
+echo "target project  : ${GCP_PROJECT_ID} (gcloud resolves: ${ACTIVE_PROJECT})"
+if [[ "${ACTIVE_PROJECT}" != "${GCP_PROJECT_ID}" ]]; then
+  echo "ERROR: gcloud resolves project '${ACTIVE_PROJECT}' but this deploy targets '${GCP_PROJECT_ID}'." >&2
+  echo "       Refusing to continue rather than deploying into the wrong project." >&2
+  exit 1
+fi
+
+# The key's own project, read WITHOUT echoing anything else from the file. A project id is an
+# identifier, not a credential. A service account from another project CAN be granted rights here,
+# so this is a warning and not a refusal — but when it fires it is almost always the answer, and
+# saying so beats a raw PERMISSION_DENIED on a resource path nobody recognises.
+KEY_PROJECT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("project_id",""))' "${KEY_FILE}" 2>/dev/null || true)"
+if [[ -n "${KEY_PROJECT}" && "${KEY_PROJECT}" != "${GCP_PROJECT_ID}" ]]; then
+  echo "WARNING: the service-account key belongs to project '${KEY_PROJECT}', but this deploy targets '${GCP_PROJECT_ID}'." >&2
+  echo "         That works ONLY if ${ACTIVE_ACCOUNT} has been granted Artifact Registry, Cloud Build" >&2
+  echo "         and Cloud Run rights in ${GCP_PROJECT_ID}. If the next call fails with" >&2
+  echo "         PERMISSION_DENIED, this line is why: the wrong key is in GCP_SERVICE_ACCOUNT_KEY." >&2
+fi
 
 # --- Artifact Registry repo ---------------------------------------------------------------
 echo "== Ensuring Artifact Registry repo '${AR_REPO}' exists in ${REGION} =="
-if ! gcloud artifacts repositories describe "${AR_REPO}" --location="${REGION}" >/dev/null 2>&1; then
+if ! gcloud artifacts repositories describe "${AR_REPO}" --project="${GCP_PROJECT_ID}" --location="${REGION}" >/dev/null 2>&1; then
   gcloud artifacts repositories create "${AR_REPO}" \
+    --project="${GCP_PROJECT_ID}" \
     --repository-format=docker \
     --location="${REGION}" \
     --description="pdf-tool render service images"
@@ -118,6 +160,7 @@ BUILD_LOG="$(mktemp)"
 # project Viewers/Owners; a deploy service account with Storage Admin can stream from the
 # project's own staging bucket instead.
 gcloud builds submit "${RENDER_SERVICE_DIR}" \
+  --project="${GCP_PROJECT_ID}" \
   --config="${RENDER_SERVICE_DIR}/deploy/cloudbuild.yaml" \
   --gcs-log-dir="gs://${GCP_PROJECT_ID}_cloudbuild/logs" \
   --substitutions="_TYPST_VERSION=${TYPST_VERSION},_TYPST_SHA256=${TYPST_SHA256},_IMAGE_TAG=${IMAGE_TAG}" \
@@ -153,7 +196,7 @@ if [[ -n "${RENDER_SERVICE_SECRET:-}" ]]; then
   SECRET="${RENDER_SERVICE_SECRET}"
   SECRET_SOURCE="supplied"
 else
-  EXISTING_SECRET="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" \
+  EXISTING_SECRET="$(gcloud run services describe "${SERVICE_NAME}" --project="${GCP_PROJECT_ID}" --region="${REGION}" \
     --format='value(spec.template.spec.containers[0].env.filter("name", "RENDER_SERVICE_SECRET").extract("value").flatten())' 2>/dev/null || true)"
   if [[ -n "${EXISTING_SECRET}" ]]; then
     SECRET="${EXISTING_SECRET}"
@@ -176,6 +219,7 @@ echo "== Deploying ${SERVICE_NAME} to Cloud Run (${REGION}) =="
 # `gcloud run services update --remove-env-vars KEY`.
 DEPLOYED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 gcloud run deploy "${SERVICE_NAME}" \
+  --project="${GCP_PROJECT_ID}" \
   --image="${IMAGE_TAG}" \
   --region="${REGION}" \
   --allow-unauthenticated \
@@ -186,7 +230,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --concurrency=2 \
   --update-env-vars="RENDER_SERVICE_SECRET=${SECRET},SERVICE_GIT_SHA=${GIT_SHA},SERVICE_DEPLOYED_AT=${DEPLOYED_AT}"
 
-SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region="${REGION}" --format='value(status.url)')"
+SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --project="${GCP_PROJECT_ID}" --region="${REGION}" --format='value(status.url)')"
 echo "Service URL: ${SERVICE_URL}"
 echo "Deployed commit: ${GIT_SHA}"
 
