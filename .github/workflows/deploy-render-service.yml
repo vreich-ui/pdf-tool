@@ -22,8 +22,10 @@
 #   NETLIFY_AUTH_TOKEN       (optional) with NETLIFY_SITE_ID, lets the script write
 #   NETLIFY_SITE_ID          (optional) RENDER_SERVICE_URL/SECRET back into Netlify automatically.
 #
-# VARIABLES (Settings → Secrets and variables → Actions → Variables):
-#   GCP_PROJECT_ID (required), GCP_REGION (optional, default europe-west1).
+# VARIABLES (Settings → Secrets and variables → Actions → Variables) — ALL OPTIONAL OVERRIDES:
+#   GCP_PROJECT_ID (default pdf-tool-gc), GCP_REGION (default europe-west1).
+#   Neither is a credential, so neither is allowed to block a deploy by failing to resolve; see the
+#   guard step for why that is not a theoretical concern.
 #
 # Prefer Workload Identity Federation to a long-lived JSON key when you get the chance: swap the
 # `credentials_json` input for `workload_identity_provider` + `service_account` and delete the
@@ -61,16 +63,50 @@ jobs:
         run: |
           echo "Deploy reason: ${{ inputs.reason }}"
 
+      # T12.24 — DO NOT MAKE THE DEPLOY HOSTAGE TO A REPOSITORY VARIABLE.
+      #
+      # This guard hard-failed twice, on 2026-08-20 and again on 2026-08-21, with
+      # "variable GCP_PROJECT_ID is not set" while the variable was visibly present in the repo
+      # settings. The runner's own debug trace is unambiguous: `secrets.GCP_SERVICE_ACCOUNT_KEY`
+      # resolved, and `vars.GCP_PROJECT_ID` evaluated to null in the same expression context. A
+      # `vars` lookup returns null for reasons the workflow cannot see or report — the variable is
+      # scoped to a GitHub *Environment* the job does not declare, or it is an organization
+      # variable whose access list omits this repo, or it was created as a secret rather than a
+      # variable. All three look identical from here.
+      #
+      # None of that is worth debugging again, because THE VALUE IS NOT A SECRET. `pdf-tool-gc` and
+      # `europe-west1` are plain identifiers, already written in this file's own header and in the
+      # deploy script's defaults. CMS-Agent's cloud-run-plane.yml has always used literal fallbacks
+      # for exactly this pair and has never once failed this way; this file is the outlier, and the
+      # asymmetry is the bug.
+      #
+      # So `vars` becomes an OVERRIDE, not a requirement, and the run states which source answered.
+      # The only genuinely secret input keeps failing closed.
       - name: Guard — required configuration is present
         env:
           KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
-          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          VAR_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          VAR_REGION: ${{ vars.GCP_REGION }}
         run: |
-          missing=0
-          # Presence only — never the value, and never in a way that could print it.
-          if [ -z "${KEY}" ]; then echo "::error::secret GCP_SERVICE_ACCOUNT_KEY is not set"; missing=1; fi
-          if [ -z "${PROJECT}" ]; then echo "::error::variable GCP_PROJECT_ID is not set"; missing=1; fi
-          [ "$missing" -eq 0 ] || exit 1
+          # Presence only for the secret — never the value, and never in a way that could print it.
+          if [ -z "${KEY}" ]; then
+            echo "::error::secret GCP_SERVICE_ACCOUNT_KEY is not set. This one has no fallback: it is the only genuinely secret input."
+            exit 1
+          fi
+          # Project id and region are identifiers, not credentials, so they are safe to echo — and
+          # naming the source is the whole point: a run that silently used a default when you meant
+          # to override it is the next hour lost.
+          if [ -n "${VAR_PROJECT}" ]; then
+            echo "project: ${VAR_PROJECT} (from repository variable GCP_PROJECT_ID)"
+          else
+            echo "::warning::repository variable GCP_PROJECT_ID did not resolve; using the built-in default pdf-tool-gc. If you meant to override it, check that it is a repository variable — not an Environment-scoped one, not an org variable this repo lacks access to, and not a secret."
+            echo "project: pdf-tool-gc (built-in default)"
+          fi
+          if [ -n "${VAR_REGION}" ]; then
+            echo "region : ${VAR_REGION} (from repository variable GCP_REGION)"
+          else
+            echo "region : europe-west1 (built-in default)"
+          fi
 
       - uses: google-github-actions/auth@v2
         with:
@@ -80,8 +116,8 @@ jobs:
 
       - name: Deploy
         env:
-          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'pdf-tool-gc' }}
+          GCP_REGION: ${{ vars.GCP_REGION || 'europe-west1' }}
           # The script accepts a path OR inline JSON; google-github-actions/auth has already written
           # a key file and exported GOOGLE_APPLICATION_CREDENTIALS pointing at it.
           GCP_SERVICE_ACCOUNT_KEY: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
@@ -93,7 +129,7 @@ jobs:
       - name: Report what is live
         if: always()
         env:
-          GCP_REGION: ${{ vars.GCP_REGION }}
+          GCP_REGION: ${{ vars.GCP_REGION || 'europe-west1' }}
         run: |
           region="${GCP_REGION:-europe-west1}"
           url="$(gcloud run services describe pdf-tool-render --region="$region" --format='value(status.url)' || true)"
