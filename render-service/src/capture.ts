@@ -339,7 +339,103 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
     return rect.height >= 48 && clean(element.textContent).length > 0;
   });
 
+  // ── T12.23 STRUCTURED BLOCK EXTRACTION ────────────────────────────────────
+  //
+  // Until now a block carried \`textContent\` and nothing else: one flat string with every list
+  // bullet, table cell and pull-quote melted into it. That single line is why the mapper could
+  // only ever produce 10 of the platform's 24 section types — \`faq\`, \`stats\`, \`timeline\`,
+  // \`steps\`, \`testimonial\` and \`comparison_table\` are all SHAPES, and the shape was thrown away
+  // at crawl time. Recovering them from flat text means regexing prose, which is exactly the
+  // brittle guessing a deterministic-first pipeline exists to avoid.
+  //
+  // So the structure is captured where it still exists — in the DOM — and the mapper reads it
+  // instead of inferring it. Purely ADDITIVE: \`text\` is unchanged, and a snapshot without this
+  // key maps exactly as it does today.
+  //
+  // BOUNDED ON EVERY AXIS. A snapshot is stored, versioned and re-read; an unbounded structure
+  // key on a 200-row pricing table would dwarf the page it describes. Counts and lengths are
+  // capped here rather than downstream, because the cost is the bytes crossing the wire.
+  const S_MAX_ITEMS = 24;
+  const S_MAX_GROUPS = 6;
+  const S_MAX_LEN = 400;
+  const sClip = (value) => clean(value).slice(0, S_MAX_LEN);
+  // Only the nearest enclosing block owns a node — otherwise a <section> wrapping an <article>
+  // reports the same list twice and the mapper sees two candidates for one piece of content.
+  const ownsNode = (element, node) => node.closest('section, article, [role="region"], main > *, body > header, body > nav, body > footer') === element;
+
+  const extractStructure = (element) => {
+    const structure = {};
+
+    const lists = [...element.querySelectorAll('ul, ol')]
+      .filter((list) => ownsNode(element, list) && !list.querySelector('ul, ol'))
+      .slice(0, S_MAX_GROUPS)
+      .map((list) => ({
+        ordered: list.tagName.toLowerCase() === 'ol',
+        items: [...list.querySelectorAll(':scope > li')]
+          .slice(0, S_MAX_ITEMS)
+          .map((li) => sClip(li.textContent))
+          .filter(Boolean),
+      }))
+      .filter((list) => list.items.length > 0);
+    if (lists.length) structure.lists = lists;
+
+    const tables = [...element.querySelectorAll('table')]
+      .filter((table) => ownsNode(element, table))
+      .slice(0, S_MAX_GROUPS)
+      .map((table) => {
+        const rowNodes = [...table.querySelectorAll('tr')].slice(0, S_MAX_ITEMS);
+        const cellsOf = (row) => [...row.querySelectorAll('th, td')].slice(0, S_MAX_ITEMS).map((cell) => sClip(cell.textContent));
+        // A header row is one whose cells are <th>; absent that, no headers are claimed rather
+        // than promoting the first data row and mislabelling every column.
+        const headerRow = rowNodes.find((row) => row.querySelector('th'));
+        const headers = headerRow ? cellsOf(headerRow) : [];
+        const rows = rowNodes.filter((row) => row !== headerRow).map(cellsOf).filter((row) => row.some(Boolean));
+        return { headers, rows };
+      })
+      .filter((table) => table.rows.length > 0);
+    if (tables.length) structure.tables = tables;
+
+    const quotes = [...element.querySelectorAll('blockquote, figure > q')]
+      .filter((node) => ownsNode(element, node))
+      .slice(0, S_MAX_ITEMS)
+      .map((node) => {
+        // <cite> and <figcaption> are the two standard attribution idioms; the quote text must
+        // exclude the attribution or it reads back as part of what the person said.
+        const citeNode = node.querySelector('cite') || node.parentElement?.querySelector('figcaption');
+        const attribution = citeNode ? sClip(citeNode.textContent) : '';
+        let quote = clean(node.textContent);
+        if (attribution && quote.endsWith(attribution)) quote = clean(quote.slice(0, quote.length - attribution.length));
+        return { quote: sClip(quote), ...(attribution ? { attribution } : {}) };
+      })
+      .filter((entry) => entry.quote);
+    if (quotes.length) structure.quotes = quotes;
+
+    // Two disclosure idioms, one shape: <details><summary> accordions and <dl><dt><dd> lists.
+    const qa = [];
+    for (const node of [...element.querySelectorAll('details')].filter((n) => ownsNode(element, n))) {
+      const summary = node.querySelector('summary');
+      if (!summary) continue;
+      const question = sClip(summary.textContent);
+      const answer = sClip(clean(node.textContent).replace(clean(summary.textContent), ''));
+      if (question && answer) qa.push({ q: question, a: answer });
+    }
+    for (const list of [...element.querySelectorAll('dl')].filter((n) => ownsNode(element, n))) {
+      const children = [...list.children];
+      for (let i = 0; i < children.length - 1; i += 1) {
+        if (children[i].tagName.toLowerCase() !== 'dt') continue;
+        if (children[i + 1].tagName.toLowerCase() !== 'dd') continue;
+        const question = sClip(children[i].textContent);
+        const answer = sClip(children[i + 1].textContent);
+        if (question && answer) qa.push({ q: question, a: answer });
+      }
+    }
+    if (qa.length) structure.qa = qa.slice(0, S_MAX_ITEMS);
+
+    return Object.keys(structure).length > 0 ? structure : undefined;
+  };
+
   const blocks = candidates.map((element, index) => {
+    const structure = extractStructure(element);
     const links = [...element.querySelectorAll('a[href]')]
       .map((anchor) => ({
         label: clean(anchor.textContent).slice(0, 300),
@@ -354,6 +450,7 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
       accessibleName: clean(element.getAttribute('aria-label')) || null,
       selector: selectorFor(element),
       text: { value: text.slice(0, 12000), length: text.length, truncated: text.length > 12000 },
+      ...(structure ? { structure } : {}),
       links,
       boundingBoxes: {},
       computedStyles: {},
