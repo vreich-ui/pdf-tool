@@ -38,6 +38,10 @@ const PAGE_HTML = `<!doctype html>
   <header style="min-height:60px"><nav><a href="/about">About</a></nav></header>
   <main>
     <section id="hero" style="min-height:120px"><h1>Hello Capture</h1><p>Settled content with enough text.</p></section>
+    <section id="video" style="min-height:120px">
+      <h2>Watch the tour</h2>
+      <iframe title="Site tour" src="https://www.youtube.com/embed/dQw4w9WgXcQ" width="560" height="315"></iframe>
+    </section>
   </main>
   <footer style="min-height:60px"><a href="/contact">Contact</a></footer>
   <img src="https://blocked.example.net/x.png" alt="offsite" width="10" height="10">
@@ -148,6 +152,23 @@ test("full page capture: snapshot.v1 page payload with outline, blocks, per-view
             assert.match(shot.sha256, /^[a-f0-9]{64}$/);
           }
         }
+        // T15.20: the iframe is captured as metadata WITHOUT ever being allowlisted — its own
+        // subframe navigation is blocked by the same route handler as everything else
+        // off-allowlist, and capture never needed it to load.
+        assert.ok(Array.isArray(page.embeds) && page.embeds.length === 1, "one embed extracted");
+        const embed = page.embeds[0];
+        assert.match(embed.id, new RegExp(`^${page.pageId}_embed_\\d{3}$`));
+        assert.equal(embed.tag, "iframe");
+        assert.equal(embed.provider, "video");
+        assert.equal(embed.src, "https://www.youtube.com/embed/dQw4w9WgXcQ");
+        assert.equal(embed.providerHost, "www.youtube.com");
+        assert.equal(embed.title, "Site tour");
+        assert.equal(embed.capturable, true);
+        assert.equal(embed.notCapturableReason, null);
+        assert.ok(embed.boundingBoxes.mobile && embed.boundingBoxes.desktop, "per-viewport boxes measured without loading the iframe");
+        assert.ok(embed.boundingBoxes.desktop.width > 0 && embed.boundingBoxes.desktop.height > 0);
+        assert.equal(embed.containingBlockId, page.blocks.find((b: { selector: string }) => b.selector.includes("video")).id);
+
         // Full-page screenshots: one per viewport, metadata in the page payload, bytes alongside.
         assert.equal(page.screenshots.length, 2);
         const fullShots = body.screenshots.filter((shot: { kind: string }) => shot.kind === "full-page");

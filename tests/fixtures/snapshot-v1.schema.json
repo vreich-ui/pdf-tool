@@ -98,6 +98,43 @@
             }
           },
           "assets": { "type": "array", "items": { "type": "object" } },
+          "embeds": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "ordinal",
+                "tag",
+                "provider",
+                "src",
+                "selector",
+                "boundingBoxes",
+                "capturable",
+                "notCapturableReason"
+              ],
+              "properties": {
+                "id": { "type": "string", "pattern": "^page_[a-f0-9]{12}_embed_\\d{3}$" },
+                "ordinal": { "type": "integer", "minimum": 0 },
+                "tag": { "type": "string", "enum": ["iframe", "embed", "object"] },
+                "provider": { "type": "string", "enum": ["video", "maps", "booking", "social", "unknown"] },
+                "src": { "type": ["string", "null"], "format": "uri" },
+                "rawSrc": { "type": ["string", "null"] },
+                "providerHost": { "type": ["string", "null"] },
+                "title": { "type": ["string", "null"] },
+                "accessibleName": { "type": ["string", "null"] },
+                "selector": { "type": "string" },
+                "containingBlockId": { "type": ["string", "null"] },
+                "attributes": { "type": "object" },
+                "boundingBoxes": { "type": "object" },
+                "capturable": { "type": "boolean" },
+                "notCapturableReason": {
+                  "type": ["string", "null"],
+                  "enum": ["missing-src", "unsupported-scheme", "invalid-src", null]
+                }
+              }
+            }
+          },
           "navigation": { "type": "object" },
           "discoveredLinks": { "type": "array", "items": { "type": "string", "format": "uri" } },
           "screenshots": { "type": "array", "items": { "type": "object" } }

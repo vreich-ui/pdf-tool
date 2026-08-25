@@ -218,6 +218,24 @@ Response: `{ ok: true, page, screenshots, diagnostics }` where `page` is the sna
 worker to persist through the caller's storage grant. Blocked network requests are
 recorded in `diagnostics.blockedRequests` (capped at 20).
 
+`page.embeds[]` (T15.20) — every `<iframe>`/`<embed>`/`<object>` on the page, capped at
+40 entries, as **metadata only**: `id`, `ordinal`, `tag`, `provider`
+(`video`/`maps`/`booking`/`social`/`unknown`, classified by hostname), `src` (absolute
+URL) + `providerHost` + `rawSrc` (the attribute as authored), `title`/`accessibleName`,
+`selector`, `containingBlockId` (nearest ancestor block, or `null`), `attributes`
+(`width`/`height`/`allow`/`allowFullscreen`/`loading`/`sandbox`/`referrerPolicy` — enough
+to reconstruct the tag), and `boundingBoxes` (per viewport, same shape as a block's). An
+embed whose src cannot be resolved to an http(s) URL is still emitted — never dropped —
+with `capturable: false`, `notCapturableReason` set to `missing-src` / `unsupported-scheme`
+/ `invalid-src`, and `src`/`providerHost` `null`. Capturing an embed NEVER causes the
+capture context to navigate into or fetch its content: everything comes from the parent
+document's own DOM attributes, and embed hosts are never added to `networkAllowlist` — the
+iframe's own subframe load, if it happens at all, is subject to the same allowlist as
+every other request and is typically blocked. The field-by-field contract lives as a
+comment above the embed-extraction code in `EXTRACT_PAGE_MODEL_SCRIPT`
+(`src/capture.ts`); the schema copy is `tests/fixtures/snapshot-v1.schema.json`
+(`properties.pages.items.properties.embeds`).
+
 Unlike the print path, this navigates with **JavaScript ENABLED** — inside its own fresh
 per-request `BrowserContext` whose `context.route("**/*")` aborts every request to an
 origin outside `networkAllowlist` (non-allowlisted **navigations** included). The print

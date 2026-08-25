@@ -16,10 +16,13 @@ import type { CaptureServicePageResult } from "../netlify/lib/capture/service-cl
 /**
  * T12.8 capture plane: fixture crawl through the job plane reproduces the committed
  * snapshot.v1 shape (schema-validated against the platform contract's schema, copied to
- * tests/fixtures/snapshot-v1.schema.json), bound-widening refused worker-side, robots +
- * rate honored with evidence in the job record, and deadline + resume proven (a job
- * interrupted at the budget boundary continues from its frontier, never re-fetching
- * page 1).
+ * tests/fixtures/snapshot-v1.schema.json — VENDORED COPY SYNC NOTE: this file is the
+ * pdf-tool-side mirror of the platform repo's snapshot.v1 contract; T15.20 bumped it with
+ * an additive `embeds[]` on each page — see render-service/src/capture.ts's EXTRACT_PAGE_MODEL_SCRIPT
+ * comment for the field-by-field contract that CMS-Agent#199 consumes), bound-widening
+ * refused worker-side, robots + rate honored with evidence in the job record, and
+ * deadline + resume proven (a job interrupted at the budget boundary continues from its
+ * frontier, never re-fetching page 1).
  */
 
 const ORIGIN = "https://site.example.com";

@@ -459,6 +459,138 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
     };
   });
 
+  // ── T15.20 EMBED CAPTURE ───────────────────────────────────────────────────
+  //
+  // Contract for CMS-Agent#199 (T15.21 emits these as \`content_embed\` sections): every
+  // \`<iframe>\`/\`<embed>\`/\`<object>\` on the page becomes one entry in \`embeds[]\`
+  // (page-level, sibling of \`blocks\`). Fields:
+  //   id                 stable "<pageId>_embed_NNN" (assigned outside the browser, after
+  //                      DOM order is fixed — see capture.ts below)
+  //   ordinal            0-based DOM-encounter order (deterministic; drives id numbering)
+  //   tag                'iframe' | 'embed' | 'object'
+  //   provider           'video' | 'maps' | 'booking' | 'social' | 'unknown' — classified
+  //                      by hostname (see classifyEmbedProvider); 'unknown' covers same-
+  //                      origin widgets and anything not in the lookup table
+  //   src                absolute http(s) URL, or null when NOT CAPTURABLE
+  //   rawSrc             the attribute as authored (src, or data= for <object>), or null
+  //                      when the attribute itself is absent/empty — kept even when not
+  //                      capturable so the reason is diagnosable
+  //   providerHost       src's hostname, or null when not capturable
+  //   title / accessibleName   title / aria-label attributes, cleaned, or null
+  //   selector           same selectorFor() scheme as blocks — stable within one capture
+  //   containingBlockOrdinal   index into the (pre-id) blocks array for the nearest
+  //                      ancestor block candidate, or null if the embed sits outside every
+  //                      block (resolved to containingBlockId outside the browser, once
+  //                      block ids exist)
+  //   attributes         { width, height, allow, allowFullscreen, loading, sandbox,
+  //                        referrerPolicy } — the declared HTML attributes, enough to
+  //                      reconstruct the tag (rendered geometry lives in boundingBoxes)
+  //   boundingBoxes      { [viewportId]: {x,y,width,height} } — populated per viewport by
+  //                      the same measureBlocksScript pass blocks use (empty here; capture.ts
+  //                      fills it in)
+  //   capturable         false when src could not be resolved to an http(s) URL
+  //   notCapturableReason  'missing-src' | 'unsupported-scheme' | 'invalid-src' | null —
+  //                      REQUIRED reading for #199: capturable:false means src/providerHost
+  //                      are null and the embed cannot be reconstructed from src alone; the
+  //                      geometry + rawSrc + attributes are still recorded so the gap is
+  //                      visible instead of silently dropped.
+  //
+  // Policy: this NEVER causes navigation into embed content. Everything here reads
+  // already-parsed DOM attributes of the host page; the iframe's own subframe load is
+  // still subject to the capture context's network allowlist (createCaptureRouteHandler)
+  // exactly like any other request, and embed hosts are never added to that allowlist —
+  // whatever the frame does on its own is not something this capture depends on or waits
+  // for. Bounded to EMBED_MAX entries so one page cannot inflate the snapshot unboundedly.
+  const EMBED_MAX = 40;
+  const candidateIndexByElement = new Map(candidates.map((element, index) => [element, index]));
+  const nearestBlockOrdinal = (element) => {
+    let node = element.parentElement;
+    while (node) {
+      if (candidateIndexByElement.has(node)) return candidateIndexByElement.get(node);
+      node = node.parentElement;
+    }
+    return null;
+  };
+  const classifyEmbedProvider = (hostname, pathname) => {
+    const host = (hostname || '').toLowerCase();
+    const path = (pathname || '').toLowerCase();
+    const endsWithAny = (suffixes) => suffixes.some((suffix) => host === suffix || host.endsWith('.' + suffix));
+    if (
+      endsWithAny([
+        'youtube.com', 'youtube-nocookie.com', 'youtu.be', 'vimeo.com', 'wistia.com', 'wistia.net',
+        'dailymotion.com', 'loom.com', 'videoask.com', 'brightcove.net', 'brightcove.com', 'kaltura.com',
+      ])
+    )
+      return 'video';
+    if (endsWithAny(['openstreetmap.org', 'mapbox.com', 'waze.com']) || (endsWithAny(['google.com']) && path.includes('/maps')))
+      return 'maps';
+    if (
+      endsWithAny([
+        'calendly.com', 'acuityscheduling.com', 'squarespacescheduling.com', 'bookeo.com', 'opentable.com',
+        'resy.com', 'setmore.com', 'simplybook.me', 'simplybook.it', 'eventbrite.com', 'tock.com',
+        'schedulicity.com', 'appointlet.com',
+      ])
+    )
+      return 'booking';
+    if (endsWithAny(['facebook.com', 'fb.com', 'twitter.com', 'x.com', 'instagram.com', 'tiktok.com', 'linkedin.com', 'pinterest.com']))
+      return 'social';
+    return 'unknown';
+  };
+
+  const embedElements = [...document.querySelectorAll('iframe, embed, object')].slice(0, EMBED_MAX);
+  const embeds = embedElements.map((element, index) => {
+    const tag = element.tagName.toLowerCase();
+    const rawSrcAttr = tag === 'object' ? element.getAttribute('data') : element.getAttribute('src');
+    const rawSrc = clean(rawSrcAttr) || null;
+    let src = null;
+    let providerHost = null;
+    let provider = 'unknown';
+    let notCapturableReason = null;
+    if (!rawSrc) {
+      notCapturableReason = 'missing-src';
+    } else {
+      let parsed = null;
+      try {
+        parsed = new URL(rawSrcAttr, document.baseURI);
+      } catch {
+        parsed = null;
+      }
+      if (!parsed) {
+        notCapturableReason = 'invalid-src';
+      } else if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        notCapturableReason = 'unsupported-scheme';
+      } else {
+        src = parsed.href;
+        providerHost = parsed.hostname;
+        provider = classifyEmbedProvider(parsed.hostname, parsed.pathname);
+      }
+    }
+    return {
+      ordinal: index,
+      tag,
+      provider,
+      src,
+      rawSrc,
+      providerHost,
+      title: clean(element.getAttribute('title')) || null,
+      accessibleName: clean(element.getAttribute('aria-label')) || null,
+      selector: selectorFor(element),
+      containingBlockOrdinal: nearestBlockOrdinal(element),
+      attributes: {
+        width: element.getAttribute('width'),
+        height: element.getAttribute('height'),
+        allow: element.getAttribute('allow'),
+        allowFullscreen: element.hasAttribute('allowfullscreen'),
+        loading: element.getAttribute('loading'),
+        sandbox: element.getAttribute('sandbox'),
+        referrerPolicy: element.getAttribute('referrerpolicy'),
+      },
+      boundingBoxes: {},
+      capturable: notCapturableReason === null,
+      notCapturableReason,
+    };
+  });
+
   const assets = new Map();
   const addAsset = (rawUrl, kind, element, extra = {}) => {
     const url = absolute(rawUrl);
@@ -554,6 +686,7 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
     metaDescription: document.querySelector('meta[name="description"]')?.getAttribute('content') ?? null,
     outline,
     blocks,
+    embeds,
     assets: [...assets.values()],
     navigation: {
       primary: navLinks('header a[href], nav a[href], [role="navigation"] a[href]'),
@@ -726,6 +859,19 @@ export async function capturePage(request: NormalizedCaptureRequest): Promise<Ca
           block.computedStyles = {};
         });
 
+        // T15.20: assign stable embed ids in the same "<pageId>_embed_NNN" scheme as
+        // blocks, then resolve each embed's containingBlockOrdinal (computed in-browser,
+        // before block ids existed) to the real containingBlockId now that they do.
+        const embeds = (model.embeds as Array<Record<string, unknown>>) ?? [];
+        embeds.forEach((embed, index) => {
+          embed.id = `${pageId}_embed_${String(index + 1).padStart(3, "0")}`;
+          embed.boundingBoxes = {};
+          const ordinal = embed.containingBlockOrdinal;
+          embed.containingBlockId = typeof ordinal === "number" && blocks[ordinal] ? (blocks[ordinal].id as string) : null;
+          delete embed.containingBlockOrdinal;
+        });
+        model.embeds = embeds;
+
         const screenshots: CaptureScreenshot[] = [];
         const pageScreenshots: Array<Record<string, unknown>> = [];
         let screenshotTotalBytes = 0;
@@ -746,7 +892,10 @@ export async function capturePage(request: NormalizedCaptureRequest): Promise<Ca
           await page.waitForTimeout(VIEWPORT_SETTLE_DELAY_MS);
           const measured = (await page.evaluate(
             measureBlocksScript({
-              descriptors: blocks.map((block) => ({ id: block.id as string, selector: block.selector as string })),
+              descriptors: [
+                ...blocks.map((block) => ({ id: block.id as string, selector: block.selector as string })),
+                ...embeds.map((embed) => ({ id: embed.id as string, selector: embed.selector as string })),
+              ],
               viewport: viewport.id,
             })
           )) as { viewport: string; result: Record<string, { box: unknown; style: unknown }> };
@@ -755,6 +904,13 @@ export async function capturePage(request: NormalizedCaptureRequest): Promise<Ca
             if (!sample) continue;
             (block.boundingBoxes as Record<string, unknown>)[viewport.id] = sample.box;
             (block.computedStyles as Record<string, unknown>)[viewport.id] = sample.style;
+          }
+          // Embeds only need geometry (dimensions), not computed style — the reconstructable
+          // attributes are already on the embed entry itself (see EXTRACT_PAGE_MODEL_SCRIPT).
+          for (const embed of embeds) {
+            const sample = measured.result[embed.id as string];
+            if (!sample) continue;
+            (embed.boundingBoxes as Record<string, unknown>)[viewport.id] = sample.box;
           }
 
           const fullRelative = `pages/${pageId}/${viewport.id}/full-page.png`;

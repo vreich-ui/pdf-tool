@@ -329,8 +329,10 @@ Optional provider credentials (providers without credentials are skipped, never 
 ### Site capture (T12.8 capture plane)
 
 pdf-tool can crawl a policy-bounded site into a `snapshot.v1` document (DOM outline,
-per-block boxes + computed styles per viewport, full-page + per-block screenshots — the
-platform capture engine's output contract) as ordinary artifacts. The crawl loop runs in
+per-block boxes + computed styles per viewport, full-page + per-block screenshots, and
+(T15.20) an `embeds[]` metadata record of every `<iframe>`/`<embed>`/`<object>` — src,
+provider classification, geometry, never fetched or navigated into — the platform capture
+engine's output contract) as ordinary artifacts. The crawl loop runs in
 the `capture-worker-background` function; each page is captured by the render-service's
 `POST /capture/page` endpoint (JavaScript enabled inside a fresh, allowlist-routed browser
 context — the PDF print path's lockdown is untouched; see `render-service/README.md`).
