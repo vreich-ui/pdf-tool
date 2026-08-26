@@ -82,12 +82,20 @@ export interface CaptureFrontier {
   effectiveDelayMs: number;
   lastNavigationAtMs: number;
   screenshotArtifactCount: number;
+  /** T15.23: assets whose bytes were persisted into the capture store at crawl time
+   * (closing the crawl→emit TOCTOU window), and the cumulative byte total spent against
+   * the job's per-job asset byte cap — both carried across a resumed invocation so the cap
+   * is enforced over the WHOLE crawl, not reset per budget window. */
+  assetArtifactCount: number;
+  assetBytesStoredTotal: number;
 }
 
 export interface CaptureJobResultSummary {
   snapshotArtifact: unknown;
   capturedPages: number;
   screenshotArtifacts: number;
+  /** T15.23: count of assets whose bytes were persisted into pdf-tool's own capture store. */
+  assetArtifacts: number;
   skipped: number;
   quarantined: number;
   stoppedAtPolicyMaxPages: boolean;

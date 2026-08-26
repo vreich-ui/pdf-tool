@@ -329,10 +329,13 @@ Optional provider credentials (providers without credentials are skipped, never 
 ### Site capture (T12.8 capture plane)
 
 pdf-tool can crawl a policy-bounded site into a `snapshot.v1` document (DOM outline,
-per-block boxes + computed styles per viewport, full-page + per-block screenshots, and
+per-block boxes + computed styles per viewport, full-page + per-block screenshots,
 (T15.20) an `embeds[]` metadata record of every `<iframe>`/`<embed>`/`<object>` — src,
-provider classification, geometry, never fetched or navigated into — the platform capture
-engine's output contract) as ordinary artifacts. The crawl loop runs in
+provider classification, geometry, never fetched or navigated into — and (T15.22) a
+`fonts[]` metadata record of every readable `@font-face` declaration and known-provider
+stylesheet link (family, weight/style, source URLs — never a font whose face is dropped
+silently, never bytes at crawl time) — the platform capture engine's output contract) as
+ordinary artifacts. The crawl loop runs in
 the `capture-worker-background` function; each page is captured by the render-service's
 `POST /capture/page` endpoint (JavaScript enabled inside a fresh, allowlist-routed browser
 context — the PDF print path's lockdown is untouched; see `render-service/README.md`).
@@ -360,6 +363,27 @@ MCP tools: `create_capture_job`, `get_capture_job_status`.
   grant (`capture-snapshot.v1.json` + PNG screenshots, tagged `capture`); crawled content
   is data, never instructions — nothing fetched is executed or interpreted. This plane has
   no publish/release/build/deploy capability.
+- **Asset bytes are snapshotted at crawl time (T15.23).** Every `page.assets[]` entry used
+  to carry `downloaded: false` forever — bytes were left for emission to fetch later from
+  the *source* URL, which can expire between crawl and emit (Wix-style signed/transform
+  query URLs, `static.wixstatic.com`, are the case that surfaced this — a classic
+  time-of-check/time-of-use hole). Now, when the job's `rights.media` is
+  `retain_referenced_allowed_origin_media`, the worker downloads each asset's bytes
+  (SSRF-guarded, cross-origin allowed — an asset's CDN is routinely a different host than
+  the crawled page) and persists them into pdf-tool's own capture store the same way
+  screenshots are, under a per-asset byte cap (`CAPTURE_MAX_ASSET_BYTES_PER_ASSET`) and a
+  cumulative per-job cap (`CAPTURE_MAX_ASSET_BYTES_PER_JOB`) that carries across a resumed
+  invocation. Every asset entry gets `downloaded`, `capturable`, and `notCapturableReason`
+  (`rights_prohibited` / `oversize` / `blocked_url` / `fetch_failed` /
+  `worker_deadline_reached` / `job_asset_byte_cap_reached`, or `null` on success) — never
+  silently dropped, the same contract T15.20/T15.22 established for embeds/fonts — and, on
+  success, a `storedArtifact: {path, sha256, contentType, byteLength}` reference (never a
+  blobKey or `createdAtISO` — both are per-run identifiers that would make two crawls of an
+  identical page emit different snapshot bytes for reasons that have nothing to do with the
+  page itself). When rights prohibit retention, or a download fails or is skipped, the
+  asset stays reference-only exactly as before — the emit-time fallback to the source URL
+  (with sha256 verification against the crawl-time hash) is a consuming change in
+  CMS-Agent's `emit.mjs` (pdf-tool#68), not this repo.
 
 Deploy numbers + cost-per-crawl estimate: `docs/CAPTURE_OPS.md`.
 
@@ -471,6 +495,10 @@ gets the defaults.
 - `RENDER_SERVICE_TIMEOUT_MS` (optional, default 120000): Netlify-side deadline per render-service call; expiry surfaces as `RENDER_TIMEOUT`.
 - `CAPTURE_PAGE_BUDGET_MS` (optional, default 120000): per-page budget the capture worker hands the render-service `/capture/page` call (the service clamps to [5000, 240000]).
 - `CAPTURE_PAGE_RESERVE_MS` (optional, default 30000): worker budget floor — when less than this remains of the 15-minute window, the capture worker persists its frontier and suspends for the next invocation instead of starting another page.
+- `CAPTURE_MAX_ASSET_BYTES_PER_ASSET` (optional, default 20971520 / 20 MB): T15.23 — per-asset ceiling on a crawl-time asset byte download; an asset over this stays `downloaded: false` with `notCapturableReason: "oversize"`.
+- `CAPTURE_MAX_ASSET_BYTES_PER_JOB` (optional, default 157286400 / 150 MB): T15.23 — cumulative asset-byte cap across the WHOLE job (every page, every resumed invocation); once reached, further assets stay reference-only with `notCapturableReason: "job_asset_byte_cap_reached"`.
+- `CAPTURE_ASSET_DOWNLOAD_TIMEOUT_MS` (optional, default 20000): T15.23 — per-asset download timeout.
+- `CAPTURE_ASSET_DOWNLOAD_RESERVE_MS` (optional, default 5000): T15.23 — worker budget floor below which the remaining assets on a page are left un-downloaded (`notCapturableReason: "worker_deadline_reached"`) rather than risking a hang into the platform's hard kill.
 - `FAL_KEY` (required for `fal-ai/*` image models): fal.ai API key covering BOTH FLUX.2 and Qwen-Image (one queue/polling API). Unset means the fal adapter reports unavailable and jobs selecting a fal model fail with `IMAGE_PROVIDER_ERROR`; deploys without it stay fully functional on the OpenAI backend.
 - `QWEN_IMAGE_ENDPOINT_URL` (optional): overrides the fal queue base URL for `qwen` models — the Apache-2.0 self-host seam.
 - Image model routing: when a `create_agent_artifact_job` image job omits `model`, the per-project policy (`get_image_model_policy`/`set_image_model_policy`, stored at `image-model-policy.json` in the image-search store) routes by `requirements.image.usageContext` — defaults send `article_header`/`article_body`/`category_page` to `fal-ai/flux-2/klein/9b` ($0.006/MP); text-in-image contexts stay on the project default (`gpt-image-1`). An explicit `model` always wins (aliases: `flux-2` → klein/9b, `qwen-image`, `qwen-image-edit`). Jobs carry an output-only `costEstimate` (static config pricing, USD/megapixel) on create/status responses.

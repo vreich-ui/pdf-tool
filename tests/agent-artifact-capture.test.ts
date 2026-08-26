@@ -11,7 +11,7 @@ import { createCaptureJobRecord, readCaptureJob, updateCaptureJob, validateCaptu
 import { HARD_MAX_CAPTURE_PAGES_PER_JOB, stablePageId, validateCapturePolicy, type ProjectCapturePolicy } from "../netlify/lib/capture/policy.js";
 import { captureStorageGrant } from "../netlify/lib/capture/storage.js";
 import { grantBlobCredentials, isPdfToolOwnStorageGrant, parseStorageGrant, PDF_TOOL_OWN_STORAGE_GRANT_TYPE, PDF_TOOL_OWN_STORAGE_SENTINEL } from "../netlify/lib/storage-grant.js";
-import type { CaptureServicePageResult } from "../netlify/lib/capture/service-client.js";
+import { fetchAssetBytes, type CaptureServicePageResult } from "../netlify/lib/capture/service-client.js";
 
 /**
  * T12.8 capture plane: fixture crawl through the job plane reproduces the committed
@@ -19,7 +19,9 @@ import type { CaptureServicePageResult } from "../netlify/lib/capture/service-cl
  * tests/fixtures/snapshot-v1.schema.json — VENDORED COPY SYNC NOTE: this file is the
  * pdf-tool-side mirror of the platform repo's snapshot.v1 contract; T15.20 bumped it with
  * an additive `embeds[]` on each page — see render-service/src/capture.ts's EXTRACT_PAGE_MODEL_SCRIPT
- * comment for the field-by-field contract that CMS-Agent#199 consumes), bound-widening
+ * comment for the field-by-field contract that CMS-Agent#199 consumes — and T15.22 bumped
+ * it again with an additive `fonts[]` on each page, same file, for CMS-Agent's theme.mjs
+ * / emit.mjs / fit_adjudicator (pdf-tool#67)), bound-widening
  * refused worker-side, robots + rate honored with evidence in the job record, and
  * deadline + resume proven (a job interrupted at the budget boundary continues from its
  * frontier, never re-fetching page 1).
@@ -55,7 +57,7 @@ function policyFixture(overrides: Partial<ProjectCapturePolicy> = {}): ProjectCa
   };
 }
 
-function pageFixture(url: string, options: { discoveredLinks?: string[]; finalUrl?: string; simulateMs?: number } = {}): CaptureServicePageResult & { simulateMs?: number } {
+function pageFixture(url: string, options: { discoveredLinks?: string[]; finalUrl?: string; simulateMs?: number; assets?: Array<Record<string, unknown>> } = {}): CaptureServicePageResult & { simulateMs?: number } {
   const finalUrl = options.finalUrl ?? url;
   const pageId = stablePageId(url);
   const blockId = `${pageId}_block_001`;
@@ -101,7 +103,7 @@ function pageFixture(url: string, options: { discoveredLinks?: string[]; finalUr
           assetUrls: [],
         },
       ],
-      assets: [],
+      assets: options.assets ?? [],
       navigation: { primary: [], footer: [] },
       discoveredLinks: options.discoveredLinks ?? [],
       screenshots: [screenshotMeta(fullPath, "full-page")],
@@ -114,14 +116,20 @@ function pageFixture(url: string, options: { discoveredLinks?: string[]; finalUr
   };
 }
 
-function setFixtures(options: { pages?: Record<string, unknown>; robotsStatus?: number; includeSitemap?: boolean }): void {
+function setFixtures(options: { pages?: Record<string, unknown>; robotsStatus?: number; includeSitemap?: boolean; assets?: Record<string, unknown> }): void {
   process.env.CAPTURE_TEST_FIXTURES = JSON.stringify({
     fetches: {
       [`${ORIGIN}/robots.txt`]: { status: options.robotsStatus ?? 200, body: ROBOTS_BODY },
       ...(options.includeSitemap === false ? {} : { [`${ORIGIN}/sitemap.xml`]: { status: 200, body: SITEMAP_BODY } }),
     },
     pages: options.pages ?? {},
+    ...(options.assets ? { assets: options.assets } : {}),
   });
+}
+
+/** T15.23 — one fixture entry for a crawl-time asset download (CAPTURE_TEST_FIXTURES.assets). */
+function assetFetchFixture(base64: string, contentType = "image/png"): { status: number; bodyBase64: string; contentType: string } {
+  return { status: 200, bodyBase64: base64, contentType };
 }
 
 function env() {
@@ -139,6 +147,10 @@ function env() {
   delete process.env.WORKER_BACKGROUND_TIMEOUT_MS;
   delete process.env.WORKER_BACKGROUND_SAFETY_MARGIN_MS;
   delete process.env.CAPTURE_PAGE_RESERVE_MS;
+  delete process.env.CAPTURE_MAX_ASSET_BYTES_PER_ASSET;
+  delete process.env.CAPTURE_MAX_ASSET_BYTES_PER_JOB;
+  delete process.env.CAPTURE_ASSET_DOWNLOAD_TIMEOUT_MS;
+  delete process.env.CAPTURE_ASSET_DOWNLOAD_RESERVE_MS;
 }
 
 const AUTH = { authorization: "Bearer test-token" };
@@ -611,4 +623,184 @@ test("T12.13 snapshot read path: refuses a job that is not complete, a missing a
   const tampered = await getCaptureSnapshot({ projectId: "dr-lurie", jobId: job.jobId });
   assert.equal(tampered.ok, false);
   if (!tampered.ok) assert.equal(tampered.errorCode, "CAPTURE_SNAPSHOT_DIGEST_MISMATCH");
+});
+
+// ── T15.23: close the asset TOCTOU — snapshot asset bytes at crawl time ──
+
+const ASSET_URL = "https://cdn.example.net/logo.png"; // deliberately a THIRD-PARTY host, not ORIGIN
+
+function assetModelEntry(url: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { url, kind: "image", alt: "Logo", referencedBy: "img#logo", downloaded: false, ...extra };
+}
+
+interface SnapshotDoc {
+  pages: Array<{ pageId: string; assets: Array<Record<string, unknown>> }>;
+}
+
+async function readSnapshot(projectId: string, jobId: string): Promise<SnapshotDoc> {
+  const read = await getCaptureSnapshot({ projectId, jobId });
+  assert.equal(read.ok, true, JSON.stringify(read));
+  if (!read.ok) throw new Error("unreachable");
+  return read.snapshot as unknown as SnapshotDoc;
+}
+
+test("T15.23: the race — asset bytes persisted at crawl time survive the source CDN URL disappearing before emission", async () => {
+  setFixtures({
+    pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL)] }) },
+    assets: { [ASSET_URL]: assetFetchFixture(pngBase64, "image/png") },
+  });
+
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-toctou" }));
+  const { response, body } = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(body.status, "complete");
+  assert.equal(body.result.assetArtifacts, 1, "one asset byte-captured at crawl time");
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  const asset = snapshot.pages[0].assets[0];
+  assert.equal(asset.downloaded, true);
+  assert.equal(asset.capturable, true);
+  assert.equal(asset.notCapturableReason, null);
+  const stored = asset.storedArtifact as { path: string; sha256: string; contentType: string; byteLength: number };
+  assert.equal(stored.sha256, pngSha256);
+  assert.equal(stored.contentType, "image/png");
+  assert.equal(stored.byteLength, Buffer.from(pngBase64, "base64").byteLength);
+
+  // THE RACE: the source CDN's signed/transform URL expires before emission ever reads it —
+  // simulated by wiping the asset fixture entirely. A naive re-fetch of the SAME URL right
+  // now (exactly what emission did before this fix) fails outright:
+  process.env.CAPTURE_TEST_FIXTURES = JSON.stringify({ fetches: {}, pages: {}, assets: {} });
+  await assert.rejects(() => fetchAssetBytes(ASSET_URL, { maxBytes: 10_000_000 }), /No asset fixture/, "the source is gone — a re-fetch at emission time would fail (the bug this task closes)");
+
+  // But the bytes stored AT CRAWL TIME are entirely unaffected: read them back from the
+  // capture store via the deterministic path the snapshot already named — no fresh fetch of
+  // the source is ever involved on this path.
+  const blobKey = `binary/${job.requestId}/${stored.sha256}.png`;
+  const artifactsStore = await projectBlobStore("artifacts");
+  const storedBytes = Buffer.from((await artifactsStore.get(blobKey, { type: "arrayBuffer" })) as ArrayBuffer);
+  assert.equal(createHash("sha256").update(storedBytes).digest("hex"), pngSha256, "crawl-time bytes are unaffected by the source URL later disappearing");
+});
+
+test("T15.23: determinism — two independent crawls of an identical page emit byte-identical asset entries despite different requestIds", async () => {
+  const makePage = () => pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL)] });
+  setFixtures({ pages: { [SEED]: makePage() }, assets: { [ASSET_URL]: assetFetchFixture(pngBase64, "image/png") } });
+  const jobA = await createCaptureJobRecord(jobRequest({ requestId: "req-determinism-a" }));
+  const runA = await invokeWorker(jobA.projectId, jobA.jobId);
+  assert.equal(runA.body.status, "complete", runA.response.body);
+
+  // Fresh fixtures for the second crawl (same content, independently constructed) — this is
+  // NOT the same job resuming, it is a SECOND, INDEPENDENT crawl of the same URL.
+  setFixtures({ pages: { [SEED]: makePage() }, assets: { [ASSET_URL]: assetFetchFixture(pngBase64, "image/png") } });
+  const jobB = await createCaptureJobRecord(jobRequest({ requestId: "req-determinism-b" }));
+  const runB = await invokeWorker(jobB.projectId, jobB.jobId);
+  assert.equal(runB.body.status, "complete", runB.response.body);
+
+  assert.notEqual(jobA.jobId, jobB.jobId);
+  const snapshotA = await readSnapshot(jobA.projectId, jobA.jobId);
+  const snapshotB = await readSnapshot(jobB.projectId, jobB.jobId);
+  const assetA = snapshotA.pages[0].assets[0];
+  const assetB = snapshotB.pages[0].assets[0];
+  // id/path are derived from the URL alone (stablePageId + ordinal) — NOT from requestId —
+  // so two crawls of the identical page must agree on them exactly, along with every other
+  // content-derived field. This is the epic invariant this task must not violate: closing
+  // the TOCTOU window must not make two captures of the same URL diverge.
+  assert.deepEqual(assetA, assetB, "two crawls of the identical page produced different asset entries");
+  assert.equal((assetA.storedArtifact as { path: string }).path, `assets/${stablePageId(SEED)}/${assetA.id}.png`);
+});
+
+test("T15.23 item 4: rights.media prohibiting retention leaves assets reference-only, with a named reason (never silently dropped)", async () => {
+  setFixtures({
+    pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL)] }) },
+    assets: { [ASSET_URL]: assetFetchFixture(pngBase64, "image/png") },
+  });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-rights-prohibited", policy: policyFixture({ rights: { content: "prohibited", media: "prohibited" } }) }));
+  const worked = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  assert.equal(worked.body.result.assetArtifacts, 0, "no bytes retained when rights prohibit it");
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  const asset = snapshot.pages[0].assets[0];
+  assert.equal(asset.downloaded, false);
+  assert.equal(asset.capturable, false);
+  assert.equal(asset.notCapturableReason, "rights_prohibited");
+  assert.equal(asset.storedArtifact, undefined);
+  // Represented, not dropped: the entry survives with its url/kind intact.
+  assert.equal(asset.url, ASSET_URL);
+});
+
+test("T15.23: an oversize asset is refused per-asset (not dropped) and does not consume the job's byte budget", async () => {
+  process.env.CAPTURE_MAX_ASSET_BYTES_PER_ASSET = "10"; // smaller than the fixture PNG
+  setFixtures({
+    pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL)] }) },
+    assets: { [ASSET_URL]: assetFetchFixture(pngBase64, "image/png") },
+  });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-oversize" }));
+  const worked = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  assert.equal(worked.body.result.assetArtifacts, 0);
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  const asset = snapshot.pages[0].assets[0];
+  assert.equal(asset.downloaded, false);
+  assert.equal(asset.notCapturableReason, "oversize");
+});
+
+test("T15.23: a download failure is a named reason, not a dropped asset", async () => {
+  setFixtures({
+    pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL, { alt: "Missing" })] }) },
+    // `assets` present but with no entry for ASSET_URL ⇒ fetchAssetBytes' fixture branch
+    // finds nothing and throws "No asset fixture" ⇒ fetch_failed. Fixture-driven, so this
+    // never attempts a real network call.
+    assets: {},
+  });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-fetch-failed" }));
+  const worked = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  assert.equal(worked.body.result.assetArtifacts, 0);
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  assert.equal(snapshot.pages[0].assets.length, 1, "the asset is represented, not dropped");
+  assert.equal(snapshot.pages[0].assets[0].downloaded, false);
+  assert.equal(snapshot.pages[0].assets[0].notCapturableReason, "fetch_failed");
+});
+
+test("T15.23: an SSRF-blocked asset URL is refused BEFORE any network attempt, with a named reason", async () => {
+  const blockedUrl = "https://127.0.0.1/evil.png"; // IP literal — assertSafeImportUrl refuses it
+  // Deliberately NO `assets` fixture map at all here (undefined, not `{}`): this forces
+  // fetchAssetBytes down its REAL fetch path rather than the fixture short-circuit, so this
+  // test actually exercises assertSafeImportUrl. That is safe to do with a blocked URL only
+  // — the guard throws synchronously before any `fetch()` call is made, so no real network
+  // I/O happens even though the fixture seam is off.
+  setFixtures({ pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(blockedUrl, { alt: "Blocked" })] }) } });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-blocked-url" }));
+  const worked = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  assert.equal(worked.body.result.assetArtifacts, 0);
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  assert.equal(snapshot.pages[0].assets.length, 1, "the asset is represented, not dropped");
+  assert.equal(snapshot.pages[0].assets[0].downloaded, false);
+  assert.equal(snapshot.pages[0].assets[0].notCapturableReason, "blocked_url");
+});
+
+test("T15.23: the per-job asset byte cap is enforced cumulatively across assets — later assets are refused once the cap is spent, not silently skipped", async () => {
+  process.env.CAPTURE_MAX_ASSET_BYTES_PER_JOB = String(Buffer.from(pngBase64, "base64").byteLength); // room for exactly ONE asset
+  const secondUrl = "https://cdn.example.net/second.png";
+  setFixtures({
+    pages: { [SEED]: pageFixture(SEED, { assets: [assetModelEntry(ASSET_URL), assetModelEntry(secondUrl, { alt: "Second" })] }) },
+    assets: {
+      [ASSET_URL]: assetFetchFixture(pngBase64, "image/png"),
+      [secondUrl]: assetFetchFixture(pngBase64, "image/png"),
+    },
+  });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-job-cap" }));
+  const worked = await invokeWorker(job.projectId, job.jobId);
+  assert.equal(worked.body.status, "complete", worked.response.body);
+  assert.equal(worked.body.result.assetArtifacts, 1, "only the first asset fit inside the per-job cap");
+
+  const snapshot = await readSnapshot(job.projectId, job.jobId);
+  const [first, second] = snapshot.pages[0].assets;
+  assert.equal(first.downloaded, true);
+  assert.equal(second.downloaded, false);
+  assert.equal(second.notCapturableReason, "job_asset_byte_cap_reached");
 });
