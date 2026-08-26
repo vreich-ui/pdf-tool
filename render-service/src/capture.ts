@@ -591,6 +591,267 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
     };
   });
 
+  // ── T15.22 FONT CAPTURE ─────────────────────────────────────────────────────
+  //
+  // Contract for pdf-tool#67 / CMS-Agent's theme.mjs + emit.mjs: enumerates @font-face
+  // declarations (self-hosted or same-origin/CORS-readable) and known-provider stylesheet
+  // links (fonts.googleapis.com and similar, whose CSS a plain cross-origin <link> load
+  // never exposes to CSSOM — no-cors responses stay opaque to script by design, so
+  // \`sheet.cssRules\` throws regardless of what the server sends) into \`fonts[]\`
+  // (page-level, sibling of \`blocks\`/\`embeds\`). METADATA ONLY — no font bytes are
+  // fetched here; byte harvesting follows the verified asset-import path (issue item 2,
+  // CMS-Agent side).
+  //
+  // DETERMINISM (epic invariant): raw entries are collected while walking
+  // document.styleSheets / CSSOM rules in DOM/parse order (itself deterministic within one
+  // page load), but the walk order is NOT trusted as the final order — every entry is
+  // explicitly re-sorted by (kind, family, weight, style, stylesheetHref, first source
+  // url) before \`ordinal\`/\`id\` are assigned, and each entry's own \`sources[]\` is sorted
+  // too (by format then url). \`document.fonts\` (a FontFaceSet whose iteration reflects
+  // when each face finished loading over the network, not source order) is deliberately
+  // NEVER read here for exactly that reason — using it would make capture order depend on
+  // network timing, which a determinism harness capturing the same site twice would catch
+  // as a divergence.
+  //
+  // Fields (kind: 'face' — a readable @font-face rule):
+  //   id / ordinal        stable "<pageId>_font_NNN" (id assigned outside the browser,
+  //                        same split as embeds) / 0-based position after the sort above
+  //   family               declared font-family, cleaned and unquoted
+  //   weight               { raw, min, max } — raw as declared ("400", "100 900", ...);
+  //                        min/max are the parsed numeric bounds (null if unparseable)
+  //   style                { raw, kind } — raw as declared; kind is the first token,
+  //                        one of 'normal' | 'italic' | 'oblique'
+  //   unicodeRange         raw unicode-range descriptor, or null
+  //   stylesheetHref       href of the containing stylesheet, or null for inline <style>
+  //   provider             classified by hostname (google-fonts / adobe-fonts /
+  //                        bunny-fonts / fonts-com) from the first source URL, falling
+  //                        back to the stylesheet href's host, or null when neither
+  //                        matches a known provider (i.e. genuinely self-hosted)
+  //   sources               every parsed src() entry: { type: 'url'|'local', rawUrl, url,
+  //                        format, tech, localName } — 'local' entries have url: null
+  //   capturable / notCapturableReason   REQUIRED reading per the T15 ADR: a font that
+  //                        cannot be captured is represented and named, never silently
+  //                        dropped. Reasons: 'no-src-declared' (no src descriptor at all),
+  //                        'invalid-src' (src present but no url()/local() parsed out of
+  //                        it), 'local-only' (every source is local() — nothing fetchable,
+  //                        the face is only obtainable if already installed on the target
+  //                        machine), 'unsupported-scheme' (every url() resolved to a
+  //                        non-http(s)/non-data scheme), or null when capturable.
+  //
+  // Fields (kind: 'provider-link' — a known-provider stylesheet the CSSOM would not let
+  // us read, so it is represented at the reference level instead):
+  //   provider             classified from the stylesheet href's own hostname (never null
+  //                        — that classification is how the link was found)
+  //   href                 absolute URL of the stylesheet, or null when it could not be
+  //                        resolved (notCapturableReason: 'invalid-href')
+  //   families              font family names parsed best-effort from the URL's query
+  //                        string (Google Fonts css/css2 API shape), sorted + deduped —
+  //                        may be empty (e.g. an opaque Adobe Fonts kit URL carries no
+  //                        family names); the link is still represented either way.
+  //
+  // A cross-origin stylesheet that is NOT a recognized provider is simply not represented
+  // as a font: without CSSOM access there is no way to know whether it declares any
+  // @font-face rules at all, so there is nothing honest to name (the same reasoning
+  // embeds.ts applies to elements that are not iframe/embed/object).
+  const FONT_MAX = 60;
+  const FONT_PROVIDER_HOSTS = [
+    ['google-fonts', ['fonts.googleapis.com', 'fonts.gstatic.com']],
+    ['adobe-fonts', ['use.typekit.net', 'p.typekit.net']],
+    ['bunny-fonts', ['fonts.bunny.net']],
+    ['fonts-com', ['fast.fonts.net', 'fast.fonts.com']],
+  ];
+  const classifyFontProvider = (hostname) => {
+    const host = (hostname || '').toLowerCase();
+    for (const [provider, hosts] of FONT_PROVIDER_HOSTS) {
+      if (hosts.some((suffix) => host === suffix || host.endsWith('.' + suffix))) return provider;
+    }
+    return null;
+  };
+  const familiesFromProviderUrl = (url) => {
+    const names = new Set();
+    for (const raw of url.searchParams.getAll('family')) {
+      for (const segment of raw.split('|')) {
+        const name = segment.split(':')[0].replace(/\\+/g, ' ').trim();
+        if (name) names.add(name);
+      }
+    }
+    return [...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  };
+  const parseFontWeight = (raw) => {
+    const text = clean(raw);
+    if (!text) return { raw: '400', min: 400, max: 400 };
+    const keyword = { normal: 400, bold: 700 };
+    const nums = text
+      .split(/\\s+/)
+      .map((token) => keyword[token.toLowerCase()] ?? Number(token))
+      .filter((n) => Number.isFinite(n));
+    if (nums.length === 0) return { raw: text, min: null, max: null };
+    return { raw: text, min: Math.min(...nums), max: Math.max(...nums) };
+  };
+  const parseFontStyle = (raw) => {
+    const text = clean(raw) || 'normal';
+    const kind = text.split(/\\s+/)[0].toLowerCase();
+    return { raw: text, kind: ['normal', 'italic', 'oblique'].includes(kind) ? kind : 'normal' };
+  };
+  const splitTopLevelCommas = (text) => {
+    const parts = [];
+    let depth = 0;
+    let current = '';
+    for (const ch of text) {
+      if (ch === '(') depth += 1;
+      else if (ch === ')') depth = Math.max(0, depth - 1);
+      if (ch === ',' && depth === 0) {
+        parts.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    if (current.trim()) parts.push(current);
+    return parts.map((part) => part.trim()).filter(Boolean);
+  };
+  const parseFontSources = (srcText, baseHref) => {
+    const sources = [];
+    for (const part of splitTopLevelCommas(srcText || '')) {
+      const urlMatch = part.match(/url\\(\\s*(['"]?)([^'")]*)\\1\\s*\\)/i);
+      const localMatch = part.match(/local\\(\\s*(['"]?)([^'")]*)\\1\\s*\\)/i);
+      const formatMatch = part.match(/format\\(\\s*(['"]?)([^'")]*)\\1\\s*\\)/i);
+      const techMatch = part.match(/tech\\(\\s*(['"]?)([^'")]*)\\1\\s*\\)/i);
+      if (urlMatch) {
+        const rawUrl = urlMatch[2].trim();
+        let url = null;
+        try {
+          url = rawUrl ? new URL(rawUrl, baseHref || document.baseURI).href : null;
+        } catch {
+          url = null;
+        }
+        sources.push({
+          type: 'url',
+          rawUrl: rawUrl || null,
+          url,
+          format: formatMatch ? formatMatch[2].trim() || null : null,
+          tech: techMatch ? techMatch[2].trim() || null : null,
+          localName: null,
+        });
+      } else if (localMatch) {
+        sources.push({ type: 'local', rawUrl: null, url: null, format: null, tech: null, localName: localMatch[2].trim() || null });
+      }
+    }
+    return sources;
+  };
+
+  const rawFontEntries = [];
+  const seenStylesheets = new Set();
+  const walkFontFaceRules = (rules, href) => {
+    for (const rule of rules) {
+      if (rawFontEntries.length >= FONT_MAX) return;
+      if (typeof CSSFontFaceRule !== 'undefined' && rule instanceof CSSFontFaceRule) {
+        const family = clean(rule.style.getPropertyValue('font-family')).replace(/^['"]|['"]$/g, '') || null;
+        const srcText = rule.style.getPropertyValue('src');
+        const sources = parseFontSources(srcText, href);
+        let notCapturableReason = null;
+        if (!clean(srcText)) notCapturableReason = 'no-src-declared';
+        else if (sources.length === 0) notCapturableReason = 'invalid-src';
+        else if (!sources.some((source) => source.type === 'url' && source.url)) notCapturableReason = 'local-only';
+        else if (!sources.some((source) => source.url && /^(https?|data):/i.test(source.url))) notCapturableReason = 'unsupported-scheme';
+        const primaryUrlSource = sources.find((source) => source.url && /^(https?|data):/i.test(source.url));
+        let provider = null;
+        if (primaryUrlSource) {
+          try {
+            provider = classifyFontProvider(new URL(primaryUrlSource.url).hostname);
+          } catch {
+            provider = null;
+          }
+        }
+        if (!provider && href) {
+          try {
+            provider = classifyFontProvider(new URL(href).hostname);
+          } catch {
+            provider = null;
+          }
+        }
+        rawFontEntries.push({
+          kind: 'face',
+          family,
+          weight: parseFontWeight(rule.style.getPropertyValue('font-weight')),
+          style: parseFontStyle(rule.style.getPropertyValue('font-style')),
+          unicodeRange: clean(rule.style.getPropertyValue('unicode-range')) || null,
+          stylesheetHref: href,
+          provider,
+          sources,
+          capturable: notCapturableReason === null,
+          notCapturableReason,
+        });
+      } else if (rule.cssRules) {
+        // @media / @supports / @layer wrappers: recurse to find nested @font-face rules.
+        walkFontFaceRules(rule.cssRules, href);
+      } else if (typeof CSSImportRule !== 'undefined' && rule instanceof CSSImportRule && rule.styleSheet) {
+        walkStylesheet(rule.styleSheet);
+      }
+    }
+  };
+  const walkStylesheet = (sheet) => {
+    if (!sheet || seenStylesheets.has(sheet) || rawFontEntries.length >= FONT_MAX) return;
+    seenStylesheets.add(sheet);
+    const href = sheet.href || null;
+    let rules = null;
+    try {
+      rules = sheet.cssRules;
+    } catch {
+      rules = null;
+    }
+    if (rules) {
+      walkFontFaceRules(rules, href);
+      return;
+    }
+    // Cross-origin stylesheet the CSSOM refuses to expose: still represented, but only
+    // when it is recognizably a known font-provider link — otherwise we genuinely cannot
+    // tell whether it declares any fonts at all, so there is nothing honest to name.
+    if (!href) return;
+    let parsedHref = null;
+    try {
+      parsedHref = new URL(href, document.baseURI);
+    } catch {
+      parsedHref = null;
+    }
+    const provider = parsedHref ? classifyFontProvider(parsedHref.hostname) : null;
+    if (!provider) return;
+    rawFontEntries.push({
+      kind: 'provider-link',
+      provider,
+      href: parsedHref ? parsedHref.href : null,
+      families: parsedHref ? familiesFromProviderUrl(parsedHref) : [],
+      capturable: parsedHref !== null,
+      notCapturableReason: parsedHref === null ? 'invalid-href' : null,
+    });
+  };
+  for (const sheet of [...document.styleSheets]) {
+    if (rawFontEntries.length >= FONT_MAX) break;
+    walkStylesheet(sheet);
+  }
+
+  const fontSortKey = (entry) => {
+    if (entry.kind === 'face') {
+      const primary = entry.sources.find((source) => source.url) || entry.sources[0] || {};
+      return [
+        '0',
+        (entry.family || '').toLowerCase(),
+        String(entry.weight.min ?? 999999).padStart(6, '0'),
+        entry.style.kind,
+        entry.stylesheetHref || '',
+        primary.url || primary.rawUrl || '',
+      ].join('\\u0000');
+    }
+    return ['1', '', '', '', entry.href || '', (entry.families || []).join(',')].join('\\u0000');
+  };
+  const sourceSortKey = (source) => [source.format || '', source.url || source.rawUrl || source.localName || ''].join('\\u0000');
+  const fonts = rawFontEntries
+    .map((entry) =>
+      entry.kind === 'face' ? { ...entry, sources: [...entry.sources].sort((a, b) => (sourceSortKey(a) < sourceSortKey(b) ? -1 : sourceSortKey(a) > sourceSortKey(b) ? 1 : 0)) } : entry
+    )
+    .sort((a, b) => (fontSortKey(a) < fontSortKey(b) ? -1 : fontSortKey(a) > fontSortKey(b) ? 1 : 0))
+    .map((entry, index) => ({ ordinal: index, ...entry }));
+
   const assets = new Map();
   const addAsset = (rawUrl, kind, element, extra = {}) => {
     const url = absolute(rawUrl);
@@ -687,6 +948,7 @@ export const EXTRACT_PAGE_MODEL_SCRIPT = `(() => {
     outline,
     blocks,
     embeds,
+    fonts,
     assets: [...assets.values()],
     navigation: {
       primary: navLinks('header a[href], nav a[href], [role="navigation"] a[href]'),
@@ -871,6 +1133,16 @@ export async function capturePage(request: NormalizedCaptureRequest): Promise<Ca
           delete embed.containingBlockOrdinal;
         });
         model.embeds = embeds;
+
+        // T15.22: assign stable font ids in the same "<pageId>_font_NNN" scheme as blocks
+        // and embeds. The ordinal/sort order is already fixed inside the browser (see the
+        // determinism note above the font-extraction code) — this step only namespaces the
+        // id with pageId, exactly like the embed id assignment above.
+        const fonts = (model.fonts as Array<Record<string, unknown>>) ?? [];
+        fonts.forEach((font, index) => {
+          font.id = `${pageId}_font_${String(index + 1).padStart(3, "0")}`;
+        });
+        model.fonts = fonts;
 
         const screenshots: CaptureScreenshot[] = [];
         const pageScreenshots: Array<Record<string, unknown>> = [];

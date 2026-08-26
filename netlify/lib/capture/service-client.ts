@@ -44,6 +44,9 @@ interface CaptureTestFixtures {
   pages?: Record<string, (CaptureServicePageResult & { simulateMs?: number }) | { ok: false; code: string; message: string }>;
   /** Keyed by exact URL → {status, body} for robots.txt / sitemap fetches. */
   fetches?: Record<string, { status: number; body: string; contentType?: string }>;
+  /** Keyed by exact asset URL (T15.23) → base64 bytes for the crawl-time asset download,
+   * or a {code, error} failure to simulate (blocked_url/oversize/fetch_failed). */
+  assets?: Record<string, { status: number; bodyBase64: string; contentType?: string } | { code: AssetFetchErrorCode; error: string }>;
 }
 
 export function captureTestFixtures(): CaptureTestFixtures | undefined {
@@ -125,6 +128,92 @@ export async function callCaptureService(call: CapturePageCall): Promise<Capture
   }
   const failure = parsed as { ok: false; code?: string; message?: string };
   throw new RenderError("RENDER_ENGINE_ERROR", failure.message ?? "Capture service page capture failed", { status: response.status, serviceCode: failure.code });
+}
+
+// ---------------------------------------------------------------------------
+// T15.23 — asset byte capture (closing the crawl→emit TOCTOU window)
+// ---------------------------------------------------------------------------
+
+/** Every reason `fetchAssetBytes` can refuse an asset — deliberately small so the worker
+ * can pass it straight through as the snapshot's `notCapturableReason` without translation. */
+export type AssetFetchErrorCode = "blocked_url" | "oversize" | "fetch_failed";
+
+export class AssetFetchError extends Error {
+  code: AssetFetchErrorCode;
+  constructor(code: AssetFetchErrorCode, message: string) {
+    super(message);
+    this.name = "AssetFetchError";
+    this.code = code;
+  }
+}
+
+export interface FetchedAssetBytes {
+  status: number;
+  bytes: Buffer;
+  contentType: string;
+}
+
+/**
+ * Downloads one asset's bytes at CRAWL TIME — the fix for the TOCTOU window this task
+ * closes: today the same URL is re-fetched later, at emission, from the source CDN, which
+ * may have expired (Wix-style signed/transform query URLs). Deliberately NOT restricted to
+ * the crawl's own origin (unlike fetchCrawlText above) — an asset's `url` is routinely on a
+ * different host than the page that references it (the actual source site's CDN), and the
+ * capture policy's `rights.media` gate (checked by the caller, not here) is what decides
+ * whether retention is authorized, not same-origin-ness.
+ *
+ * SSRF-guarded on every hop (assertSafeImportUrl — https + DNS hostname only, no
+ * localhost/.local/.internal/IP literals), manual redirect following (max 5 hops, each
+ * hop re-guarded so a redirect cannot smuggle past the check), and bounded by `maxBytes`
+ * (checked against both the declared Content-Length and the actual downloaded size).
+ */
+export async function fetchAssetBytes(rawUrl: string, options: { maxBytes: number; timeoutMs?: number }): Promise<FetchedAssetBytes> {
+  const fixtures = captureTestFixtures();
+  if (fixtures?.assets) {
+    const fixture = fixtures.assets[rawUrl];
+    if (!fixture) throw new AssetFetchError("fetch_failed", `No asset fixture for ${rawUrl}`);
+    if ("error" in fixture) throw new AssetFetchError(fixture.code, fixture.error);
+    const bytes = Buffer.from(fixture.bodyBase64, "base64");
+    if (bytes.byteLength > options.maxBytes) {
+      throw new AssetFetchError("oversize", `asset exceeds the ${options.maxBytes}-byte cap (${bytes.byteLength} bytes)`);
+    }
+    return { status: fixture.status, bytes, contentType: fixture.contentType ?? "application/octet-stream" };
+  }
+
+  let current = rawUrl;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    let parsed: URL;
+    try {
+      parsed = assertSafeImportUrl(current);
+    } catch (error) {
+      throw new AssetFetchError("blocked_url", error instanceof Error ? error.message : `asset URL is not allowed: ${current}`);
+    }
+    let response: Response;
+    try {
+      response = await fetch(parsed.href, { redirect: "manual", signal: AbortSignal.timeout(options.timeoutMs ?? 20_000) });
+    } catch (error) {
+      const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+      throw new AssetFetchError("fetch_failed", timedOut ? `asset download timed out after ${options.timeoutMs ?? 20_000}ms` : `asset download failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new AssetFetchError("fetch_failed", `redirect from ${current} omitted Location`);
+      current = new URL(location, current).href.split("#")[0];
+      continue;
+    }
+    if (!response.ok) throw new AssetFetchError("fetch_failed", `asset download failed with status ${response.status}`);
+    const declaredLength = Number(response.headers.get("content-length") ?? 0);
+    if (declaredLength > options.maxBytes) {
+      throw new AssetFetchError("oversize", `asset exceeds the ${options.maxBytes}-byte cap (declared ${declaredLength} bytes)`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > options.maxBytes) {
+      throw new AssetFetchError("oversize", `asset exceeds the ${options.maxBytes}-byte cap (${arrayBuffer.byteLength} bytes)`);
+    }
+    const contentType = (response.headers.get("content-type") ?? "application/octet-stream").split(";")[0].trim() || "application/octet-stream";
+    return { status: response.status, bytes: Buffer.from(arrayBuffer), contentType };
+  }
+  throw new AssetFetchError("fetch_failed", `too many redirects while fetching ${rawUrl}`);
 }
 
 /** Fetch a robots.txt / sitemap URL with SSRF guarding, manual same-origin redirect

@@ -97,7 +97,38 @@
               }
             }
           },
-          "assets": { "type": "array", "items": { "type": "object" } },
+          "assets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["url", "kind", "downloaded", "capturable", "notCapturableReason"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^page_[a-f0-9]{12}_asset_\\d{3}$" },
+                "url": { "type": "string", "format": "uri" },
+                "kind": { "type": "string", "enum": ["image", "media", "video", "poster", "document", "background-image"] },
+                "alt": { "type": ["string", "null"] },
+                "referencedBy": { "type": ["string", "null"] },
+                "srcset": { "type": ["string", "null"] },
+                "label": { "type": ["string", "null"] },
+                "downloaded": { "type": "boolean" },
+                "capturable": { "type": "boolean" },
+                "notCapturableReason": {
+                  "type": ["string", "null"],
+                  "enum": ["rights_prohibited", "worker_deadline_reached", "job_asset_byte_cap_reached", "oversize", "blocked_url", "fetch_failed", null]
+                },
+                "storedArtifact": {
+                  "type": "object",
+                  "required": ["path", "sha256", "contentType", "byteLength"],
+                  "properties": {
+                    "path": { "type": "string" },
+                    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                    "contentType": { "type": "string" },
+                    "byteLength": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          },
           "embeds": {
             "type": "array",
             "items": {
@@ -131,6 +162,58 @@
                 "notCapturableReason": {
                   "type": ["string", "null"],
                   "enum": ["missing-src", "unsupported-scheme", "invalid-src", null]
+                }
+              }
+            }
+          },
+          "fonts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "ordinal", "kind", "capturable", "notCapturableReason"],
+              "properties": {
+                "id": { "type": "string", "pattern": "^page_[a-f0-9]{12}_font_\\d{3}$" },
+                "ordinal": { "type": "integer", "minimum": 0 },
+                "kind": { "type": "string", "enum": ["face", "provider-link"] },
+                "family": { "type": ["string", "null"] },
+                "weight": {
+                  "type": "object",
+                  "properties": {
+                    "raw": { "type": "string" },
+                    "min": { "type": ["number", "null"] },
+                    "max": { "type": ["number", "null"] }
+                  }
+                },
+                "style": {
+                  "type": "object",
+                  "properties": {
+                    "raw": { "type": "string" },
+                    "kind": { "type": "string", "enum": ["normal", "italic", "oblique"] }
+                  }
+                },
+                "unicodeRange": { "type": ["string", "null"] },
+                "stylesheetHref": { "type": ["string", "null"] },
+                "provider": { "type": ["string", "null"] },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": { "type": "string", "enum": ["url", "local"] },
+                      "rawUrl": { "type": ["string", "null"] },
+                      "url": { "type": ["string", "null"] },
+                      "format": { "type": ["string", "null"] },
+                      "tech": { "type": ["string", "null"] },
+                      "localName": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "href": { "type": ["string", "null"] },
+                "families": { "type": "array", "items": { "type": "string" } },
+                "capturable": { "type": "boolean" },
+                "notCapturableReason": {
+                  "type": ["string", "null"],
+                  "enum": ["no-src-declared", "invalid-src", "local-only", "unsupported-scheme", "invalid-href", null]
                 }
               }
             }

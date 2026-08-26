@@ -236,6 +236,39 @@ comment above the embed-extraction code in `EXTRACT_PAGE_MODEL_SCRIPT`
 (`src/capture.ts`); the schema copy is `tests/fixtures/snapshot-v1.schema.json`
 (`properties.pages.items.properties.embeds`).
 
+`page.fonts[]` (T15.22) — `@font-face` declarations and known-provider stylesheet links
+(fonts.googleapis.com and similar), as **metadata only** (no font bytes are fetched — byte
+harvesting is a separate, later import path), capped at 60 entries. Two shapes, discriminated
+by `kind`:
+
+- `kind: "face"` — a readable `@font-face` rule (self-hosted, or same-origin/CORS-readable):
+  `family`, `weight` (`{raw, min, max}`), `style` (`{raw, kind}`, kind one of
+  `normal`/`italic`/`oblique`), `unicodeRange`, `stylesheetHref` (`null` for inline
+  `<style>`), `provider` (classified by hostname, or `null` for a genuinely self-hosted
+  face), and `sources[]` (every `src()` entry: `{type: "url"|"local", rawUrl, url, format,
+  tech, localName}`).
+- `kind: "provider-link"` — a known-provider `<link>` stylesheet the CSSOM refuses to expose
+  (a plain cross-origin `<link>` load is opaque to script by design — `sheet.cssRules`
+  throws regardless of what the server sends): `provider`, `href`, and `families[]` parsed
+  best-effort from the URL's query string (Google Fonts css/css2 API shape; sorted +
+  deduped, may be empty for an opaque kit URL).
+
+A font that cannot be captured is still emitted — never dropped — with `capturable: false`
+and `notCapturableReason` set to `no-src-declared` / `invalid-src` / `local-only` (every
+source is `local()`, nothing fetchable) / `unsupported-scheme`, or `invalid-href` for a
+provider-link whose URL could not be resolved. A cross-origin stylesheet that does NOT
+match a known provider host is not represented at all — without CSSOM access there is no
+way to know whether it declares any fonts, so there is nothing honest to name.
+
+**Determinism**: entries are explicitly sorted (by kind, family, weight, style,
+stylesheetHref/href, then first source URL) before `ordinal`/`id` are assigned — the walk
+order over `document.styleSheets`/CSSOM rules is not trusted as final, and `document.fonts`
+(whose iteration reflects network load timing, not declaration order) is never read for
+this reason. Each entry's own `sources[]` is sorted too (by format, then URL). The
+field-by-field contract lives as a comment above the font-extraction code in
+`EXTRACT_PAGE_MODEL_SCRIPT` (`src/capture.ts`); the schema copy is
+`tests/fixtures/snapshot-v1.schema.json` (`properties.pages.items.properties.fonts`).
+
 Unlike the print path, this navigates with **JavaScript ENABLED** — inside its own fresh
 per-request `BrowserContext` whose `context.route("**/*")` aborts every request to an
 origin outside `networkAllowlist` (non-allowlisted **navigations** included). The print
