@@ -3,6 +3,7 @@ import { projectBlobStore } from "./blob-store.js";
 import { projectStoreNames, validateProjectAccess } from "./project-descriptor.js";
 import { RenderError } from "./pdf-render/errors.js";
 import { getPdfRendererMetadata } from "./pdf-render/registry.js";
+import { resolvePdfRenderer } from "./pdf-render/default-renderer.js";
 import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
 
 export type PdfTemplateStatus = "draft" | "active" | "disabled";
@@ -119,11 +120,13 @@ export interface SavePdfTemplateInput {
 export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfTemplateRecord> {
   const { projectId, templateJson, label, tags } = input;
   const templateId = input.templateId ?? randomUUID();
-  const renderer: PdfRendererId = input.renderer ?? "pdfme";
   const store = await openTemplateStore(projectId);
   const now = new Date().toISOString();
 
   const existingMeta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+  // Same policy as createPdfTemplate (pdf-render/default-renderer.ts): explicit > pinned >
+  // pdfme fixed-layout shape > PDF_DEFAULT_RENDERER (chromium).
+  const renderer: PdfRendererId = resolvePdfRenderer({ explicit: input.renderer, pinned: existingMeta?.renderer, templateJson }).renderer;
   // Routing dispatches on meta.renderer while rendering loads a specific version record, so
   // the two must never disagree: a templateId is pinned to one renderer for life.
   if (existingMeta && existingMeta.renderer !== renderer) {

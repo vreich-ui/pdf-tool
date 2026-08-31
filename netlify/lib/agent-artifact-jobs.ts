@@ -3,6 +3,7 @@ import { z } from "zod";
 import { projectBlobStore } from "./blob-store.js";
 import { currentStorageGrant } from "./storage-grant.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
+import { ALL_RENDERER_IDS, type PdfRendererId } from "./pdf-render/types.js";
 import {
   PROJECT_DESCRIPTOR_VERSION,
   projectGrantLimits,
@@ -121,6 +122,12 @@ export interface ArtifactJobRequest {
   filename: string;
   templateId?: string;
   templateRef?: PdfTemplateRef;
+  /** PDF jobs: the renderer the caller EXPECTS this job to run through. Optional — the
+   * template's pinned renderer decides routing either way — but when set it is a contract:
+   * a mismatch fails the job with RENDERER_MISMATCH instead of rendering through the other
+   * engine. Which renderer a template gets when none is named at create_pdf_template time is
+   * decided by pdf-render/default-renderer.ts (PDF_DEFAULT_RENDERER, built-in: chromium). */
+  renderer?: PdfRendererId;
   data?: unknown;
   assets?: { images?: unknown[] };
   /** OUTPUT-ONLY (server-computed at job creation; never part of the validated input
@@ -483,6 +490,8 @@ export function buildArtifactJobRequestSchema() {
       .describe("A descriptive filename derived from THIS document's own title/topic (e.g. the article headline or product name) — never a generic placeholder. The server normalizes it (after validation succeeds) into one predictable, URL-safe form before storing the job: Unicode is transliterated to ASCII and lowercased, any run of non [a-z0-9] characters collapses to a single '-', a baked-in trailing version suffix like \"-v2\" is stripped (version lives in templateVersion + the content sha, not the display name), and the result is capped at 60 characters (cut at a '-' boundary, never mid-word). The extension is normalized too: pdf jobs always get .pdf, image jobs get the extension matching requirements.image.outputFormat. A resulting stem that is EXACTLY one of these generic placeholders is rejected with errorCode FILENAME_TOO_GENERIC — derive the name from the document's own title/topic instead: header, image, img, photo, document, doc, file, output, untitled, artifact, pdf, temp, test, new, final, draft. (A stem merely containing one of these, e.g. \"header-photo\", is fine — only an exact match is rejected.) A name that normalizes to nothing is rejected with errorCode FILENAME_INVALID. If the normalized name collides with a different-content artifact already stored under the same {projectId, requestId, filename}, the stored artifact's name is suffixed -2, -3, ... automatically; resubmitting the SAME bytes under the same or a similar name dedupes instead of being renamed."),
     templateId: z.string().min(1).optional(),
     templateRef: z.object({ storeName: z.string().min(1).optional(), blobKey: z.string().min(1), version: z.number().int().positive().optional() }).optional(),
+    renderer: z.enum(ALL_RENDERER_IDS as [PdfRendererId, ...PdfRendererId[]]).optional()
+      .describe("PDF jobs only: the render engine this job is expected to run through (chromium | pdfme | typst | react-pdf). Routing is decided by the template's pinned renderer regardless; setting this makes it a contract — a template pinned to a different renderer fails the job with errorCode RENDERER_MISMATCH rather than rendering through the other engine. Omit to accept the template's renderer. Templates created without naming a renderer default to chromium (PDF_DEFAULT_RENDERER), except pdfme fixed-layout shapes (basePdf + schemas), which stay on pdfme. The renderer actually used is reported as `renderer` on job status and in artifactReference.metadata.renderer."),
     data: z.unknown().optional(),
     assets: z.object({ images: z.array(z.unknown()).optional() }).optional()
       .describe("Job-supplied binary assets for template renders: images[] entries are {assetId, dataUri} or {assetId, blobKey/artifactReference}. Binding is renderer-specific: chromium templates reference assetId via https://render.assets.invalid/<assetId> in HTML/CSS; typst via image(\"assets/<assetId>\"); react-pdf docTree via an image node's src:{kind:\"jobAsset\",assetId}. pdfme templates do NOT consume assets.images at all — bind image data through the per-render `data` object instead. Every dataUri must decode to a real image (IMAGE_DECODE_ERROR otherwise) and must not be an http(s):// URL."),
@@ -572,6 +581,8 @@ export function buildArtifactJobRequestSchema() {
     if (typed.artifactKind === "pdf") {
       if ((typed.operation ?? "generate") !== "edit" && !typed.templateId && !typed.templateRef) ctx.addIssue({ code: "custom", path: ["templateId"], message: "PDF jobs require templateId or templateRef" });
       if (!typed.filename.toLowerCase().endsWith(".pdf")) ctx.addIssue({ code: "custom", path: ["filename"], message: "filename extension must be .pdf for PDF artifacts" });
+    } else if (typed.renderer !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["renderer"], message: "renderer applies to PDF jobs only" });
     }
     if (typed.artifactKind === "image") {
       const outputFormat = typed.requirements?.image?.outputFormat ?? projectGrantLimits().preferredImageFormat ?? "png";
@@ -648,6 +659,12 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   adapterVersion: string;
   selectedModel?: string;
   executor?: string;
+  /** OUTPUT: the PDF render engine this job ran (or was about to run) through — set by the
+   * worker from the resolved route BEFORE rendering, so even a failed job names the engine.
+   * Absent for image jobs and byte-level PDF edits (pdf_overlay / pdf_transform), which do
+   * not go through a renderer. Distinct from the input `renderer` (the caller's expectation)
+   * inherited from ArtifactJobRequest: the worker overwrites that field with the truth. */
+  renderer?: PdfRendererId;
   requiresAI?: boolean;
   requiresModel?: boolean;
   /** ISO timestamp recorded when a worker flips the job to `running` (deadline-awareness:
@@ -722,7 +739,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "startedAt" | "warnings" | "filename">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "renderer" | "startedAt" | "warnings" | "filename">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,

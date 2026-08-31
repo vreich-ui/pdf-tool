@@ -78,6 +78,42 @@ Direct integrations can call these HTTP endpoints instead of moving binary paylo
 
 Artifact destinations are explicit metadata contracts containing `projectId`, `requestId`, `artifactKind`, optional `slot`, and `filename`. Generic pdf-tool responses wrap the project-native artifact reference as `artifactReference` with `projectId`, `requestId`, `jobId`, `artifactKind`, and `workflowPatchStatus`; they do not replace project-specific `ArtifactReference` shapes.
 
+#### PDF renderers and the default (chromium)
+
+Every PDF job renders through the engine its template is pinned to. Four engines are registered
+(`netlify/lib/pdf-render/registry.ts`): `chromium` (HTML/CSS + Liquid, rendered by
+Playwright/Chromium in the Cloud Run render service), `typst` (native typst 0.15, render
+service), `react-pdf` (docTree, in-function), and `pdfme` (fixed-layout, in-function). The
+renderer is chosen ONCE, at `create_pdf_template`, by `netlify/lib/pdf-render/default-renderer.ts`:
+
+1. an explicit `renderer` always wins (`pdfme`, `typst`, `react-pdf` stay fully selectable);
+2. a new version of an existing `templateId` inherits that template's pinned renderer;
+3. a `templateJson` in pdfme's fixed-layout shape (`basePdf` and/or a `schemas` array) stays on
+   `pdfme` — existing invoice/certificate templates and their callers are unaffected;
+4. everything else gets the default: **`chromium`**, overridable per deployment with
+   `PDF_DEFAULT_RENDERER=<pdfme|typst|chromium|react-pdf>` (an unknown value fails template
+   creation with `RENDERER_NOT_AVAILABLE` rather than silently picking an engine).
+
+The `create_pdf_template` response reports `renderer` and `rendererSource`
+(`explicit | template-pinned | template-shape | default`). A `create_agent_artifact_job` PDF
+job may additionally name `renderer` as a contract: if the template is pinned to a different
+engine the job fails with `RENDERER_MISMATCH` — it never renders through the other one. Every
+PDF job records the engine it ran through as `renderer` on `get_agent_artifact_job_status`
+(set before rendering starts, so failed jobs name it too), on the worker response, and in
+`artifactReference.metadata.renderer`. A renderer that cannot produce the PDF at all
+(`RENDER_SERVICE_UNCONFIGURED`, `RENDER_SERVICE_UNAVAILABLE`, `RENDER_SERVICE_AUTH`,
+`RENDER_TIMEOUT`, `RENDERER_NOT_AVAILABLE`) fails the job with
+`errorDetail.reason = "renderer_unavailable:<code>"` next to `errorDetail.renderer`; there is
+**no fallback to another engine**. Because chromium (and typst) render in the Cloud Run
+service, a deployment that makes chromium the default MUST have `RENDER_SERVICE_URL` and
+`RENDER_SERVICE_SECRET` set — and chromium templates are hard-gated on `validate_pdf_template`
+before `publish_pdf_template` (see the tool descriptions).
+
+Stored PDF artifacts always have `contentType: "application/pdf"`, bytes starting with the PDF
+magic, `sha256` computed over the final bytes (re-verified by `saveArtifactBytes` against what
+it stores), and an accurate `sizeBytes`; `get_agent_artifact_by_slot` returns them exactly as it
+returns images (`artifactKind: "pdf"`).
+
 `create_agent_artifact_job` accepts structured job fields rather than requiring agents to hide requirements in prompts. Image jobs support `requirements.image` (`size`, `outputFormat`, `role`, `usageContext`) and `requirements.maxBytes`. Image edit jobs set `operation: "edit"`, lock a `sourceArtifact` by `expectedSha256`, choose an `editMode`, and can supply `maskRef` plus `editInstructions`. Template PDF jobs use `artifactKind: "pdf"` with `templateId` or `templateRef`, structured `data`, optional `assets.images`, and both nested `requirements.pdf` and top-level `requirements` fields for `pageCount`, `format`, `orientation`, and `margins`. PDF templates remain project-owned assets in the configured project template Blob store; pdf-tool renders/saves artifacts and never mutates workflow JSON.
 
 Every image field — a pdfme `data` value bound to an `image`-type schema field, an `assets.images[].dataUri`, or a react-pdf docTree `dataUri` image — must be a `data:<mime>;base64,...` data URI that decodes to a real, complete image; a corrupted/truncated payload fails the job immediately with `IMAGE_DECODE_ERROR` naming the field (see `netlify/lib/pdf-render/image-decode.ts`), and an `http(s)://` value is rejected the same way rather than being decoded as image bytes (fetch and store it first with `import_image_from_url`/`import_images_from_url`, then reference the result). `assets.images[]` binds to a template differently per renderer — chromium via `https://render.assets.invalid/<assetId>` in HTML/CSS, typst via `image("assets/<assetId>")`, react-pdf docTree via an image node's `src: {kind:"jobAsset", assetId}` — and is not consumed at all by pdfme templates (see the top-of-file comment in `netlify/lib/pdf-render/job-assets.ts` for the full reference).
@@ -490,7 +526,8 @@ gets the defaults.
 - `MCP_SESSION_TTL_SECONDS` (optional, default 86400): idle expiry for MCP sessions.
 - `MCP_REQUIRE_SESSION` (optional): set to `1` to reject sessionless MCP requests.
 - `OPENAI_API_KEY`: server-only OpenAI API key used by Netlify artifact generation (a pdf-tool provider credential, not client storage).
-- `RENDER_SERVICE_URL` (required for the `typst` renderer): base URL of the Cloud Run render service (see `render-service/README.md`). Binary engines (typst; chromium in PR4) render there — Netlify inlines template/data/asset bytes per request; the storage grant never leaves Netlify. Unset ⇒ typst jobs fail with machine-readable `RENDER_SERVICE_UNCONFIGURED`.
+- `PDF_DEFAULT_RENDERER` (optional, default `chromium`): the renderer a `create_pdf_template` call gets when it names none and its `templateJson` is not in pdfme's fixed-layout shape (see "PDF renderers and the default"). One of `pdfme`, `typst`, `chromium`, `react-pdf`; any other value fails template creation with `RENDERER_NOT_AVAILABLE`.
+- `RENDER_SERVICE_URL` (required for the `chromium` — the default — and `typst` renderers): base URL of the Cloud Run render service (see `render-service/README.md`). Binary engines render there — Netlify inlines template/data/asset bytes per request; the storage grant never leaves Netlify. Unset ⇒ chromium/typst jobs fail with machine-readable `RENDER_SERVICE_UNCONFIGURED` (`errorDetail.reason: renderer_unavailable:render_service_unconfigured`); nothing falls back to pdfme.
 - `RENDER_SERVICE_SECRET` (required with `RENDER_SERVICE_URL`): shared secret sent as `x-render-secret`; the service compares it timing-safely. Set the same value on the Cloud Run service (the deploy script generates and wires one).
 - `RENDER_SERVICE_TIMEOUT_MS` (optional, default 120000): Netlify-side deadline per render-service call; expiry surfaces as `RENDER_TIMEOUT`.
 - `CAPTURE_PAGE_BUDGET_MS` (optional, default 120000): per-page budget the capture worker hands the render-service `/capture/page` call (the service clamps to [5000, 240000]).

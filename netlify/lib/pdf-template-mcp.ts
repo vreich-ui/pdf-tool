@@ -1,7 +1,8 @@
-import { savePdfTemplate, getPdfTemplate, listPdfTemplates, publishPdfTemplate, archivePdfTemplate } from "./pdf-template-store.js";
+import { savePdfTemplate, getPdfTemplate, getPdfTemplateMeta, listPdfTemplates, publishPdfTemplate, archivePdfTemplate } from "./pdf-template-store.js";
 import { validateProjectAccess } from "./project-descriptor.js";
 import { REGISTERED_RENDERERS, isRegisteredRenderer, validateTemplateJsonForRenderer } from "./pdf-render/registry.js";
 import { RenderError } from "./pdf-render/errors.js";
+import { resolvePdfRenderer } from "./pdf-render/default-renderer.js";
 
 export interface CreatePdfTemplateInput {
   projectId: string;
@@ -46,7 +47,18 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
   if (!input.templateJson) return { ok: false as const, statusCode: 400, error: "templateJson is required" };
   const accessIssue = validateProjectAccess(input.projectId);
   if (accessIssue) return { ok: false as const, statusCode: 400, error: accessIssue };
-  const renderer = input.renderer ?? "pdfme";
+  // Default-renderer policy lives in ONE place (pdf-render/default-renderer.ts): explicit
+  // wins; a new version of an existing template inherits its pinned renderer; a pdfme
+  // fixed-layout shape keeps pdfme; everything else gets PDF_DEFAULT_RENDERER (chromium).
+  let resolved: ReturnType<typeof resolvePdfRenderer>;
+  try {
+    const pinned = !input.renderer && input.templateId ? (await getPdfTemplateMeta(input.projectId, input.templateId).catch(() => null))?.renderer : undefined;
+    resolved = resolvePdfRenderer({ explicit: input.renderer, pinned, templateJson: input.templateJson });
+  } catch (error) {
+    if (error instanceof RenderError) return { ok: false as const, statusCode: 500, error: error.message, errorCode: error.code, errorDetail: error.detail };
+    throw error;
+  }
+  const renderer = resolved.renderer;
   if (!isRegisteredRenderer(renderer)) {
     return { ok: false as const, statusCode: 400, error: `Unsupported renderer: ${renderer}. Supported renderers: ${REGISTERED_RENDERERS.join(", ")}` };
   }
@@ -68,7 +80,7 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
       label: input.label,
       tags: input.tags
     });
-    return { ok: true as const, statusCode: 201, projectId: record.projectId, templateId: record.templateId, version: record.version, status: record.status, renderer: record.renderer };
+    return { ok: true as const, statusCode: 201, projectId: record.projectId, templateId: record.templateId, version: record.version, status: record.status, renderer: record.renderer, rendererSource: resolved.source };
   } catch (error) {
     if (error instanceof RenderError && error.code === "TEMPLATE_INVALID") {
       return { ok: false as const, statusCode: 400, error: error.message };

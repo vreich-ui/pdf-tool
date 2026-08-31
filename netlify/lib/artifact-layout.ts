@@ -84,7 +84,15 @@ function validateBytes(input: SaveArtifactBytesInput, bytes: Buffer): void {
 export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<ArtifactReference> {
   const bytes = Buffer.from(input.bytes);
   validateBytes(input, bytes);
-  const sha256 = input.sha256 ?? sha256Hex(bytes);
+  // The stored sha256 is ALWAYS the digest of the bytes actually written. A caller-supplied
+  // sha256 is a claim about those bytes, re-verified here rather than trusted: a mismatch
+  // means the caller hashed something other than what it is storing (a bug), and storing
+  // the wrong digest would make every downstream verification lie.
+  const computedSha256 = sha256Hex(bytes);
+  if (input.sha256 !== undefined && input.sha256 !== computedSha256) {
+    throw new Error(`Artifact sha256 mismatch: caller supplied ${input.sha256} but the bytes hash to ${computedSha256}`);
+  }
+  const sha256 = computedSha256;
   const requestId = safePathSegment(input.requestId);
   const kind = safePathSegment(input.artifactKind);
   const extension = extensionForContentType(input.contentType, input.filename);
