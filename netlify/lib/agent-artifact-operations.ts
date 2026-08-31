@@ -1,7 +1,7 @@
 import type { ArtifactJobRecord, ArtifactEditMode } from "./agent-artifact-jobs.js";
 import { getPdfTemplateMeta } from "./pdf-template-store.js";
 import { RenderError } from "./pdf-render/errors.js";
-import { isKnownRendererId } from "./pdf-render/types.js";
+import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
 import { findImageProvider } from "./image-providers/registry.js";
 
 export type ArtifactExecutor =
@@ -48,7 +48,23 @@ async function pdfTemplateExecutor(job: ArtifactJobRecord): Promise<ArtifactExec
       renderer: String(meta.renderer)
     });
   }
+  // An explicitly named renderer is a contract, not a hint: never route through a different
+  // engine than the caller asked for. (The default policy — which renderer a template gets
+  // when none is named — is applied at create_pdf_template time, see default-renderer.ts.)
+  if (job.renderer !== undefined && job.renderer !== meta.renderer) {
+    throw new RenderError(
+      "RENDERER_MISMATCH",
+      `Job requested renderer "${job.renderer}" but PDF template "${job.templateId}" is pinned to "${meta.renderer}"; create a template for the requested renderer or omit renderer to accept the template's`,
+      { requestedRenderer: job.renderer, templateRenderer: meta.renderer, templateId: job.templateId }
+    );
+  }
   return meta.renderer;
+}
+
+/** The PDF render engine an executor corresponds to, or undefined for non-renderer executors
+ * (byte-level PDF edits, image providers). What the worker persists as the job's `renderer`. */
+export function rendererForExecutor(executor: ArtifactExecutor): PdfRendererId | undefined {
+  return isKnownRendererId(executor) ? executor : undefined;
 }
 
 export async function resolveOperationRoute(job: ArtifactJobRecord): Promise<OperationRoute> {

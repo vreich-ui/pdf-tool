@@ -68,7 +68,7 @@ export const MCP_TOOL_SCHEMAS = {
     projectId: z.string().min(1),
     templateId: z.string().min(1).optional().describe("Stable identifier for this template; auto-generated if omitted"),
     templateJson: z.unknown().describe("Renderer-specific template document. pdfme: must contain basePdf and schemas array. react-pdf: a docTree document ({docTreeVersion: 1, document: {...}}) — see docs/REACT_PDF_DOCTREE.md"),
-    renderer: z.enum(REGISTERED_RENDERERS as [string, ...string[]]).optional().describe("Target renderer; defaults to pdfme. The enum grows as new render engines ship."),
+    renderer: z.enum(REGISTERED_RENDERERS as [string, ...string[]]).optional().describe("Target renderer. DEFAULT when omitted: chromium (HTML/CSS + Liquid templates; configurable server-side via PDF_DEFAULT_RENDERER) — EXCEPT a templateJson in pdfme's fixed-layout shape (basePdf + schemas), which stays on pdfme, and a new version of an existing templateId, which inherits that template's pinned renderer. Name pdfme/typst/react-pdf explicitly to select them. The response's rendererSource says whether the renderer was explicit, template-pinned, template-shape, or default."),
     label: z.string().optional(),
     tags: z.array(z.string()).optional()
   }).strict(),

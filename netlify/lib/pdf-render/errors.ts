@@ -9,6 +9,9 @@ export type RenderErrorCode =
   | "TEMPLATE_INVALID"
   | "TEMPLATE_REF_UNSUPPORTED"
   | "RENDERER_NOT_AVAILABLE"
+  /** The job named a renderer that is not the one its template is pinned to. Fails rather
+   * than rendering through the other engine — an explicit renderer is a contract, never a hint. */
+  | "RENDERER_MISMATCH"
   | "RENDER_SERVICE_UNCONFIGURED"
   | "RENDER_SERVICE_UNAVAILABLE"
   | "RENDER_SERVICE_AUTH"
@@ -60,4 +63,25 @@ export class RenderError extends Error {
 export function structuredError(error: unknown): { code?: RenderErrorCode; detail?: Record<string, unknown> } {
   if (error instanceof RenderError) return { code: error.code, detail: error.detail };
   return {};
+}
+
+/**
+ * Failure codes that mean "the renderer this job routed to could not produce a PDF at all"
+ * (as opposed to a template/data/requirements problem). Each is surfaced on the failed job
+ * record as `errorDetail.reason = "renderer_unavailable:<code>"` next to `renderer`, so a
+ * consumer can distinguish "chromium was down/unconfigured" from "your template is wrong"
+ * without a code table. There is deliberately NO fallback to another engine on these.
+ */
+export const RENDERER_UNAVAILABLE_CODES: ReadonlySet<RenderErrorCode> = new Set<RenderErrorCode>([
+  "RENDERER_NOT_AVAILABLE",
+  "RENDER_SERVICE_UNCONFIGURED",
+  "RENDER_SERVICE_UNAVAILABLE",
+  "RENDER_SERVICE_AUTH",
+  "RENDER_TIMEOUT",
+]);
+
+/** `renderer_unavailable:<reason>` for the codes above; undefined for every other failure. */
+export function rendererUnavailableReason(code: RenderErrorCode | undefined): string | undefined {
+  if (!code || !RENDERER_UNAVAILABLE_CODES.has(code)) return undefined;
+  return `renderer_unavailable:${code.toLowerCase()}`;
 }

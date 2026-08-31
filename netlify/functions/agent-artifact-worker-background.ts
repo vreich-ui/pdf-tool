@@ -4,9 +4,10 @@ import { sha256Hex } from "../lib/artifact-core/index.js";
 import { saveArtifactBytes } from "../lib/artifact-layout.js";
 import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
 import { executePdfEditJob, writePdfRenderData, type PdfEditOutput } from "../lib/agent-pdf-editing.js";
-import { resolveOperationRoute } from "../lib/agent-artifact-operations.js";
+import { rendererForExecutor, resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfArtifact, type RenderPdfArtifactOutput } from "../lib/pdf-render/render.js";
-import { structuredError } from "../lib/pdf-render/errors.js";
+import { RenderError, rendererUnavailableReason, structuredError } from "../lib/pdf-render/errors.js";
+import { isKnownRendererId } from "../lib/pdf-render/types.js";
 import { assertWorkerBudget, startWorkerDeadline, withWorkerDeadlineTimeout, type WorkerDeadline } from "../lib/worker-budget.js";
 
 export const config = { name: "agent-artifact-worker-background" };
@@ -83,11 +84,15 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     const route = await resolveOperationRoute(runningJob);
     // Persist route fields immediately so the stored record reflects the actual execution path.
     // selectedModel is cleared for non-model routes (was set at job creation from project defaults).
+    // `renderer` is written BEFORE rendering starts so a job that fails inside the engine
+    // (or is killed) still names the engine it was routed to; undefined for non-renderer
+    // routes (image jobs, byte-level PDF edits) — never a stale caller-supplied expectation.
     runningJob = await updateArtifactJob(runningJob, {
       executor: route.executor,
       requiresAI: route.requiresAI,
       requiresModel: route.requiresModel,
       selectedModel: route.requiresModel ? runningJob.selectedModel : undefined,
+      renderer: rendererForExecutor(route.executor),
     });
     // The OpenAI key is pdf-tool's own provider credential (service env), not client
     // storage — undefined is harmless for non-OpenAI routes (fal keys resolve provider-side).
@@ -108,6 +113,18 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
       : undefined;
+    // PDF hardening: whatever the engine returned, the stored artifact is application/pdf
+    // bytes that start with the PDF magic — anything else is a renderer bug, not an artifact.
+    if (runningJob.artifactKind === "pdf") {
+      if (generated.contentType !== "application/pdf") {
+        throw new RenderError("PDF_INVALID_BYTES", `PDF job produced contentType "${String(generated.contentType)}" instead of application/pdf`, { contentType: generated.contentType, renderer: runningJob.renderer });
+      }
+      if (generated.bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+        throw new RenderError("PDF_INVALID_BYTES", "PDF job produced bytes that are not a PDF", { renderer: runningJob.renderer });
+      }
+    }
+    // sha256 is computed here over the FINAL bytes (post-render, post-optimization) and
+    // handed to saveArtifactBytes, which re-verifies it against the bytes it actually stores.
     const sha256 = sha256Hex(generated.bytes);
     // F4: media policy is warn, not block — a generated image that is still over maxBytes
     // after best-effort optimization was materialized (not discarded); fold that into the
@@ -161,11 +178,21 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     // -2/-3/... suffix to the normalized name actually stored; reflect that back onto the job
     // record so job-status polling and by-filename lookups agree on the real name.
     const filenameAfterCollisionHandling = artifact.filename && artifact.filename !== runningJob.filename ? artifact.filename : undefined;
-    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, ...(filenameAfterCollisionHandling ? { filename: filenameAfterCollisionHandling } : {}), ...(warnings ? { warnings } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
-    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, artifactReference: complete.artifactReference, ...(complete.warnings ? { warnings: complete.warnings } : {}) });
+    // The renderer the engine REPORTS having used is authoritative over the routed one
+    // (they agree by construction — render.ts dispatches on the same stored renderer).
+    const rendererUsed = ("template" in generated && isKnownRendererId(generated.template.renderer) ? generated.template.renderer : undefined) ?? runningJob.renderer;
+    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, renderer: rendererUsed, ...(filenameAfterCollisionHandling ? { filename: filenameAfterCollisionHandling } : {}), ...(warnings ? { warnings } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
+    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, ...(complete.renderer ? { renderer: complete.renderer } : {}), artifactReference: complete.artifactReference, ...(complete.warnings ? { warnings: complete.warnings } : {}) });
   } catch (error) {
     const { code, detail } = structuredError(error);
-    const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error), errorCode: code, errorDetail: detail });
-    return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error, ...(failed.errorCode ? { errorCode: failed.errorCode, errorDetail: failed.errorDetail } : {}) });
+    // A renderer that could not produce a PDF at all is reported as a structured
+    // `renderer_unavailable:<reason>` next to the renderer name — and the job FAILS; there
+    // is no fallback to another engine.
+    const unavailable = rendererUnavailableReason(code);
+    const errorDetail = code || runningJob.renderer
+      ? { ...(detail ?? {}), ...(runningJob.renderer ? { renderer: runningJob.renderer } : {}), ...(unavailable ? { reason: unavailable } : {}) }
+      : detail;
+    const failed = await updateArtifactJob(runningJob, { status: "failed", error: safeError(error), errorCode: code, errorDetail });
+    return jsonResponse(500, { jobId: failed.jobId, status: failed.status, error: failed.error, ...(failed.renderer ? { renderer: failed.renderer } : {}), ...(failed.errorCode ? { errorCode: failed.errorCode, errorDetail: failed.errorDetail } : {}) });
   }
 }
