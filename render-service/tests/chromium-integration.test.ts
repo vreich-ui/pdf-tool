@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { chromiumAvailable, closeChromiumForTests } from "../src/engines/chromium.js";
@@ -26,6 +29,59 @@ before(async () => {
 after(async () => {
   await closeChromiumForTests();
 });
+
+/** Walks up from this file's directory to find the repo-root `templates/` fixture (D2) —
+ * robust to running via `tsx --test` directly from render-service/tests. */
+function findRepoFile(relativePath: string): string {
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 8; i++) {
+    const candidate = path.join(dir, relativePath);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(`could not locate "${relativePath}" by walking up from ${import.meta.url}`);
+}
+
+/** A 1x1 PNG — just enough bytes for the route handler to fulfil a virtual-asset request. */
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+interface ServiceAsset {
+  name: string;
+  contentType?: string;
+  bytesBase64: string;
+}
+
+/** REVIEW: the fixture's OWN `sampleAssets` become the service assets, rather than a stand-in
+ * PNG — this is the exact set the publish-time thumbnail worker resolves and sends in
+ * production, so rendering it here proves the shipped bytes really decode and paint. The
+ * mapping mirrors job-assets.ts: `assetId` becomes the virtual-host path segment (`name`),
+ * and the data URI splits into contentType + base64 payload. */
+function fixtureAssets(sampleAssets: { images?: Array<{ assetId: string; dataUri: string }> }): ServiceAsset[] {
+  return (sampleAssets.images ?? []).map((image) => {
+    const comma = image.dataUri.indexOf(",");
+    assert.ok(comma > 0, `sampleAssets entry "${image.assetId}" is not a data URI`);
+    return {
+      name: image.assetId,
+      contentType: image.dataUri.slice(image.dataUri.indexOf(":") + 1, image.dataUri.indexOf(";")),
+      bytesBase64: image.dataUri.slice(comma + 1),
+    };
+  });
+}
+
+function loadArticleBrochureFixture(): { html: string; css: string; partials: Record<string, string>; data: unknown; assets: ServiceAsset[] } {
+  const filePath = findRepoFile("templates/article_brochure_v1.json");
+  const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+  return {
+    html: parsed.templateJson.html,
+    css: parsed.templateJson.css,
+    partials: parsed.templateJson.assets.partials,
+    data: parsed.sampleData,
+    assets: fixtureAssets(parsed.sampleAssets ?? {}),
+  };
+}
 
 async function withServer<T>(fn: (server: FastifyInstance) => Promise<T>): Promise<T> {
   process.env.RENDER_SERVICE_SECRET = SECRET;
@@ -115,6 +171,38 @@ test('<img src="https://example.com/x.png"> is blocked and surfaced as an engine
     assert.ok(
       body.diagnostics.engineWarnings.some((w: string) => w === "blocked network request: https://example.com/x.png"),
       `expected a blocked-network warning, got: ${JSON.stringify(body.diagnostics.engineWarnings)}`
+    );
+  });
+});
+
+test("an <img> pointing at an asset the job never supplied is surfaced as an engineWarning", async (t) => {
+  if (!CHROMIUM_AVAILABLE) {
+    t.skip("chromium binary not available");
+    return;
+  }
+  await withServer(async (server) => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/render/chromium",
+      headers: { "x-render-secret": SECRET },
+      payload: {
+        // "supplied" resolves; "typo-id" does not. Without a warning the second one is a
+        // broken image inside a 200 render that says nothing is wrong.
+        template: { html: '<img src="https://render.assets.invalid/supplied"><img src="https://render.assets.invalid/typo-id">' },
+        assets: [{ name: "supplied", contentType: "image/png", bytesBase64: TINY_PNG_BASE64 }],
+      },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json();
+    assert.equal(body.ok, true);
+    const warnings: string[] = body.diagnostics.engineWarnings ?? [];
+    assert.ok(
+      warnings.some((w) => w.includes("unresolved job asset") && w.includes("typo-id")),
+      `expected an unresolved-asset warning naming typo-id, got: ${JSON.stringify(warnings)}`
+    );
+    assert.ok(
+      !warnings.some((w) => w.includes("unresolved job asset") && w.includes("/supplied")),
+      `the supplied asset must not be reported as unresolved: ${JSON.stringify(warnings)}`
     );
   });
 });
@@ -222,5 +310,112 @@ test("validation mode overflow diagnostics: overflows[] non-empty OR the documen
       const entry = overflows.find((o: { selector: string }) => o.selector.includes("overflow-box"));
       assert.ok(entry, `expected an overflow entry for #overflow-box, got ${JSON.stringify(overflows)}`);
     }
+  });
+});
+
+// D2: templates/article_brochure_v1.json (the generic chromium article template) rendered
+// with its own sampleData — the fixture must actually produce a multi-page PDF end to end,
+// entirely offline (fonts bundled, images passed as local `assets`, no network calls at all).
+for (const format of ["A4", "Letter"] as const) {
+  test(`article_brochure_v1 + sampleData renders on ${format}: >=2 pages, no network calls, images decode`, async (t) => {
+    if (!CHROMIUM_AVAILABLE) {
+      t.skip("chromium binary not available (set CHROMIUM_EXECUTABLE_PATH or PLAYWRIGHT_BROWSERS_PATH)");
+      return;
+    }
+    const fixture = loadArticleBrochureFixture();
+    await withServer(async (server) => {
+      const response = await server.inject({
+        method: "POST",
+        url: "/render/chromium",
+        headers: { "x-render-secret": SECRET },
+        payload: {
+          template: { html: fixture.html, css: fixture.css, assets: { partials: fixture.partials } },
+          data: fixture.data,
+          requirements: { format },
+          // Every image the sampleData references (brand.logo, coverImage, the one section
+          // figure) resolves ONLY from this local asset map via the virtual
+          // https://render.assets.invalid/<name> origin — the same mechanism job-assets.ts
+          // uses in production. No bytes ever leave the process and no real network host is
+          // ever contacted.
+          assets: fixture.assets,
+        },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      const body = response.json();
+      assert.equal(body.ok, true, JSON.stringify(body));
+
+      const pdfBytes = Buffer.from(body.pdfBase64, "base64");
+      assert.equal(pdfBytes.subarray(0, 5).toString("latin1"), "%PDF-");
+
+      // The cover section forces `page-break-after: always`, so the template guarantees >=2
+      // physical pages regardless of how much sample content follows it or which page format
+      // is requested.
+      assert.ok(body.diagnostics.pageCount >= 2, `expected >=2 pages, got ${body.diagnostics.pageCount}`);
+      const inspection = await inspectPdf(pdfBytes);
+      assert.ok(inspection.pages.length >= 2);
+
+      const warnings: string[] = body.diagnostics.engineWarnings ?? [];
+      const blocked = warnings.filter((w) => w.startsWith("blocked network request:"));
+      assert.deepEqual(blocked, [], `expected zero blocked-network warnings (fonts/assets must resolve locally), got: ${JSON.stringify(warnings)}`);
+      const undecoded = warnings.filter((w) => w.includes("did not finish decoding"));
+      assert.deepEqual(undecoded, [], `expected every image (logo, cover photo, section figure) to decode, got: ${JSON.stringify(warnings)}`);
+      assert.ok(fixture.assets.length >= 3, "the fixture must ship the assets its own sample content references");
+    });
+  });
+}
+
+/**
+ * REVIEW — the mode this fixture is actually rendered in when it ships.
+ *
+ * mode "validation" is not just a label: it turns on Liquid's `strictVariables`, so ANY
+ * binding the template reads and the data does not supply is a DATA_BINDING_ERROR. Both
+ * production paths that render sampleData use it — `validate_pdf_template` (whose PASSED
+ * report the chromium hard publish gate requires) and D3's publish-time thumbnail worker
+ * (which uses validation mode to target an exact version). The tests above render in the
+ * default "final" mode, where a missing binding is silently empty, so nothing caught that
+ * the shipped sampleData left `section.figure` undefined on two of its three sections and
+ * `source.url` / `source.note` undefined on two of its three sources: the template guards
+ * each of those with `{% if %}`, which is itself an undefined-variable read under strict
+ * mode. article_brochure_v1 therefore could not pass its own publish gate, and its thumbnail
+ * could never render.
+ *
+ * sampleData must be COMPLETE — every optional binding present — which is exactly what
+ * validate_pdf_template's own input description demands ("worst-case sample data ... must be
+ * complete"). This test is what enforces it.
+ */
+test("article_brochure_v1 + sampleData renders in VALIDATION mode (the publish gate + thumbnail path)", async (t) => {
+  if (!CHROMIUM_AVAILABLE) {
+    t.skip("chromium binary not available (set CHROMIUM_EXECUTABLE_PATH or PLAYWRIGHT_BROWSERS_PATH)");
+    return;
+  }
+  const fixture = loadArticleBrochureFixture();
+  await withServer(async (server) => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/render/chromium",
+      headers: { "x-render-secret": SECRET },
+      payload: {
+        template: { html: fixture.html, css: fixture.css, assets: { partials: fixture.partials } },
+        data: fixture.data,
+        requirements: { format: "A4" },
+        assets: fixture.assets,
+        // Both production callers of sampleData render this way, and the thumbnail worker
+        // also asks for the PNG.
+        options: { mode: "validation", wantThumbnail: true },
+      },
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json();
+    assert.equal(body.ok, true, JSON.stringify(body).slice(0, 400));
+    assert.equal(Buffer.from(body.pdfBase64, "base64").subarray(0, 5).toString("latin1"), "%PDF-");
+    // The thumbnail the publish stores really comes back for this fixture.
+    assert.ok(typeof body.thumbnailPngBase64 === "string" && body.thumbnailPngBase64.length > 0, "expected a first-page thumbnail");
+
+    const warnings: string[] = body.diagnostics.engineWarnings ?? [];
+    assert.deepEqual(
+      warnings.filter((w) => w.startsWith("unresolved job asset:")),
+      [],
+      `every assetId the sample content references must be supplied by sampleAssets, got: ${JSON.stringify(warnings)}`
+    );
   });
 });

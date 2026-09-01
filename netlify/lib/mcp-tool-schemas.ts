@@ -70,7 +70,12 @@ export const MCP_TOOL_SCHEMAS = {
     templateJson: z.unknown().describe("Renderer-specific template document. pdfme: must contain basePdf and schemas array. react-pdf: a docTree document ({docTreeVersion: 1, document: {...}}) — see docs/REACT_PDF_DOCTREE.md"),
     renderer: z.enum(REGISTERED_RENDERERS as [string, ...string[]]).optional().describe("Target renderer. DEFAULT when omitted: chromium (HTML/CSS + Liquid templates; configurable server-side via PDF_DEFAULT_RENDERER) — EXCEPT a templateJson in pdfme's fixed-layout shape (basePdf + schemas), which stays on pdfme, and a new version of an existing templateId, which inherits that template's pinned renderer. Name pdfme/typst/react-pdf explicitly to select them. The response's rendererSource says whether the renderer was explicit, template-pinned, template-shape, or default."),
     label: z.string().optional(),
-    tags: z.array(z.string()).optional()
+    tags: z.array(z.string()).optional(),
+    renderDataSchema: z.unknown().optional().describe("JSON Schema (draft-07-compatible, via ajv) describing the shape of `data` this template version's render expects. When both renderDataSchema and sampleData are supplied, sampleData is validated against it at create AND again at publish_pdf_template — invalid ⇒ 400 with errorCode SAMPLE_DATA_SCHEMA_MISMATCH (or RENDER_DATA_SCHEMA_INVALID if renderDataSchema itself is not a compilable schema)."),
+    sampleData: z.unknown().optional().describe("Example render data for this template version (e.g. for previews). Validated against renderDataSchema (ajv) when both are present; not validated when renderDataSchema is omitted."),
+    kind: z.string().optional().describe("Free-form template category, e.g. \"article\", \"guide\", \"checklist\" — used to select a project's default template per kind. Not renderer/schema-validated here."),
+    sampleAssets: z.object({ images: z.array(z.unknown()).optional() }).optional()
+      .describe("The image assets `sampleData` REFERENCES, in exactly the shape a render job's `assets` takes: { images: [{assetId, dataUri} | {assetId, blobKey}] }. Supply this whenever sampleData names image assetIds (a chromium template binds them as https://render.assets.invalid/<assetId>) — publish_pdf_template's background thumbnail render resolves sampleData's images from here, so without it the stored preview shows broken images. Resolved by the same typed resolver job assets use (ASSET_SOURCE_MISSING / ASSET_NOT_FOUND / IMAGE_DECODE_ERROR), and never returned by list_pdf_templates (it carries bytes).")
   }).strict(),
 
   get_pdf_template: z.object({

@@ -40,7 +40,10 @@ export interface RenderServiceRequest {
   };
   assets?: RenderServiceAsset[];
   fonts?: RenderServiceFont[];
-  options?: { mode?: "final" | "validation"; timeoutMs?: number };
+  /** D3: `wantThumbnail` asks the chromium engine for a first-page PNG alongside the PDF.
+   * The typst engine accepts and ignores it (see the service contract) — no non-chromium
+   * renderer produces a thumbnail. */
+  options?: { mode?: "final" | "validation"; timeoutMs?: number; wantThumbnail?: boolean };
   maxOutputBytes?: number;
 }
 
@@ -56,6 +59,9 @@ export interface RenderServiceDiagnostics {
 export interface RenderServiceSuccess {
   ok: true;
   pdfBase64: string;
+  /** D3: base64 PNG of page 1. Present only when the request asked for it and the capture
+   * succeeded; a failed capture surfaces in diagnostics.engineWarnings instead. */
+  thumbnailPngBase64?: string;
   diagnostics?: RenderServiceDiagnostics;
 }
 

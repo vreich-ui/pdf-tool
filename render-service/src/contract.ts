@@ -72,6 +72,12 @@ export interface FontInput {
 export interface RenderOptionsInput {
   mode?: RenderMode;
   timeoutMs?: number;
+  /** D3: chromium only — also return a PNG screenshot of the FIRST page alongside the PDF.
+   * Ignored by the typst engine (and by every non-chromium renderer upstream): there is no
+   * rasterizer on this side for a PDF that was produced outside a browser, and poppler
+   * rasterization is explicitly out of scope. Absent/false ⇒ byte-identical behaviour to
+   * before this flag existed. */
+  wantThumbnail?: boolean;
 }
 
 export interface TypstTemplateInput {
@@ -134,6 +140,10 @@ export interface NormalizedChromiumRenderRequest extends NormalizedRenderRequest
   templateHtml: string;
   templateCss: string;
   partials: Record<string, string>;
+  /** D3: when true the engine additionally captures a first-page PNG (see renderChromium).
+   * Deliberately absent from NormalizedTypstRenderRequest — the typst engine has no page to
+   * screenshot, so `options.wantThumbnail` is accepted-and-ignored on /render/typst. */
+  wantThumbnail: boolean;
 }
 
 export type NormalizedRenderRequest = NormalizedTypstRenderRequest | NormalizedChromiumRenderRequest;
@@ -289,10 +299,14 @@ function validateFonts(value: unknown): { ok: true; fonts: NormalizedFont[] } | 
   return { ok: true, fonts };
 }
 
-function validateOptions(value: unknown, defaultTimeoutMs: number): { ok: true; mode: RenderMode; timeoutMs: number } | { ok: false; message: string } {
+function validateOptions(
+  value: unknown,
+  defaultTimeoutMs: number
+): { ok: true; mode: RenderMode; timeoutMs: number; wantThumbnail: boolean } | { ok: false; message: string } {
   let mode: RenderMode = "final";
   let timeoutMs = defaultTimeoutMs;
-  if (value === undefined) return { ok: true, mode, timeoutMs };
+  let wantThumbnail = false;
+  if (value === undefined) return { ok: true, mode, timeoutMs, wantThumbnail };
   if (!isPlainObject(value)) return { ok: false, message: "options must be an object" };
   if (value.mode !== undefined) {
     if (value.mode !== "final" && value.mode !== "validation") {
@@ -306,7 +320,13 @@ function validateOptions(value: unknown, defaultTimeoutMs: number): { ok: true; 
     }
     timeoutMs = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, value.timeoutMs));
   }
-  return { ok: true, mode, timeoutMs };
+  if (value.wantThumbnail !== undefined) {
+    if (typeof value.wantThumbnail !== "boolean") {
+      return { ok: false, message: "options.wantThumbnail must be a boolean" };
+    }
+    wantThumbnail = value.wantThumbnail;
+  }
+  return { ok: true, mode, timeoutMs, wantThumbnail };
 }
 
 function validateMaxOutputBytes(value: unknown): { ok: true; maxOutputBytes: number } | { ok: false; message: string } {
@@ -451,6 +471,7 @@ export function validateRenderRequest(body: unknown, engine: RenderEngine): Vali
       templateHtml,
       templateCss,
       partials,
+      wantThumbnail: optionsResult.wantThumbnail,
       data: body.data,
       requirements: requirementsResult.requirements,
       assets: assetsResult.assets,

@@ -86,9 +86,13 @@ async function readAllowlistedBlob(projectId: string, storeName: string | undefi
   return null;
 }
 
-/** Resolves assets.images entries to inline service assets. Entries without a usable
- * payload (no dataUri and no blobKey) are skipped — the service render will fail with a
- * clear message only if the template actually references the missing name. */
+/** Resolves assets.images entries to inline service assets. An entry with no `assetId` (nor
+ * `name`/`id` fallback) is skipped — there is no name to bind it under, so nothing a
+ * template could reference. An entry that DOES name an id but has neither a dataUri nor a
+ * blobKey is a typed ASSET_SOURCE_MISSING rejection (D4/BRIEF 3.10) rather than a silent
+ * skip — as is one whose `dataUri` is not a data URI at all — see the docstring at the top
+ * of this file for the blobKey resolution path
+ * (blobKey → base64 → bound at `https://render.assets.invalid/<assetId>` for chromium). */
 export async function resolveJobAssetsForService(projectId: string, assets: { images?: unknown[] } | undefined): Promise<RenderServiceAsset[]> {
   const entries: JobImageAssetEntry[] = Array.isArray(assets?.images) ? (assets.images as JobImageAssetEntry[]) : [];
   const resolved: RenderServiceAsset[] = [];
@@ -105,12 +109,28 @@ export async function resolveJobAssetsForService(projectId: string, assets: { im
     if (typeof entry.dataUri === "string") {
       assertNotRemoteUrl(id, entry.dataUri);
       const comma = entry.dataUri.indexOf(",");
-      if (comma < 0) continue;
+      // REVIEW: a dataUri with no comma is not a data URI at all. Skipping it silently (as
+      // this did) put the entry back in exactly the position ASSET_SOURCE_MISSING exists to
+      // rule out: a NAMED asset that resolves to nothing, surfacing later as a broken image
+      // inside an otherwise-successful render instead of a typed error naming the asset.
+      if (comma < 0) {
+        throw new RenderError(
+          "ASSET_SOURCE_MISSING",
+          `Job asset "${id}" has a dataUri that is not a data URI (no "," separating the header from the payload)`,
+          { assetId: id }
+        );
+      }
       contentType = contentType ?? entry.dataUri.slice(entry.dataUri.indexOf(":") + 1, entry.dataUri.indexOf(";"));
       bytes = Buffer.from(entry.dataUri.slice(comma + 1), "base64");
     } else {
       const blobKey = entry.blobKey ?? entry.artifactReference?.blobKey;
-      if (!blobKey) continue;
+      // D4/BRIEF 3.10: an entry that names an assetId but has neither a dataUri nor a
+      // blobKey to resolve it from is a typed rejection, not a silent skip — silently
+      // dropping it would surface later, confusingly, as a broken/missing image inside the
+      // render rather than a clear error naming the asset.
+      if (!blobKey) {
+        throw new RenderError("ASSET_SOURCE_MISSING", `Job asset "${id}" has neither a dataUri nor a blobKey to resolve it from`, { assetId: id });
+      }
       const storeName = entry.storeName ?? entry.artifactReference?.storeName;
       const read = await readAllowlistedBlob(projectId, storeName, blobKey);
       if (!read) {

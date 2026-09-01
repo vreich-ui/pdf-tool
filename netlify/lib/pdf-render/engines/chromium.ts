@@ -20,6 +20,11 @@ const MAX_CSS_BYTES = 1_000_000;
 const MAX_PARTIALS = 32;
 const MAX_PARTIAL_BYTES = 256_000;
 const PARTIAL_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+function isPng(bytes: Buffer): boolean {
+  return bytes.byteLength > PNG_MAGIC.byteLength && bytes.subarray(0, PNG_MAGIC.byteLength).equals(PNG_MAGIC);
+}
 
 interface ChromiumTemplate {
   html: string;
@@ -130,7 +135,7 @@ async function renderChromium(input: RenderInput): Promise<RenderOutput> {
         }
       : undefined,
     assets: await resolveJobAssetsForService(input.projectId, input.assets),
-    options: { mode: input.mode },
+    options: { mode: input.mode, ...(input.wantThumbnail ? { wantThumbnail: true } : {}) },
     ...(input.requirements?.maxBytes ? { maxOutputBytes: input.requirements.maxBytes } : {}),
   });
 
@@ -140,8 +145,19 @@ async function renderChromium(input: RenderInput): Promise<RenderOutput> {
   }
 
   const diagnostics = response.diagnostics ?? {};
+  // D3: a thumbnail is strictly a bonus — bad/oversized bytes are dropped with a warning,
+  // never turned into a render failure.
+  const thumbnailWarnings: string[] = [];
+  let thumbnailPng: Buffer | undefined;
+  if (input.wantThumbnail && typeof response.thumbnailPngBase64 === "string") {
+    const candidate = Buffer.from(response.thumbnailPngBase64, "base64");
+    if (isPng(candidate)) thumbnailPng = candidate;
+    else thumbnailWarnings.push("render service returned thumbnail bytes that are not a PNG; thumbnail discarded");
+  }
+  const engineWarnings = [...(diagnostics.engineWarnings ?? []), ...thumbnailWarnings];
   return {
     bytes,
+    ...(thumbnailPng ? { thumbnailPng } : {}),
     diagnostics: {
       pageCount: typeof diagnostics.pageCount === "number" ? diagnostics.pageCount : 0,
       sizeBytes: bytes.byteLength,
@@ -149,7 +165,7 @@ async function renderChromium(input: RenderInput): Promise<RenderOutput> {
       ...(diagnostics.overflows ? { overflows: diagnostics.overflows } : {}),
       // page.pdf applies requested margins authoritatively.
       marginsApplied: input.requirements?.margins ? "engine" : "not-applicable",
-      ...(diagnostics.engineWarnings?.length ? { engineWarnings: diagnostics.engineWarnings } : {}),
+      ...(engineWarnings.length ? { engineWarnings } : {}),
       engine: { id: "chromium", executedIn: "render-service" },
     },
   };

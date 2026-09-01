@@ -111,7 +111,8 @@ Request body:
   "fonts": [                                           // optional; total decoded ≤ 10 MB
     { "family": "Custom Sans", "weight": "bold", "bytesBase64": "…" }
   ],
-  "options": { "mode": "final", "timeoutMs": 60000 },  // timeoutMs clamped [1000, 120000], default 60000
+  "options": { "mode": "final", "timeoutMs": 60000,    // timeoutMs clamped [1000, 120000], default 60000
+               "wantThumbnail": false },               // optional; also return a first-page PNG (below)
   "maxOutputBytes": 25000000
 }
 ```
@@ -129,6 +130,7 @@ Success (`200`):
 {
   "ok": true,
   "pdfBase64": "…",
+  "thumbnailPngBase64": "…",
   "diagnostics": {
     "pageCount": 1,
     "sizeBytes": 23456,
@@ -139,6 +141,20 @@ Success (`200`):
   }
 }
 ```
+
+`thumbnailPngBase64` is present **only** when the request set `options.wantThumbnail: true`
+and the capture succeeded. The capture runs strictly after `page.pdf()` has produced the PDF
+bytes — it switches the page to `print` media, sizes the viewport to the paper
+(`format`/`orientation` at the 96dpi print reference: A4 portrait = 794x1123 px, Letter
+landscape = 1056x816 px) and screenshots exactly that rect, i.e. page one and nothing below
+it. It can therefore neither change nor delay the PDF: **without the flag the response is
+byte-identical to one from before the flag existed** (asserted in
+`tests/chromium-thumbnail.test.ts`). Any failure — capture error, or a PNG above the 5 MB
+cap — is an `engineWarnings` entry with no `thumbnailPngBase64`, never an error status.
+
+`/render/typst` accepts and ignores `options.wantThumbnail`: there is no browser page to
+screenshot, and rasterizing a finished PDF (poppler et al.) is out of scope. Downstream, that
+means only `chromium` PDF templates ever get a `thumbnailKey`.
 
 `overflows` is present only in `options.mode: "validation"`, and is best-effort: it comes
 from a `page.evaluate()` post-layout scan for elements whose `scrollWidth`/`scrollHeight`

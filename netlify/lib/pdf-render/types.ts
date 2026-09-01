@@ -42,10 +42,20 @@ export interface RenderInput {
   requirements?: NormalizedPdfRequirements;
   /** "validation" renders draft templates for pre-publish checks and must never persist artifacts. */
   mode: "final" | "validation";
+  /** D3: ask the engine for a first-page PNG alongside the PDF. ONLY the chromium engine
+   * honors this — it is the only renderer that owns a browser page to screenshot. Every
+   * other engine ignores it and returns no `thumbnailPng`, so `thumbnailKey` stays null for
+   * pdfme/typst/react-pdf templates (rasterizing their PDF output, e.g. with poppler, is
+   * explicitly out of scope). */
+  wantThumbnail?: boolean;
 }
 
 export interface RenderOutput {
   bytes: Buffer;
+  /** D3: first-page PNG, present only when `wantThumbnail` was requested, the engine
+   * supports it (chromium), and the capture succeeded. A failed capture is a warning in
+   * diagnostics.engineWarnings — never an error. */
+  thumbnailPng?: Buffer;
   diagnostics: RenderDiagnostics;
 }
 
