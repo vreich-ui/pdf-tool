@@ -712,7 +712,10 @@ test("MCP JSON-RPC tools/list includes all artifact tools", async () => {
   const names = JSON.parse(response.body).result.tools.map((tool: { name: string }) => tool.name).sort();
   // S4 adds set_storage_grant and health to the surface; T12.8 adds the capture pair and
   // T12.13 the capture snapshot read path.
-  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "delete_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "get_image_model_policy", "set_image_model_policy", "import_image_from_url", "import_images_from_url", "create_capture_job", "get_capture_job_status", "get_capture_snapshot", "set_storage_grant", "health"].sort());
+  // T1.5 adds derive_render_data_schema (dry contract derivation).
+  // T1.8 adds inspect_pdf_artifact (verify_agent_artifact-scoped PDF inspection) and
+  // preview_pdf_template (on-demand, first-page-only template preview).
+  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "inspect_pdf_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "delete_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "preview_pdf_template", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "get_image_model_policy", "set_image_model_policy", "import_image_from_url", "import_images_from_url", "create_capture_job", "get_capture_job_status", "get_capture_snapshot", "set_storage_grant", "health", "derive_render_data_schema"].sort());
 });
 
 

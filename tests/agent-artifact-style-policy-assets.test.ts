@@ -205,6 +205,28 @@ test("job-assets: a blobKey that does not resolve to a stored blob is a typed AS
   );
 });
 
+// W3/BRIEF §1: this error is copied verbatim onto the failed job record (`error` +
+// `errorDetail`) and echoed to agents by get_agent_artifact_job_status, so the blobKey must
+// not appear in either. The assetId — which the caller supplied — must, so the finding is
+// still actionable. Sanitizing this downstream (as T1.4/T1.7 each did in their own copy) is
+// defence in depth; the source must be clean.
+test("job-assets: ASSET_NOT_FOUND names the assetId and never the blobKey (message or detail)", async () => {
+  await assert.rejects(
+    () => resolveJobAssetsForService("dr-lurie", { images: [{ assetId: "missing-asset", blobKey: "pdf/req_secret_tenant_path/c90a53be.png" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof RenderError);
+      const error = err as RenderError;
+      assert.equal(error.code, "ASSET_NOT_FOUND");
+      assert.match(error.message, /missing-asset/);
+      assert.ok(!error.message.includes("req_secret_tenant_path"), `blobKey leaked into the message: ${error.message}`);
+      assert.ok(!error.message.includes("c90a53be"), `blobKey leaked into the message: ${error.message}`);
+      assert.equal((error.detail as Record<string, unknown> | undefined)?.blobKey, undefined, "blobKey leaked into errorDetail");
+      assert.equal(JSON.stringify(error.detail ?? {}).includes("req_secret_tenant_path"), false, "blobKey leaked into errorDetail");
+      return true;
+    }
+  );
+});
+
 test("job-assets: an entry with neither dataUri nor blobKey is a typed ASSET_SOURCE_MISSING rejection, not a silent skip", async () => {
   await assert.rejects(
     () => resolveJobAssetsForService("dr-lurie", { images: [{ assetId: "no-source" }] }),

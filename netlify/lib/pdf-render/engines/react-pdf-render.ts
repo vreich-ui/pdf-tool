@@ -232,6 +232,7 @@ async function renderReactPdf(input: RenderInput): Promise<RenderOutput> {
 
     const interpreted = interpretDocTree(templateJson, {
       mode: input.mode,
+      lenient: input.lenient,
       data: input.data,
       createElement,
       components: { Document, Page, View, Text, Image, Link },

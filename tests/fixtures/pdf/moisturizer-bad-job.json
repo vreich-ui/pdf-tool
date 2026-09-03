@@ -1,0 +1,63 @@
+{
+  "_fixtureNote": "The 2026-09-03 drlurie job that produced pdf/req_plugin_moisturizer_functions_20260903_01/c90a53be0852336d1675cb19eabc829251b6fe2de2bcdbc3dec93e30cc0245d9.pdf (5pp, A4, chromium, 28934 bytes). Job metadata is verbatim from the stored artifact record (list_artifacts_by_request via the platform bridge, 2026-09-03). The `data` object is RECONSTRUCTED from the rendered PDF's observed defects and from the bridge's brand-injection code path (pdf-render-brand.ts / mcp-tool-handlers.ts) — the live payload lives in the pdf-render-data store under renderDataRef and is not readable over MCP. It reproduces all three defect classes exactly: (1) `brand` arrives as an object where the template slots it as a string -> `[object Object]` twice, (2) p2Body..p5Body absent -> four blank content pages under non-strict Liquid, (3) image slots hold site-relative /img/ paths that render-service cannot resolve -> aborted requests and broken-image boxes.",
+  "expectedDefects": {
+    "objectObjectTokens": 2,
+    "blankContentPages": [2, 3, 4],
+    "_blankContentPagesNote": "Page 5 is NOT caught by a text-length rule: it renders 56 characters, all of them the [object Object] token plus the boilerplate disclaimer. It is caught by the UNRENDERED_TOKEN rule instead. This is exactly why the quality gate needs both rules and why a page-count/bytes check (inspect.ts today) sees nothing wrong.",
+    "unresolvedImages": ["coverImage", "morningImage", "eveningImage"]
+  },
+  "job": {
+    "projectId": "dr-lurie",
+    "requestId": "req_plugin_moisturizer_functions_20260903_01",
+    "artifactKind": "pdf",
+    "operation": "generate",
+    "filename": "what-moisturizers-actually-do.pdf",
+    "templateId": "674a43bd-40c0-40ed-847a-67a9e0b4ec2c",
+    "templateVersion": 1,
+    "renderer": "chromium",
+    "requirements": {
+      "pageCount": { "min": 3, "max": 8 },
+      "format": "A4",
+      "orientation": "portrait"
+    },
+    "data": {
+      "kicker": "Skin science",
+      "title": "What moisturizers actually do",
+      "deck": "Three jobs, one product: draw water in, soften the surface, slow what leaves.",
+      "brand": {
+        "colors": {
+          "primary": "#2e2a26",
+          "accent": "#c9a96a",
+          "surface": "#faf8f5"
+        },
+        "fonts": {
+          "heading": "'Inter Variable', system-ui, sans-serif",
+          "body": "'Inter Variable', system-ui, sans-serif"
+        }
+      },
+      "coverImage": "/img/req_plugin_moisturizer_functions_20260903_01/d913a7c895e13d5909afe43dbfdfaddbffd62b19b783a61202102f241685cd5a.webp",
+      "morningImage": "/img/req_plugin_moisturizer_functions_20260903_01/58fb1e362f55bada0a1141473213a4d69ac83464e32effcee70f09403239b0ff.webp",
+      "eveningImage": "/img/req_plugin_moisturizer_functions_20260903_01/cb70ed019e5322f433771a53805ade12f67053c623b9307a42cf22d3832d8922.webp",
+      "disclaimer": "Educational content. Not medical advice."
+    },
+    "assets": {}
+  },
+  "storedArtifact": {
+    "blobKey": "pdf/req_plugin_moisturizer_functions_20260903_01/c90a53be0852336d1675cb19eabc829251b6fe2de2bcdbc3dec93e30cc0245d9.pdf",
+    "sha256": "c90a53be0852336d1675cb19eabc829251b6fe2de2bcdbc3dec93e30cc0245d9",
+    "sizeBytes": 28934,
+    "contentType": "application/pdf",
+    "createdAtISO": "2026-09-03T13:46:07.395Z",
+    "metadata": {
+      "templateId": "674a43bd-40c0-40ed-847a-67a9e0b4ec2c",
+      "templateVersion": 1,
+      "renderer": "chromium",
+      "pageCount": 5,
+      "renderDataRef": {
+        "storeName": "pdf-render-data",
+        "blobKey": "render-data/fc3eb041-972b-49f7-9f09-58ab1a522ae3.json",
+        "version": 1
+      }
+    }
+  }
+}

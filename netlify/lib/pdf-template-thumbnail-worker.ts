@@ -12,16 +12,22 @@
  * The render uses mode "validation" — not because this is a validation run, but because that
  * is the mode that targets an EXACT version (mode "final" always resolves the latest active
  * version, which is not necessarily the one just published) and never persists an artifact.
- * It passes `engineMode: "final"` alongside it so the ENGINE still renders the way a real job
- * does: validation mode also turns on Liquid's strictVariables, which is about checking a
- * template, not about previewing one.
+ * It passes `engineMode: "final"` alongside it so mode-dependent engine behavior that ISN'T
+ * about version targeting (e.g. chromium's validation-only layout-overflow diagnostics) runs
+ * the way a real job does, not the way a template check does.
+ * T1.2: binding strictness no longer follows `mode`/`engineMode` at all — it is strict in
+ * every mode by default. This render additionally passes `lenient: true`, because a preview
+ * is best-effort by design: `sampleData` is not required to exercise every optional binding
+ * (an `{% if optional %}` block, say), and a template whose sample happens to skip one should
+ * still get a preview image — checking that sampleData is COMPLETE is what `validate_pdf_template`
+ * (real validation mode, no `lenient`) is for.
  * Requirement failures are collected rather than thrown for the same reason: a template that
  * misses a page-count requirement should still get a preview image.
  */
 import { safeError } from "./agent-artifact-jobs.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { structuredError } from "./pdf-render/errors.js";
-import { getPdfTemplate, writePdfTemplateThumbnail } from "./pdf-template-store.js";
+import { getPdfTemplate, writePdfTemplateThumbnail, writePdfTemplateThumbnailFailure } from "./pdf-template-store.js";
 import { THUMBNAIL_RENDERER } from "./pdf-template-thumbnail.js";
 
 export type PdfTemplateThumbnailStatus = "generated" | "skipped" | "failed";
@@ -79,24 +85,43 @@ export async function runPdfTemplateThumbnail(input: {
       ...(record.sampleAssets ? { assets: record.sampleAssets } : {}),
       mode: "validation",
       // REVIEW: validation mode is used HERE only because it is what targets an exact
-      // version; the engine must still render the way production does. Validation-mode
-      // Liquid is strict about undefined variables, so a template whose sampleData does not
-      // happen to exercise every `{% if optional %}` binding would fail its thumbnail while
-      // rendering perfectly for real jobs. A preview is best-effort by design — an empty
-      // optional block beats no preview at all.
+      // version; the engine must still render the way production does.
       engineMode: "final",
+      // T1.2: binding is strict by default in every mode now — without this, a template
+      // whose sampleData does not happen to exercise every `{% if optional %}` binding would
+      // fail its thumbnail while rendering perfectly for real jobs. A preview is best-effort
+      // by design — an empty optional block beats no preview at all.
+      lenient: true,
       onRequirementFailure: "collect",
       wantThumbnail: true,
     });
     const warnings = rendered.diagnostics?.engineWarnings ?? [];
     const withWarnings = warnings.length > 0 ? { warnings } : {};
     if (!rendered.thumbnailPng) {
+      // T1.7: no tenant data in this one — it names no asset, no path, nothing the engine
+      // returned, just the shape of the outcome.
+      await writePdfTemplateThumbnailFailure(
+        input.projectId,
+        input.templateId,
+        input.version,
+        "The render completed, but the render service returned no thumbnail image."
+      );
       return { ...base, status: "failed", thumbnailKey: null, reason: "no_thumbnail_returned", ...withWarnings };
     }
     const thumbnailKey = await writePdfTemplateThumbnail(input.projectId, input.templateId, input.version, rendered.thumbnailPng);
     return { ...base, status: "generated", thumbnailKey, ...withWarnings };
   } catch (error) {
     const { code } = structuredError(error);
+    // T1.7: deliberately NOT the raw safeError(error) text here — some RenderErrors from the
+    // render/asset-resolution path embed a blobKey in their message (see
+    // pdf-render/job-assets.ts's ASSET_NOT_FOUND), which BRIEF 1 forbids in anything an
+    // editor reads. thumbnailError stays to the typed code, which is always safe; the raw
+    // message is kept only in this function's own (non-persisted) return value below, same
+    // as it always was.
+    const persisted = code
+      ? `Thumbnail render failed (${code}). Check the template's data/assets for this version and try publishing again.`
+      : "Thumbnail render failed. Try publishing again.";
+    await writePdfTemplateThumbnailFailure(input.projectId, input.templateId, input.version, persisted);
     return { ...base, status: "failed", thumbnailKey: null, error: safeError(error), ...(code ? { errorCode: code } : {}) };
   }
 }

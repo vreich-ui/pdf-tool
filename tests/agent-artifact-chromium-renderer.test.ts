@@ -255,6 +255,7 @@ test("chromium ok:false passthrough: service DATA_BINDING_ERROR surfaces as the 
       artifactKind: "pdf",
       templateId: "chromium-binding",
       filename: "binding.pdf",
+      assets: { images: [{ assetId: "logo", dataUri: TINY_PNG_DATA_URI }] },
       tags: [],
       label: undefined,
     });
@@ -291,6 +292,7 @@ test("chromium without service env fails with RENDER_SERVICE_UNCONFIGURED", asyn
     artifactKind: "pdf",
     templateId: "chromium-unconf",
     filename: "unconf.pdf",
+    assets: { images: [{ assetId: "logo", dataUri: TINY_PNG_DATA_URI }] },
     tags: [],
     label: undefined,
   });

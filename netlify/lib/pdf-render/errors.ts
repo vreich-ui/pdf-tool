@@ -51,11 +51,31 @@ export type RenderErrorCode =
   /** D1: sampleData was checked against renderDataSchema (ajv) and failed — raised at BOTH
    * create_pdf_template and publish_pdf_template. */
   | "SAMPLE_DATA_SCHEMA_MISMATCH"
+  /** T1.1: a job's `data` was checked against its template's renderDataSchema (ajv) and
+   * failed — raised at BOTH create_agent_artifact_job (validateArtifactJobRequest) and the
+   * render path (renderPdfArtifact, mode "final"), so a job created before its template
+   * gained a schema still cannot render past it. No-op for templates without a
+   * renderDataSchema. */
+  | "RENDER_DATA_INVALID"
   /** D4/BRIEF 3.10: an assets.images[] entry named an assetId but supplied neither a
    * dataUri nor a blobKey to resolve it from — a typed rejection instead of the entry being
    * silently skipped (which would surface later, confusingly, as a broken image reference
    * inside the render). */
-  | "ASSET_SOURCE_MISSING";
+  | "ASSET_SOURCE_MISSING"
+  /** T1.3/BRIEF defect class 3: a chromium template's html/css references an image the job
+   * never supplied — either a `https://render.assets.invalid/<assetId>` binding whose id is
+   * not in `assets.images[]`, or a bare Liquid slot used as the entire value of an
+   * `src="..."`/CSS `url(...)` reference whose resolved value is not a fetchable
+   * render.assets.invalid/ URL or data URI. Raised by the referenced-asset precheck BEFORE
+   * the render is dispatched, so a broken-image render never gets to `status: "complete"` —
+   * see asset-precheck.ts. */
+  | "ASSET_MISSING"
+  /** T1.4/BRIEF ruling D-A: the rendered PDF's CONTENT failed the quality gate (blank pages,
+   * unresolved images, unrendered tokens — see pdf-render/quality-gate.ts). This code is
+   * raised ONLY for a job created with `failOnQualityGate: true`. The gate is warn-only by
+   * default: a failing report normally rides along on a `complete` job as `qualityGate` plus
+   * `warnings[]`, for an agent or an editor to act on. */
+  | "PDF_QUALITY_GATE";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

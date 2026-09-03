@@ -10,6 +10,8 @@ import { RenderError, structuredError } from "./pdf-render/errors.js";
 import {
   readPdfTemplateValidation,
   writePdfTemplateValidation,
+  writePdfTemplateValidationSummary,
+  validationFailureCodes,
   type PdfTemplateValidationReport,
 } from "./pdf-template-store.js";
 import { stripReport } from "./pdf-template-validation.js";
@@ -59,5 +61,18 @@ export async function runPdfTemplateValidation(input: { projectId: string; templ
   }
 
   await writePdfTemplateValidation(input.projectId, completed);
+  // T1.5: mirror the OUTCOME onto the template record. publish_pdf_template starts a
+  // validation and returns before it finishes (BRIEF D-A: warn, never block), so this write
+  // is what makes the result visible on get_pdf_template afterwards. Codes only, never the
+  // report's free-text error (see PdfTemplateValidationSummary). Best-effort by contract —
+  // writePdfTemplateValidationSummary swallows its own storage errors.
+  await writePdfTemplateValidationSummary(input.projectId, input.templateId, input.version, {
+    validationId: completed.validationId,
+    status: completed.status,
+    source: "manual",
+    startedAt: completed.createdAt,
+    ...(completed.completedAt ? { completedAt: completed.completedAt } : {}),
+    ...(completed.status === "failed" ? { failureCodes: validationFailureCodes(completed.errorCode, completed.requirementFailures) } : {}),
+  });
   return { ok: true as const, statusCode: 200, ...stripReport(completed) };
 }

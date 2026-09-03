@@ -135,7 +135,7 @@ async function renderChromium(input: RenderInput): Promise<RenderOutput> {
         }
       : undefined,
     assets: await resolveJobAssetsForService(input.projectId, input.assets),
-    options: { mode: input.mode, ...(input.wantThumbnail ? { wantThumbnail: true } : {}) },
+    options: { mode: input.mode, ...(input.wantThumbnail ? { wantThumbnail: true } : {}), ...(input.lenient ? { lenient: true } : {}) },
     ...(input.requirements?.maxBytes ? { maxOutputBytes: input.requirements.maxBytes } : {}),
   });
 

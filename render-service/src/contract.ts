@@ -78,6 +78,14 @@ export interface RenderOptionsInput {
    * rasterization is explicitly out of scope. Absent/false ⇒ byte-identical behaviour to
    * before this flag existed. */
   wantThumbnail?: boolean;
+  /** T1.2: per-job opt-out of strict Liquid variable binding on the chromium engine. Binding
+   * is strict by default (both `mode:"final"` and `mode:"validation"`) — a template that
+   * reads a variable the job's `data` omits fails the render with `DATA_BINDING_ERROR`
+   * instead of silently emitting empty output. `lenient: true` restores that permissive,
+   * pre-T1.2 behaviour for callers that genuinely want partial data to render blank (e.g. a
+   * best-effort preview). Ignored by the typst engine — typst's own dictionary-access
+   * semantics are strict at the language level regardless of this flag. */
+  lenient?: boolean;
 }
 
 export interface TypstTemplateInput {
@@ -128,6 +136,9 @@ interface NormalizedRenderRequestBase {
   mode: RenderMode;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** See RenderOptionsInput.lenient. Normalized (defaults to false = strict) so engines never
+   * have to treat `undefined` as a third state. */
+  lenient: boolean;
 }
 
 export interface NormalizedTypstRenderRequest extends NormalizedRenderRequestBase {
@@ -302,11 +313,12 @@ function validateFonts(value: unknown): { ok: true; fonts: NormalizedFont[] } | 
 function validateOptions(
   value: unknown,
   defaultTimeoutMs: number
-): { ok: true; mode: RenderMode; timeoutMs: number; wantThumbnail: boolean } | { ok: false; message: string } {
+): { ok: true; mode: RenderMode; timeoutMs: number; wantThumbnail: boolean; lenient: boolean } | { ok: false; message: string } {
   let mode: RenderMode = "final";
   let timeoutMs = defaultTimeoutMs;
   let wantThumbnail = false;
-  if (value === undefined) return { ok: true, mode, timeoutMs, wantThumbnail };
+  let lenient = false;
+  if (value === undefined) return { ok: true, mode, timeoutMs, wantThumbnail, lenient };
   if (!isPlainObject(value)) return { ok: false, message: "options must be an object" };
   if (value.mode !== undefined) {
     if (value.mode !== "final" && value.mode !== "validation") {
@@ -326,7 +338,13 @@ function validateOptions(
     }
     wantThumbnail = value.wantThumbnail;
   }
-  return { ok: true, mode, timeoutMs, wantThumbnail };
+  if (value.lenient !== undefined) {
+    if (typeof value.lenient !== "boolean") {
+      return { ok: false, message: "options.lenient must be a boolean" };
+    }
+    lenient = value.lenient;
+  }
+  return { ok: true, mode, timeoutMs, wantThumbnail, lenient };
 }
 
 function validateMaxOutputBytes(value: unknown): { ok: true; maxOutputBytes: number } | { ok: false; message: string } {
@@ -413,6 +431,7 @@ export function validateRenderRequest(body: unknown, engine: RenderEngine): Vali
         mode: optionsResult.mode,
         timeoutMs: optionsResult.timeoutMs,
         maxOutputBytes: maxOutputBytesResult.maxOutputBytes,
+        lenient: optionsResult.lenient,
       },
     };
   }
@@ -479,6 +498,7 @@ export function validateRenderRequest(body: unknown, engine: RenderEngine): Vali
       mode: optionsResult.mode,
       timeoutMs: optionsResult.timeoutMs,
       maxOutputBytes: maxOutputBytesResult.maxOutputBytes,
+      lenient: optionsResult.lenient,
     },
   };
 }

@@ -7,6 +7,7 @@ import { executePdfEditJob, writePdfRenderData, type PdfEditOutput } from "../li
 import { rendererForExecutor, resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfArtifact, type RenderPdfArtifactOutput } from "../lib/pdf-render/render.js";
 import { RenderError, rendererUnavailableReason, structuredError } from "../lib/pdf-render/errors.js";
+import { sanitizeDiagnosticText, summarizeQualityGate, type QualityGateReport } from "../lib/pdf-render/quality-gate.js";
 import { isKnownRendererId } from "../lib/pdf-render/types.js";
 import { assertWorkerBudget, startWorkerDeadline, withWorkerDeadlineTimeout, type WorkerDeadline } from "../lib/worker-budget.js";
 
@@ -107,7 +108,7 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
         ? executePdfEditJob(runningJob)
         // Route resolution already threw for templateRef-only / missing-template jobs, so
         // templateId is guaranteed here; the orchestrator dispatches on the stored renderer.
-        : renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, assets: runningJob.assets, requirements: runningJob.requirements, mode: "final" }))
+        : renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, assets: runningJob.assets, requirements: runningJob.requirements, mode: "final", lenient: runningJob.lenient, failOnQualityGate: runningJob.failOnQualityGate }))
       : executeAgentArtifactWorkflow(runningJob, { apiKey, deadline });
     const generated = await withWorkerDeadlineTimeout(workUnit, deadline, "artifact render/generation");
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
@@ -131,9 +132,21 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     // stored metadata and the job record instead of silently dropping the information now
     // that generation actually succeeded.
     const sizeWarning = "sizeWarning" in generated ? generated.sizeWarning : undefined;
-    const warnings = sizeWarning
-      ? [`Generated artifact exceeds requested maxBytes of ${sizeWarning.maxBytes} (actual ${sizeWarning.actualBytes}); stored anyway per the warn-only over-budget policy`]
-      : undefined;
+    // T1.4: the render engine's own diagnostics used to die here — only renderMetadata and
+    // validationResults were persisted, so every aborted asset fetch and every overflow
+    // finding the chromium engine had already computed was dropped on the floor (BRIEF root
+    // cause #3). They are appended to the SAME `warnings` array the size warning uses, after
+    // it, and redacted first: engine warnings quote URLs, and a job's own data can put a
+    // `/img/<requestId>/<sha>` path into one — `warnings` is echoed to agents on
+    // get_agent_artifact_job_status, so BRIEF §1 applies to it as much as to an error string.
+    const engineWarnings = "diagnostics" in generated ? generated.diagnostics?.engineWarnings ?? [] : [];
+    const qualityGate: QualityGateReport | undefined = "qualityGate" in generated ? generated.qualityGate : undefined;
+    const qualityGateSummary = qualityGate ? summarizeQualityGate(qualityGate) : undefined;
+    const warnings = [
+      ...(sizeWarning ? [`Generated artifact exceeds requested maxBytes of ${sizeWarning.maxBytes} (actual ${sizeWarning.actualBytes}); stored anyway per the warn-only over-budget policy`] : []),
+      ...engineWarnings.map((warning) => sanitizeDiagnosticText(warning)).filter((warning) => warning.length > 0),
+      ...(qualityGateSummary ? [qualityGateSummary] : []),
+    ];
     const artifact = await saveArtifactBytes({
       projectId: runningJob.projectId,
       requestId: runningJob.requestId,
@@ -181,8 +194,8 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     // The renderer the engine REPORTS having used is authoritative over the routed one
     // (they agree by construction — render.ts dispatches on the same stored renderer).
     const rendererUsed = ("template" in generated && isKnownRendererId(generated.template.renderer) ? generated.template.renderer : undefined) ?? runningJob.renderer;
-    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, renderer: rendererUsed, ...(filenameAfterCollisionHandling ? { filename: filenameAfterCollisionHandling } : {}), ...(warnings ? { warnings } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
-    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, ...(complete.renderer ? { renderer: complete.renderer } : {}), artifactReference: complete.artifactReference, ...(complete.warnings ? { warnings: complete.warnings } : {}) });
+    const complete = await updateArtifactJob(runningJob, { status: "complete", artifactReference: artifact, artifact, error: undefined, renderer: rendererUsed, ...(filenameAfterCollisionHandling ? { filename: filenameAfterCollisionHandling } : {}), ...(warnings.length ? { warnings } : {}), ...(qualityGate ? { qualityGate } : {}), ...("template" in generated ? { renderMetadata: generated.template, validationResults: generated.validation } : {}) });
+    return jsonResponse(200, { projectId: complete.projectId, requestId: complete.requestId, jobId: complete.jobId, artifactKind: complete.artifactKind, status: complete.status, slot: complete.slot, filename: complete.filename, selectedModel: route.requiresModel ? complete.selectedModel : undefined, requirements: complete.requirements, workflowPatchStatus, executor: route.executor, requiresAI: route.requiresAI, requiresModel: route.requiresModel, ...(complete.renderer ? { renderer: complete.renderer } : {}), artifactReference: complete.artifactReference, ...(complete.warnings ? { warnings: complete.warnings } : {}), ...(complete.qualityGate ? { qualityGate: complete.qualityGate } : {}) });
   } catch (error) {
     const { code, detail } = structuredError(error);
     // A renderer that could not produce a PDF at all is reported as a structured

@@ -6,9 +6,17 @@
  * user code ever executes. Images arrive PRE-FETCHED (the engine resolves artifact /
  * jobAsset / dataUri refs server-side); the interpreter is pure and performs no I/O.
  *
- * Binding strictness by mode: "final" — missing {{path}} → empty string + diagnostic
- * warning; "validation" — missing path → DATA_BINDING_ERROR (worst-case sample data must
- * be complete).
+ * T1.2: data binding ({{path}} interpolation, $if conditions, $for items) is strict by
+ * default in EVERY mode — a missing path throws DATA_BINDING_ERROR rather than silently
+ * rendering empty (this used to be gated on `mode === "validation"` only, so a `final`
+ * render with incomplete data produced a "successful" PDF with blank content — the same
+ * defect class the chromium engine's `strictVariables` had). `options.lenient: true` is the
+ * per-job opt-out that restores that old behaviour: missing path → empty string / no items
+ * + a diagnostic warning, in either mode.
+ *
+ * The link-href-must-be-https fallback is a distinct, non-binding safety check and stays
+ * gated on `mode === "validation"` (unaffected by `lenient`) — a `final` render with a
+ * non-https href still falls back to plain text with a warning rather than failing.
  */
 import { RenderError } from "../errors.js";
 import { DOC_TREE_LIMITS } from "./schema.js";
@@ -32,6 +40,9 @@ type CreateElement = (type: unknown, props: Record<string, unknown> | null, ...c
 
 export interface InterpretDocTreeOptions {
   mode: "final" | "validation";
+  /** T1.2: per-job opt-out of strict data binding — see the file-level doc comment above.
+   * Defaults to false (strict) when omitted. */
+  lenient?: boolean;
   data: unknown;
   createElement: CreateElement;
   components: DocTreeComponents;
@@ -102,8 +113,8 @@ function interpolate(value: string, ctx: BindingContext, state: InterpreterState
   const result = value.replace(INTERPOLATION_TOKEN, (_match, token: string) => {
     const bound = resolvePath(token, ctx);
     if (bound === MISSING) {
-      if (state.options.mode === "validation") {
-        throw new RenderError("DATA_BINDING_ERROR", `Missing data for {{${token}}} at ${where}; validation renders require complete worst-case data`, { path: token, where });
+      if (!state.options.lenient) {
+        throw new RenderError("DATA_BINDING_ERROR", `Missing data for {{${token}}} at ${where}`, { path: token, where });
       }
       state.warnings.push(`Missing data for {{${token}}} at ${where}; rendered as empty string`);
       return "";
@@ -148,7 +159,7 @@ function evaluateCondition(when: Record<string, unknown>, ctx: BindingContext, s
   const path = when.path as string;
   const op = (when.op as string | undefined) ?? "truthy";
   const bound = resolvePath(path, ctx);
-  if (bound === MISSING && state.options.mode === "validation" && op !== "exists") {
+  if (bound === MISSING && !state.options.lenient && op !== "exists") {
     throw new RenderError("DATA_BINDING_ERROR", `Missing data for $if path "${path}" at ${where}`, { path, where });
   }
   const value = bound === MISSING ? undefined : bound;
@@ -192,7 +203,7 @@ function renderNode(node: Record<string, unknown>, ctx: BindingContext, state: I
     const itemsPath = node.items as string;
     const bound = resolvePath(itemsPath, ctx);
     if (bound === MISSING || !Array.isArray(bound)) {
-      if (state.options.mode === "validation") {
+      if (!state.options.lenient) {
         throw new RenderError("DATA_BINDING_ERROR", `$for items path "${itemsPath}" at ${where} did not resolve to an array`, { path: itemsPath, where });
       }
       state.warnings.push(`$for items path "${itemsPath}" at ${where} did not resolve to an array; rendered nothing`);

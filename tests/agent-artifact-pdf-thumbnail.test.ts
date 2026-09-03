@@ -27,7 +27,7 @@ import { handler as publishHandler } from "../netlify/functions/publish-pdf-temp
 import { handler as getHandler } from "../netlify/functions/get-pdf-template.js";
 import { handler as listHandler } from "../netlify/functions/list-pdf-templates.js";
 import { handler as thumbnailWorkerHandler } from "../netlify/functions/pdf-template-thumbnail-worker-background.js";
-import { writePdfTemplateValidation, readPdfTemplateThumbnail } from "../netlify/lib/pdf-template-store.js";
+import { writePdfTemplateValidation, readPdfTemplateThumbnail, savePdfTemplate } from "../netlify/lib/pdf-template-store.js";
 
 function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
@@ -225,6 +225,19 @@ async function createTemplate(templateId: string, body: Record<string, unknown>)
   return JSON.parse(res.body) as { version: number; thumbnailKey: string | null };
 }
 
+/**
+ * T1.5: create_pdf_template now DERIVES a renderDataSchema/sampleData whenever the caller
+ * omits them, so "a chromium template with no sampleData" is no longer reachable THROUGH the
+ * tool. The state still exists in the wild — every template stored before T1.5, including the
+ * eight live drlurie ones — so the two tests that cover it seed such a record straight
+ * through the store instead of through create_pdf_template.
+ */
+async function seedLegacyTemplateWithoutSample(templateId: string, templateJson: unknown) {
+  const record = await savePdfTemplate({ projectId: PROJECT, templateId, templateJson, renderer: "chromium" });
+  assert.equal(record.sampleData, undefined);
+  return record;
+}
+
 /** chromium has a HARD publish gate; this suite tests thumbnails, not gating, so seed a
  * synthetic passed report (same shortcut as agent-artifact-chromium-renderer.test.ts). */
 async function seedPassedValidation(templateId: string, version = 1) {
@@ -388,7 +401,7 @@ test("thumbnail dispatch failure: publish still succeeds, with a warning and thu
 
 test("chromium template without sampleData: publish succeeds, warns, and queues nothing", async () => {
   const fixture = articleBrochure();
-  await createTemplate("thumb-nosample", { templateJson: fixture.templateJson, renderer: "chromium" });
+  await seedLegacyTemplateWithoutSample("thumb-nosample", fixture.templateJson);
   await seedPassedValidation("thumb-nosample");
 
   const { result: published, trigger } = await withStubbedTrigger(() => publish("thumb-nosample"));
@@ -698,7 +711,10 @@ test("creating a new draft version does not blank the listing's thumbnail/schema
       body: JSON.stringify({ storage: STORAGE, projectId: PROJECT, templateId: "thumb-draft2", version: 2 }),
     });
     const draft = JSON.parse(draftRecord.body) as Record<string, unknown>;
-    assert.equal(draft.renderDataSchema, undefined);
+    // T1.5: v2 carries its OWN derived schema, never v1's author-written one — which is
+    // still the point being made here (per-version fields do not inherit).
+    assert.notDeepEqual(draft.renderDataSchema, fixture.renderDataSchema);
+    assert.equal(draft.renderDataSchemaSource, "derived");
     assert.equal(draft.thumbnailKey, null);
   } finally {
     await service.close();
@@ -733,8 +749,10 @@ test("publishing a newer version refreshes the listing's mirrored schema/kind fr
     const entry = await listEntry("thumb-refresh");
     assert.equal(entry.latestActiveVersion, 2);
     assert.equal(entry.kind, "guide");
-    // v2 declares no schema of its own, so the listing no longer claims one.
-    assert.equal(entry.renderDataSchema, undefined);
+    // v2 declares no schema of its own, so the listing no longer claims v1's — it now shows
+    // the one T1.5 derived for v2 instead, flagged as derived.
+    assert.notDeepEqual(entry.renderDataSchema, fixture.renderDataSchema);
+    assert.equal(entry.renderDataSchemaSource, "derived");
   } finally {
     await service.close();
   }
@@ -784,6 +802,152 @@ test("thumbnail worker forwards the engine's warnings and still stores the previ
     assert.deepEqual(worker.body.warnings, [
       'unresolved job asset: no asset named "cover-photo" was supplied for https://render.assets.invalid/cover-photo',
     ]);
+  } finally {
+    await service.close();
+  }
+});
+
+// --- 9. T1.7: a missing thumbnail must say why (thumbnailError) --------------
+
+/**
+ * T1.7: `thumbnailKey: null` used to be the ENTIRE story — the reason a thumbnail render
+ * was skipped or failed was computed (as a `warning`/`reason`/`errorCode` on the enqueue
+ * response or the worker's own HTTP response) and then discarded: the enqueue warning rides
+ * only the one publish response, and the worker's response is never read by anything in
+ * production (it answers a background-function dispatch nobody consumes). Neither
+ * get_pdf_template nor list_pdf_templates could ever tell an editor why a specific
+ * template's preview was blank. `thumbnailError` persists that explanation onto the record
+ * itself so it survives past the one response that first reported it.
+ */
+test("chromium template without sampleData: thumbnailError is recorded on the record and the listing", async () => {
+  const fixture = articleBrochure();
+  await seedLegacyTemplateWithoutSample("thumb-nosample-err", fixture.templateJson);
+  await seedPassedValidation("thumb-nosample-err");
+
+  const { result: published, trigger } = await withStubbedTrigger(() => publish("thumb-nosample-err"));
+  assert.equal(published.statusCode, 200, JSON.stringify(published.body));
+  assert.equal(trigger, undefined, "nothing to render means nothing to dispatch");
+
+  // The record — read on ITS OWN, well after the publish response that first mentioned
+  // this — still says why there is no preview.
+  const record = await getTemplate("thumb-nosample-err");
+  assert.equal(record.thumbnailKey, null);
+  assert.match(String(record.thumbnailError), /sampleData/i);
+
+  const entry = await listEntry("thumb-nosample-err");
+  assert.equal(entry.thumbnailKey, null);
+  assert.match(String(entry.thumbnailError), /sampleData/i);
+});
+
+test("thumbnail render failure: thumbnailError is recorded on the record and listing, thumbnailKey stays null, template stays published", async () => {
+  const fixture = articleBrochure();
+  const service = await startMockRenderService(() => ({
+    status: 500,
+    body: { ok: false, code: "RENDER_ENGINE_ERROR", message: "browser exploded" },
+  }));
+  try {
+    await createTemplate("thumb-renderfail-err", {
+      templateJson: fixture.templateJson,
+      renderer: "chromium",
+      sampleData: fixture.sampleData,
+    });
+    await seedPassedValidation("thumb-renderfail-err");
+
+    const { result: published, trigger } = await withStubbedTrigger(() => publish("thumb-renderfail-err"));
+    assert.equal(published.statusCode, 200);
+    assert.equal(published.body.thumbnailQueued, true);
+
+    const worker = await runThumbnailWorker(trigger!.body);
+    assert.equal(worker.body.status, "failed");
+    assert.equal(worker.body.errorCode, "RENDER_ENGINE_ERROR");
+
+    // Template creation and publish both succeeded despite the thumbnail failure — a
+    // thumbnail is never allowed to block or undo either.
+    const record = await getTemplate("thumb-renderfail-err");
+    assert.equal(record.status, "active");
+    assert.equal(record.thumbnailKey, null);
+    assert.equal(typeof record.thumbnailError, "string");
+    assert.match(String(record.thumbnailError), /RENDER_ENGINE_ERROR/);
+    // BRIEF 1: no tenant paths or blob keys in anything an editor reads.
+    assert.doesNotMatch(String(record.thumbnailError), /blobKey|dr-site|dr-token|pdf-tool-site/i);
+
+    const entry = await listEntry("thumb-renderfail-err");
+    assert.equal(entry.thumbnailKey, null);
+    assert.equal(entry.thumbnailError, record.thumbnailError);
+  } finally {
+    await service.close();
+  }
+});
+
+test("render service returns a PDF but no thumbnail: thumbnailError explains the null key", async () => {
+  const fixture = articleBrochure();
+  const pdfBase64 = await buildPdfBase64();
+  const service = await startMockRenderService(() => ({ status: 200, body: { ok: true, pdfBase64, diagnostics: { pageCount: 1 } } }));
+  try {
+    await createTemplate("thumb-nopng-err", {
+      templateJson: fixture.templateJson,
+      renderer: "chromium",
+      sampleData: fixture.sampleData,
+    });
+    await seedPassedValidation("thumb-nopng-err");
+
+    const { trigger } = await withStubbedTrigger(() => publish("thumb-nopng-err"));
+    const worker = await runThumbnailWorker(trigger!.body);
+    assert.equal(worker.body.status, "failed");
+    assert.equal(worker.body.reason, "no_thumbnail_returned");
+
+    const record = await getTemplate("thumb-nopng-err");
+    assert.equal(record.thumbnailKey, null);
+    assert.match(String(record.thumbnailError), /no thumbnail/i);
+  } finally {
+    await service.close();
+  }
+});
+
+test("a non-chromium renderer's permanent null thumbnailKey carries no thumbnailError — it is by design, not a fault", async () => {
+  await createTemplate("thumb-pdfme-err", { templateJson: PDFME_TEMPLATE, renderer: "pdfme", sampleData: { title: "Hello" } });
+  await withStubbedTrigger(() => publish("thumb-pdfme-err"));
+
+  const record = await getTemplate("thumb-pdfme-err");
+  assert.equal(record.thumbnailKey, null);
+  assert.equal("thumbnailError" in record, false);
+
+  const entry = await listEntry("thumb-pdfme-err");
+  assert.equal("thumbnailError" in entry, false);
+});
+
+test("a thumbnail that later succeeds clears any previously recorded thumbnailError", async () => {
+  const fixture = articleBrochure();
+  const pdfBase64 = await buildPdfBase64();
+  let shouldFail = true;
+  const service = await startMockRenderService(() =>
+    shouldFail
+      ? { status: 500, body: { ok: false, code: "RENDER_ENGINE_ERROR", message: "browser exploded" } }
+      : { status: 200, body: { ok: true, pdfBase64, thumbnailPngBase64: tinyPngBase64(), diagnostics: { pageCount: 1 } } }
+  );
+  try {
+    await createTemplate("thumb-recover", {
+      templateJson: fixture.templateJson,
+      renderer: "chromium",
+      sampleData: fixture.sampleData,
+    });
+    await seedPassedValidation("thumb-recover");
+    const { trigger } = await withStubbedTrigger(() => publish("thumb-recover"));
+
+    const failedRun = await runThumbnailWorker(trigger!.body);
+    assert.equal(failedRun.body.status, "failed");
+    assert.equal(typeof (await getTemplate("thumb-recover")).thumbnailError, "string");
+
+    shouldFail = false;
+    const okRun = await runThumbnailWorker(trigger!.body);
+    assert.equal(okRun.body.status, "generated");
+
+    const record = await getTemplate("thumb-recover");
+    assert.equal(record.thumbnailKey, "thumbnails/thumb-recover/v1.png");
+    assert.equal("thumbnailError" in record, false);
+
+    const entry = await listEntry("thumb-recover");
+    assert.equal("thumbnailError" in entry, false);
   } finally {
     await service.close();
   }

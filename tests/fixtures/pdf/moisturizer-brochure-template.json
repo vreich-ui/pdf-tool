@@ -1,0 +1,18 @@
+{
+  "_fixtureNote": "Verbatim copy of the drlurie template that produced the broken 2026-09-03 moisturizer PDF (site_drlurie, project dr-lurie, fetched via the platform bridge get_pdf_template). Kept as-is on purpose: it has NO renderDataSchema, NO sampleData, thumbnailKey null, {{brand}} used as a string slot, and raw <img src=\"{{x}}\"> bindings that never go through render.assets.invalid/. Do not 'fix' this fixture — the W1 gates are supposed to catch it.",
+  "templateId": "674a43bd-40c0-40ed-847a-67a9e0b4ec2c",
+  "projectId": "dr-lurie",
+  "version": 1,
+  "status": "active",
+  "renderer": "chromium",
+  "templateJson": {
+    "css": "@page{size:A4;margin:0} *{box-sizing:border-box;margin:0;padding:0} body{font-family:Georgia,'Times New Roman',serif;color:#2e2a26;-webkit-print-color-adjust:exact;print-color-adjust:exact} .page{position:relative;width:210mm;height:297mm;overflow:hidden;page-break-after:always;background:#faf8f5} .page:last-child{page-break-after:auto} .pad{padding:26mm 24mm} .kicker{font-family:'Helvetica Neue',Arial,sans-serif;letter-spacing:.28em;text-transform:uppercase;font-size:9pt;color:#a08d78} .brand{font-family:'Helvetica Neue',Arial,sans-serif;letter-spacing:.22em;text-transform:uppercase;font-size:9pt;color:#6f6357} h1{font-size:34pt;line-height:1.12;font-weight:400;color:#39332d;margin:14pt 0 10pt} h2{font-size:24pt;font-weight:400;color:#39332d;margin:0 0 12pt} .deck{font-size:13.5pt;line-height:1.5;color:#6f6357;font-style:italic;max-width:150mm} p{font-size:12pt;line-height:1.72;color:#413b34;margin:0 0 12pt;max-width:150mm} .cover-img{position:absolute;top:0;left:0;width:210mm;height:150mm;object-fit:cover} .cover-body{position:absolute;top:150mm;left:0;right:0;padding:20mm 24mm} .rule{width:44mm;height:2px;background:#c9a96a;margin:8pt 0 16pt} .fig{width:100%;height:92mm;object-fit:cover;border-radius:2mm;margin:6mm 0} .sub{font-family:'Helvetica Neue',Arial,sans-serif;font-size:11pt;letter-spacing:.06em;text-transform:uppercase;color:#a08d78;margin:16pt 0 8pt} .close{position:absolute;top:26mm;left:24mm;right:24mm} .disc{position:absolute;bottom:22mm;left:24mm;right:24mm;font-family:'Helvetica Neue',Arial,sans-serif;font-size:9pt;line-height:1.6;color:#8a7f72;border-top:1px solid #e0d8cd;padding-top:10pt}",
+    "html": "<div class=\"page\"><img class=\"cover-img\" src=\"{{coverImage}}\"/><div class=\"cover-body\"><div class=\"kicker\">{{kicker}}</div><h1>{{title}}</h1><div class=\"rule\"></div><div class=\"deck\">{{deck}}</div><div style=\"margin-top:16pt\" class=\"brand\">{{brand}}</div></div></div><div class=\"page\"><div class=\"pad\"><div class=\"kicker\">The philosophy</div><h2>{{p2Title}}</h2><div class=\"rule\"></div><p>{{p2Body}}</p></div></div><div class=\"page\"><div class=\"pad\"><div class=\"kicker\">Daytime</div><h2>{{p3Title}}</h2><div class=\"rule\"></div><p>{{p3Body}}</p><img class=\"fig\" src=\"{{morningImage}}\"/></div></div><div class=\"page\"><div class=\"pad\"><div class=\"kicker\">Nighttime</div><h2>{{p4Title}}</h2><div class=\"rule\"></div><p>{{p4Body}}</p><img class=\"fig\" src=\"{{eveningImage}}\"/><div class=\"sub\">{{p4SkipTitle}}</div><p>{{p4SkipBody}}</p></div></div><div class=\"page\"><div class=\"close\"><div class=\"kicker\">{{brand}}</div><h2>{{p5Title}}</h2><div class=\"rule\"></div><p>{{p5Body}}</p></div><div class=\"disc\">{{disclaimer}}</div></div>"
+  },
+  "label": "Dr. Lurie — Simple Routine Sales Brochure (5-page)",
+  "tags": ["drlurie", "brochure", "sales", "skincare"],
+  "createdAt": "2026-08-13T12:06:38.050Z",
+  "updatedAt": "2026-08-13T12:12:57.891Z",
+  "thumbnailKey": null,
+  "siteId": "site_drlurie"
+}

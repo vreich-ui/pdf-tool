@@ -117,3 +117,86 @@ export function assertSampleDataMatchesSchema(renderDataSchema: JSONSchema | und
     );
   }
 }
+
+/**
+ * T1.1: validates a JOB's render `data` against its template's renderDataSchema — the same
+ * ajv setup as assertSampleDataMatchesSchema above (getAjvFor/formatAjvErrors are shared, not
+ * forked), but a distinct assertion because the no-op condition differs: sampleData is
+ * optional companion metadata (either side missing ⇒ nothing to check), while a job's `data`
+ * is the thing actually being rendered — a template that DECLARES a renderDataSchema must
+ * reject an omitted or non-conforming `data`, not silently skip the check because `data` was
+ * left out. A template with no renderDataSchema at all still renders unchecked (BRIEF 1:
+ * backwards compatibility with the eight live drlurie templates that have none).
+ *
+ * Called at BOTH the job-creation choke point (validateArtifactJobRequest in
+ * agent-artifact-jobs.ts) and the render choke point (renderPdfArtifact, mode "final", in
+ * render.ts) — the former tells the calling agent immediately; the latter is the backstop
+ * for a job created before its template gained a schema, or any other path that reaches the
+ * renderer with unvalidated data.
+ */
+export function assertRenderDataMatchesSchema(renderDataSchema: JSONSchema | undefined, data: unknown): void {
+  const issues = checkRenderDataAgainstSchema(renderDataSchema, data);
+  if (issues.length === 0) return;
+  throw new RenderError(
+    "RENDER_DATA_INVALID",
+    `data does not satisfy the template's renderDataSchema: ${issues.join("; ")}`,
+    { issues }
+  );
+}
+
+/**
+ * T1.5: the same check as assertRenderDataMatchesSchema, reporting instead of throwing.
+ *
+ * Exists because a renderDataSchema that pdf-tool DERIVED from the template's placeholders
+ * (derive-render-data-schema.ts) is an inference, not a declaration — enforcing it as a hard
+ * 400 would promote a guess to a runtime failure, which is the "a schema that lies" hazard
+ * with teeth. So the render path warns on a derived schema and blocks on an author-written
+ * one (see renderPdfArtifact); both use this function, so the two paths can never disagree
+ * about what "does not satisfy" means.
+ *
+ * Returns [] when there is nothing to check (no schema) or when the data conforms. A schema
+ * that cannot be compiled or evaluated still THROWS a typed RenderError — that is a broken
+ * schema, not a data finding, and it is broken identically for both callers.
+ */
+export function checkRenderDataAgainstSchema(renderDataSchema: JSONSchema | undefined, data: unknown): string[] {
+  if (renderDataSchema === undefined) return [];
+
+  let validate: ValidateFunction;
+  try {
+    validate = getAjvFor(renderDataSchema as object).compile(renderDataSchema as object) as ValidateFunction;
+  } catch (error) {
+    // An unsupported declared draft is already a typed RenderError from getAjvFor — keep it
+    // rather than burying its message inside the generic one. (In practice a stored
+    // renderDataSchema was already proven compilable by assertSampleDataMatchesSchema at
+    // create/publish time WHEN sampleData was also supplied; a template saved with a schema
+    // and no sampleData skips that check, so this compile can still be the first one ever
+    // run against it — hence handling the failure here too, rather than assuming it can't
+    // happen.)
+    if (error instanceof RenderError) throw error;
+    throw new RenderError(
+      "RENDER_DATA_SCHEMA_INVALID",
+      `renderDataSchema is not a valid JSON Schema: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  // A job may omit `data` entirely (it is `z.unknown().optional()` at the zod layer — the
+  // shape is per-template, so zod cannot require it). Validating `{}` rather than `undefined`
+  // means a schema with required properties names every missing slot individually instead of
+  // collapsing into one generic "must be object" finding.
+  const candidate = data === undefined ? {} : data;
+
+  let ok: boolean | Promise<unknown>;
+  try {
+    ok = validate(candidate);
+  } catch (error) {
+    throw new RenderError(
+      "RENDER_DATA_SCHEMA_INVALID",
+      `renderDataSchema could not be evaluated against data: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  if (!ok) {
+    const issues = formatAjvErrors(validate.errors);
+    return issues.length > 0 ? issues : ["validation failed"];
+  }
+  return [];
+}

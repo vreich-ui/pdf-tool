@@ -234,7 +234,9 @@ test("FRONT DOOR: the MCP transport itself (initialize, tools/list) needs no gra
     // T12.13: so is the whole capture plane — it writes pdf-tool's OWN store (Wolf's
     // 2026-08-14 "option A, same-site writes"), so it has no use for a caller credential
     // and a new tenant needs no per-site Netlify PAT to capture.
-    const grantOptional = ["verify_agent_artifact", "health", "create_capture_job", "get_capture_job_status", "get_capture_snapshot"];
+    // T1.5: derive_render_data_schema is a pure function of its arguments — it reads no
+    // store, writes nothing, and names no project, so it takes no grant either.
+    const grantOptional = ["verify_agent_artifact", "health", "create_capture_job", "get_capture_job_status", "get_capture_snapshot", "derive_render_data_schema"];
     if (!grantOptional.includes(tool.name)) {
       assert.ok(tool.inputSchema.required?.includes("storage"), `${tool.name} must require the storage grant`);
     }

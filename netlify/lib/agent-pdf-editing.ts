@@ -3,6 +3,8 @@ import { projectStoreNames, validateProjectAccess } from "./project-descriptor.j
 import { sha256Hex, type ArtifactReference } from "./artifact-core/index.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { RenderError } from "./pdf-render/errors.js";
+import type { QualityGateReport } from "./pdf-render/quality-gate.js";
+import type { RenderDiagnostics } from "./pdf-render/types.js";
 import type { ArtifactJobRecord, NormalizedArtifactJobRequirements, PdfTemplateRef } from "./agent-artifact-jobs.js";
 
 export interface BlobJsonRef { storeName?: string; blobKey: string; version?: number }
@@ -15,6 +17,11 @@ export interface PdfEditOutput {
   requirements?: NormalizedArtifactJobRequirements;
   metadata: Record<string, unknown>;
   validation: { pageCount: number; sizeBytes: number };
+  /** T1.4: present for template_data_patch edits, which really do re-render — the worker
+   * persists engine diagnostics and the content-gate report for them exactly as it does for a
+   * first render. Byte-level edit modes never reach a renderer and carry neither. */
+  diagnostics?: RenderDiagnostics;
+  qualityGate?: QualityGateReport;
 }
 
 function assertProjectAccess(projectId: string): void {
@@ -97,12 +104,14 @@ export async function executePdfEditJob(job: ArtifactJobRecord): Promise<PdfEdit
     const baseRecord = job.baseDataRef ? await readJsonRef(job.projectId, job.baseDataRef) : job.currentData;
     const baseData = baseRecord && typeof baseRecord === "object" && "data" in (baseRecord as Record<string, unknown>) ? (baseRecord as Record<string, unknown>).data : baseRecord;
     const patchedData = applyPatch(baseData, job.dataPatch ?? []);
-    const rendered = await renderPdfArtifact({ projectId: job.projectId, templateId: job.templateId, data: patchedData, requirements: job.requirements, mode: "final" });
+    const rendered = await renderPdfArtifact({ projectId: job.projectId, templateId: job.templateId, data: patchedData, requirements: job.requirements, mode: "final", lenient: job.lenient, failOnQualityGate: job.failOnQualityGate });
     return {
       bytes: rendered.bytes,
       contentType: "application/pdf",
       requirements: job.requirements,
       validation: rendered.validation,
+      diagnostics: rendered.diagnostics,
+      ...(rendered.qualityGate ? { qualityGate: rendered.qualityGate } : {}),
       metadata: { operation: "edit", artifactKind: "pdf", derivedFrom, editMode: mode, editSummary: `Applied ${job.dataPatch?.length ?? 0} data patch${job.dataPatch?.length === 1 ? "" : "es"} and re-rendered template ${rendered.template.templateId}`, templateId: rendered.template.templateId, templateVersion: rendered.template.version, preservation: job.preservation ?? {}, renderer: rendered.template.renderer, pageCount: rendered.validation.pageCount }
     };
   }

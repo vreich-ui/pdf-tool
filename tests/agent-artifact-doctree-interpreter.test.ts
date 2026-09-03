@@ -120,14 +120,19 @@ test("interpretDocTree: $if evaluates eq/gt/nonEmpty/exists operators", () => {
   assert.equal(branchResult({ path: "maybe", op: "exists" }, {}), "no");
 });
 
-test("interpretDocTree: mode 'final' renders missing bindings as empty string plus a warning", () => {
-  const result = run(tree([page([{ type: "text", content: "Hi {{missing.path}}" }])]), {}, { mode: "final" });
-  const texts = findAll(result.element, "Text");
-  assert.equal(textOf(texts[0]), "Hi ");
-  assert.ok(result.warnings.some((w) => w.includes("{{missing.path}}")));
+test("interpretDocTree (T1.2): mode 'final' now throws DATA_BINDING_ERROR on missing bindings by default", () => {
+  const t = tree([page([{ type: "text", content: "Hi {{missing.path}}" }])]);
+  assert.throws(
+    () => run(t, {}, { mode: "final" }),
+    (err: unknown) => {
+      if (!(err instanceof RenderError)) return false;
+      assert.equal(err.code, "DATA_BINDING_ERROR");
+      return true;
+    }
+  );
 });
 
-test("interpretDocTree: mode 'validation' throws DATA_BINDING_ERROR on missing bindings", () => {
+test("interpretDocTree (T1.2): mode 'validation' also throws DATA_BINDING_ERROR on missing bindings", () => {
   const t = tree([page([{ type: "text", content: "Hi {{missing.path}}" }])]);
   assert.throws(
     () => run(t, {}, { mode: "validation" }),
@@ -139,23 +144,40 @@ test("interpretDocTree: mode 'validation' throws DATA_BINDING_ERROR on missing b
   );
 });
 
-test("interpretDocTree: $for over a non-array throws in validation mode, warns and renders nothing in final mode", () => {
+test("interpretDocTree (T1.2): lenient:true restores the old permissive behaviour in EITHER mode", () => {
+  const t = tree([page([{ type: "text", content: "Hi {{missing.path}}" }])]);
+
+  const finalResult = run(t, {}, { mode: "final", lenient: true });
+  const finalTexts = findAll(finalResult.element, "Text");
+  assert.equal(textOf(finalTexts[0]), "Hi ");
+  assert.ok(finalResult.warnings.some((w) => w.includes("{{missing.path}}")));
+
+  const validationResult = run(t, {}, { mode: "validation", lenient: true });
+  const validationTexts = findAll(validationResult.element, "Text");
+  assert.equal(textOf(validationTexts[0]), "Hi ");
+  assert.ok(validationResult.warnings.some((w) => w.includes("{{missing.path}}")));
+});
+
+test("interpretDocTree (T1.2): $for over a non-array throws DATA_BINDING_ERROR by default in either mode, lenient:true warns and renders nothing", () => {
   const t = tree([
     page([{ type: "$for", items: "notArray", children: [{ type: "text", content: "{{item}}" }] }]),
   ]);
 
-  assert.throws(
-    () => run(t, { notArray: "a string, not an array" }, { mode: "validation" }),
-    (err: unknown) => {
-      if (!(err instanceof RenderError)) return false;
-      assert.equal(err.code, "DATA_BINDING_ERROR");
-      return true;
-    }
-  );
+  for (const mode of ["validation", "final"] as const) {
+    assert.throws(
+      () => run(t, { notArray: "a string, not an array" }, { mode }),
+      (err: unknown) => {
+        if (!(err instanceof RenderError)) return false;
+        assert.equal(err.code, "DATA_BINDING_ERROR");
+        return true;
+      },
+      `mode ${mode} must throw by default`
+    );
+  }
 
-  const finalResult = run(t, { notArray: "a string, not an array" }, { mode: "final" });
-  assert.equal(findAll(finalResult.element, "Text").length, 0);
-  assert.ok(finalResult.warnings.some((w) => w.includes("did not resolve to an array")));
+  const lenientResult = run(t, { notArray: "a string, not an array" }, { mode: "final", lenient: true });
+  assert.equal(findAll(lenientResult.element, "Text").length, 0);
+  assert.ok(lenientResult.warnings.some((w) => w.includes("did not resolve to an array")));
 });
 
 test("interpretDocTree: pageNumber renders a Text element with a render() prop", () => {

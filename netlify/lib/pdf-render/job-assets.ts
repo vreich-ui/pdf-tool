@@ -86,6 +86,22 @@ async function readAllowlistedBlob(projectId: string, storeName: string | undefi
   return null;
 }
 
+/** All assetIds declared in `assets.images[]` (assetId, falling back to name/id — same
+ * `entryId` fallback resolveJobAssetsForService uses below). Exported for the T1.3
+ * referenced-asset precheck (asset-precheck.ts), which needs to check a chromium template's
+ * `https://render.assets.invalid/<assetId>` bindings against what the job actually declared
+ * BEFORE dispatch, without re-deriving the assetId/name/id fallback rule in a second place. */
+export function collectDeclaredAssetIds(assets: { images?: unknown[] } | undefined): Set<string> {
+  const entries: JobImageAssetEntry[] = Array.isArray(assets?.images) ? (assets.images as JobImageAssetEntry[]) : [];
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const id = entryId(entry);
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 /** Resolves assets.images entries to inline service assets. An entry with no `assetId` (nor
  * `name`/`id` fallback) is skipped — there is no name to bind it under, so nothing a
  * template could reference. An entry that DOES name an id but has neither a dataUri nor a
@@ -134,7 +150,19 @@ export async function resolveJobAssetsForService(projectId: string, assets: { im
       const storeName = entry.storeName ?? entry.artifactReference?.storeName;
       const read = await readAllowlistedBlob(projectId, storeName, blobKey);
       if (!read) {
-        throw new RenderError("ASSET_NOT_FOUND", `Job asset "${id}" blob not found: ${blobKey}`, { assetId: id, blobKey });
+        // W3/BRIEF §1: NEVER the blobKey. This message and this detail object are copied
+        // verbatim onto the failed job record (`error`, `errorDetail`) by the artifact
+        // worker and echoed to agents by get_agent_artifact_job_status, and into
+        // TEMPLATE_VALIDATION_FAILED's detail by publishPdfTemplate — all readable
+        // surfaces, none of which may carry a tenant blobKey. The assetId is the only
+        // identifier the caller needs (it is the id THEY supplied), and it is safe.
+        // Downstream sanitizing workarounds (pdf-template-thumbnail-worker.ts,
+        // pdf-template-preview-worker.ts) stay as defence in depth; this is the source.
+        throw new RenderError(
+          "ASSET_NOT_FOUND",
+          `Job asset "${id}" could not be read: its blobKey resolves to no stored blob in the allowlisted store for this project`,
+          { assetId: id }
+        );
       }
       bytes = read;
     }
