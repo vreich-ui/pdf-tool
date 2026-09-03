@@ -5,9 +5,15 @@ import { RenderError } from "./pdf-render/errors.js";
 import { getPdfRendererMetadata } from "./pdf-render/registry.js";
 import { resolvePdfRenderer } from "./pdf-render/default-renderer.js";
 import { isKnownRendererId, type PdfRendererId } from "./pdf-render/types.js";
+import { assertSampleDataMatchesSchema, type JSONSchema } from "./pdf-render/render-data-schema.js";
 
 export type PdfTemplateStatus = "draft" | "active" | "disabled";
 
+/** D1 (BRIEF 3.6): per-version fields (no cross-version inheritance — same convention as
+ * the pre-existing `label`/`tags`, which also reset to nothing unless the caller re-sends
+ * them on the next create_pdf_template call for this templateId). `thumbnailKey` is the one
+ * exception: it is NEVER settable through create/publish input here — it stays `null` until
+ * a future task (D3) generates a thumbnail and sets it; this task only adds the typed field. */
 export interface PdfTemplateRecord {
   templateId: string;
   projectId: string;
@@ -17,6 +23,29 @@ export interface PdfTemplateRecord {
   templateJson: unknown;
   label?: string;
   tags: string[];
+  /** JSON Schema describing the shape of `data` this template's render expects. */
+  renderDataSchema?: JSONSchema;
+  /** Example render data for this version; validated against renderDataSchema (ajv) at both
+   * create and publish when both are present — see render-data-schema.ts. */
+  sampleData?: unknown;
+  /** Free-form template category, e.g. "article" — used to pick a project's default
+   * template per kind (site.pdf.byKind, platform-side). */
+  kind?: string;
+  /** REVIEW/D3: the job assets `sampleData` REFERENCES, in the exact shape a render job's
+   * `assets` takes ({ images: [{ assetId, dataUri } | { assetId, blobKey }] }). Without this,
+   * a template whose sampleData names image assetIds (article_brochure_v1's `coverImage`,
+   * `brand.logo`, section `figure.assetId`) renders its publish-time thumbnail with every
+   * image broken — the thumbnail worker has a data object and nothing to resolve those ids
+   * against. Stored per-version alongside sampleData; deliberately NOT mirrored onto
+   * PdfTemplateMeta/the list index (it carries bytes, and list_pdf_templates must stay
+   * small). Opaque to pdf-tool here: it is handed to the normal job-asset resolver at render
+   * time, which is what types the failures (ASSET_SOURCE_MISSING / ASSET_NOT_FOUND / …). */
+  sampleAssets?: { images?: unknown[] };
+  /** D3: blob key of the first-page PNG preview in this same (templates) store, set by the
+   * publish-time thumbnail worker — see writePdfTemplateThumbnail. Null until that worker
+   * succeeds, and permanently null for non-chromium renderers (only the chromium engine can
+   * screenshot a page; rasterizing other engines' PDF output is out of scope). */
+  thumbnailKey: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -28,6 +57,13 @@ export interface PdfTemplateMeta {
   latestVersion: number;
   latestActiveVersion: number | null;
   status: PdfTemplateStatus;
+  /** Mirrors the latest saved version's declared schema/sample/kind, so listPdfTemplates
+   * (which reads only this meta/index, never a version record — the N+1 fix) can expose
+   * them without an extra read per template. */
+  renderDataSchema?: JSONSchema;
+  sampleData?: unknown;
+  kind?: string;
+  thumbnailKey: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -38,6 +74,10 @@ export interface PdfTemplateListEntry {
   latestActiveVersion: number | null;
   status: PdfTemplateStatus;
   renderer: PdfRendererId;
+  renderDataSchema?: JSONSchema;
+  sampleData?: unknown;
+  kind?: string;
+  thumbnailKey: string | null;
   createdAt: string;
 }
 
@@ -86,6 +126,10 @@ function listEntryFromMeta(meta: PdfTemplateMeta): PdfTemplateListEntry {
     latestActiveVersion: meta.latestActiveVersion ?? null,
     status: meta.status,
     renderer: meta.renderer,
+    ...(meta.renderDataSchema !== undefined ? { renderDataSchema: meta.renderDataSchema } : {}),
+    ...(meta.sampleData !== undefined ? { sampleData: meta.sampleData } : {}),
+    ...(meta.kind !== undefined ? { kind: meta.kind } : {}),
+    thumbnailKey: meta.thumbnailKey ?? null,
     createdAt: meta.createdAt
   };
 }
@@ -115,6 +159,31 @@ export interface SavePdfTemplateInput {
   renderer?: PdfRendererId;
   label?: string;
   tags?: string[];
+  /** D1 (BRIEF 3.6): validated against `sampleData` (ajv) when both are present — see
+   * render-data-schema.ts. Throws RenderError("SAMPLE_DATA_SCHEMA_MISMATCH" |
+   * "RENDER_DATA_SCHEMA_INVALID", …) rather than saving an inconsistent pair. */
+  renderDataSchema?: JSONSchema;
+  sampleData?: unknown;
+  kind?: string;
+  /** REVIEW/D3: assets `sampleData` references — see PdfTemplateRecord.sampleAssets. */
+  sampleAssets?: { images?: unknown[] };
+}
+
+/** The subset of a version's fields the meta/index mirrors for list_pdf_templates (BRIEF
+ * 3.6/3.7). Built explicitly rather than spread from the previous meta so that a source
+ * which does NOT declare one of them clears it instead of leaving a stale claim behind. */
+function templateSummaryMirror(source: {
+  renderDataSchema?: JSONSchema;
+  sampleData?: unknown;
+  kind?: string;
+  thumbnailKey?: string | null;
+}): Pick<PdfTemplateMeta, "renderDataSchema" | "sampleData" | "kind" | "thumbnailKey"> {
+  return {
+    ...(source.renderDataSchema !== undefined ? { renderDataSchema: source.renderDataSchema } : {}),
+    ...(source.sampleData !== undefined ? { sampleData: source.sampleData } : {}),
+    ...(source.kind !== undefined ? { kind: source.kind } : {}),
+    thumbnailKey: source.thumbnailKey ?? null
+  };
 }
 
 export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfTemplateRecord> {
@@ -122,6 +191,11 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
   const templateId = input.templateId ?? randomUUID();
   const store = await openTemplateStore(projectId);
   const now = new Date().toISOString();
+
+  // D1: fail before any write when sampleData does not satisfy renderDataSchema (or the
+  // schema itself is not compilable) — the caller gets a typed error, not a half-saved
+  // record.
+  assertSampleDataMatchesSchema(input.renderDataSchema, input.sampleData);
 
   const existingMeta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
   // Same policy as createPdfTemplate (pdf-render/default-renderer.ts): explicit > pinned >
@@ -143,10 +217,26 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
     templateJson,
     label,
     tags: tags ?? [],
+    ...(input.renderDataSchema !== undefined ? { renderDataSchema: input.renderDataSchema } : {}),
+    ...(input.sampleData !== undefined ? { sampleData: input.sampleData } : {}),
+    ...(input.kind !== undefined ? { kind: input.kind } : {}),
+    ...(input.sampleAssets !== undefined ? { sampleAssets: input.sampleAssets } : {}),
+    // Never client-settable here — see the field's own doc comment on PdfTemplateRecord.
+    thumbnailKey: null,
     createdAt: existingMeta?.createdAt ?? now,
     updatedAt: now
   };
 
+  // REVIEW: the meta/index is what list_pdf_templates serves, and a listing describes the
+  // version that RENDERS — the active one (getPdfTemplate with no version resolves
+  // latestActiveVersion). Rebuilding the mirror from this incoming DRAFT alone meant that
+  // merely saving a new version — the ordinary way to iterate on a template — blanked the
+  // still-active version's `thumbnailKey` (D3's whole visible output) and dropped any
+  // mirrored field the draft did not resend, including the `renderDataSchema` BRIEF 3.7
+  // feeds to cms-agent's ReducedContract. So: mirror this version only while nothing is
+  // published yet; once there IS an active version, the mirror belongs to it and is
+  // refreshed by publishPdfTemplate instead. (Version RECORDS still never inherit — the
+  // per-version convention that governs label/tags is untouched.)
   const meta: PdfTemplateMeta = {
     templateId,
     projectId,
@@ -154,6 +244,7 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
     latestVersion: version,
     latestActiveVersion: existingMeta?.latestActiveVersion ?? null,
     status: existingMeta?.status === "active" ? "active" : "draft",
+    ...templateSummaryMirror(existingMeta && existingMeta.latestActiveVersion !== null ? existingMeta : { ...input, thumbnailKey: null }),
     createdAt: existingMeta?.createdAt ?? now,
     updatedAt: now
   };
@@ -305,6 +396,71 @@ export interface PdfTemplateValidationReport {
   errorCode?: string;
 }
 
+// ---------------------------------------------------------------------------
+// D3: publish-time first-page thumbnail
+// ---------------------------------------------------------------------------
+
+/** `thumbnails/<templateId>/v<n>.png`, in the SAME templates store as the record it belongs
+ * to (a preview of a template is template data — it does not belong in the artifacts store,
+ * which is the client's published-output namespace). */
+export function pdfTemplateThumbnailKey(templateId: string, version: number): string {
+  return `thumbnails/${safeSegment(templateId)}/v${version}.png`;
+}
+
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Stores the PNG and points the version record at it. Meta/index (what list_pdf_templates
+ * serves) are refreshed only when this version is at least the currently-active one, so
+ * generating a thumbnail for an OLDER version that was published deliberately never
+ * clobbers the newer active version's thumbnail in the listing.
+ *
+ * Returns the stored key. Throws only on genuinely bad input or an unavailable store — the
+ * caller (the background thumbnail worker) treats every failure as "no thumbnail", never as
+ * a failed publish.
+ */
+export async function writePdfTemplateThumbnail(projectId: string, templateId: string, version: number, png: Buffer): Promise<string> {
+  if (!Buffer.isBuffer(png) || png.byteLength <= PNG_MAGIC.byteLength || !png.subarray(0, PNG_MAGIC.byteLength).equals(PNG_MAGIC)) {
+    throw new RenderError("TEMPLATE_INVALID", `Refusing to store a thumbnail for "${templateId}" v${version}: the bytes are not a PNG`);
+  }
+  const store = await openTemplateStore(projectId);
+
+  const record = await store.get(versionKey(templateId, version), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
+  if (!record || record.projectId !== projectId) {
+    throw new RenderError("TEMPLATE_NOT_FOUND", `PDF template version not found: "${templateId}" v${version}`);
+  }
+
+  const key = pdfTemplateThumbnailKey(templateId, version);
+  await store.set(key, png);
+
+  const now = new Date().toISOString();
+  await store.setJSON(versionKey(templateId, version), { ...record, thumbnailKey: key, updatedAt: now } satisfies PdfTemplateRecord);
+
+  const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+  // REVIEW: `latestActiveVersion === null` means nothing is published yet, so there is no
+  // active version this thumbnail could be the preview OF — previously `?? 0` let a
+  // directly-invoked worker put a DRAFT version's thumbnail into the listing.
+  if (meta && meta.projectId === projectId && meta.latestActiveVersion !== null && version >= meta.latestActiveVersion) {
+    const updatedMeta: PdfTemplateMeta = { ...meta, thumbnailKey: key, updatedAt: now };
+    await store.setJSON(metaKey(templateId), updatedMeta);
+    await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
+  }
+
+  return key;
+}
+
+/** Reads a stored thumbnail back as raw bytes (used by tests and by any future preview
+ * endpoint); null when the key holds nothing. */
+export async function readPdfTemplateThumbnail(projectId: string, thumbnailKey: string): Promise<Buffer | null> {
+  const store = await openTemplateStore(projectId);
+  const value = await store.get(thumbnailKey, { type: "arrayBuffer" }).catch(() => null);
+  if (!value) return null;
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (ArrayBuffer.isView(value)) return Buffer.from(new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength));
+  return null;
+}
+
 function validationKey(templateId: string, version: number): string {
   return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/validation/v${version}.json`;
 }
@@ -350,6 +506,11 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   const record = await store.get(versionKey(templateId, targetVersion), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
   if (!record || record.projectId !== projectId) return null;
 
+  // D1 (BRIEF 3.6): re-validate at publish, not just at create — a defensive re-check that
+  // the stored version's sampleData still satisfies its own renderDataSchema before it is
+  // promoted to active.
+  assertSampleDataMatchesSchema(record.renderDataSchema, record.sampleData);
+
   // Publish gating: engines with publishGate "hard" (react-pdf, typst, chromium) require a
   // PASSED validation render for the EXACT target version — no override in v1. pdfme is
   // warn-only for back-compat with existing active templates.
@@ -391,10 +552,23 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
 
   const now = new Date().toISOString();
   const updatedRecord: PdfTemplateRecord = { ...record, status: "active", updatedAt: now };
+  // REVIEW: the listing mirror follows the highest published version — the same rule
+  // writePdfTemplateThumbnail applies, so publishing an OLDER version deliberately never
+  // re-points the listing away from the newer one. `thumbnailKey` falls back to whatever the
+  // listing already showed: this version's own preview is rendered by a background worker
+  // that has not run yet, and one moment of the previous version's preview beats a gallery
+  // tile that goes blank on every publish.
+  const becomesLatestActive = targetVersion >= (meta.latestActiveVersion ?? 0);
+  // Destructured out so the mirror below can CLEAR a field the newly-active version does not
+  // declare — spreading `...meta` would leave the previous version's claim standing.
+  const { renderDataSchema: _schema, sampleData: _sample, kind: _kind, thumbnailKey: _thumb, ...metaBase } = meta;
   const updatedMeta: PdfTemplateMeta = {
-    ...meta,
+    ...metaBase,
     latestActiveVersion: Math.max(meta.latestActiveVersion ?? 0, targetVersion),
     status: "active",
+    ...(becomesLatestActive
+      ? templateSummaryMirror({ ...updatedRecord, thumbnailKey: updatedRecord.thumbnailKey ?? meta.thumbnailKey ?? null })
+      : templateSummaryMirror(meta)),
     updatedAt: now
   };
 

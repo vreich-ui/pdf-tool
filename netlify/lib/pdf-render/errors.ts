@@ -45,7 +45,17 @@ export type RenderErrorCode =
    * ceilings enforced on BOTH sides — a record that bypassed create is still refused). */
   | "CAPTURE_POLICY_VIOLATION"
   /** T12.8: robots.txt could not be fetched/parsed; the crawl refuses rather than guessing. */
-  | "CAPTURE_ROBOTS_UNAVAILABLE";
+  | "CAPTURE_ROBOTS_UNAVAILABLE"
+  /** D1: renderDataSchema is not a compilable JSON Schema (ajv.compile threw). */
+  | "RENDER_DATA_SCHEMA_INVALID"
+  /** D1: sampleData was checked against renderDataSchema (ajv) and failed — raised at BOTH
+   * create_pdf_template and publish_pdf_template. */
+  | "SAMPLE_DATA_SCHEMA_MISMATCH"
+  /** D4/BRIEF 3.10: an assets.images[] entry named an assetId but supplied neither a
+   * dataUri nor a blobKey to resolve it from — a typed rejection instead of the entry being
+   * silently skipped (which would surface later, confusingly, as a broken image reference
+   * inside the render). */
+  | "ASSET_SOURCE_MISSING";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

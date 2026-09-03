@@ -36,6 +36,11 @@ const MAX_OVERFLOW_ENTRIES = 20;
 const SET_CONTENT_TIMEOUT_MS = 30000;
 /** Upper bound on waiting for images to decode before capture (see waitForImagesDecoded). */
 const IMAGE_DECODE_TIMEOUT_MS = 15000;
+/** D3: a first-page PNG larger than this is dropped rather than shipped — a thumbnail is a
+ * nice-to-have, never a reason to bloat (or fail) a render response. */
+const MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024;
+/** D3: how long the (post-PDF, best-effort) thumbnail capture may take. */
+const THUMBNAIL_TIMEOUT_MS = 15000;
 
 // ---------------------------------------------------------------------------
 // Browser singleton
@@ -255,6 +260,16 @@ function createRouteHandler(
         await route.fulfill({ status: 200, contentType: asset.contentType ?? "application/octet-stream", body: asset.bytes });
         return;
       }
+      // REVIEW: this was the one aborted request the engine did NOT record, contradicting
+      // this file's own docstring. It is also the most likely one: a template that references
+      // an assetId the job's `assets` never supplied (a typo, a slot whose upstream image
+      // failed, an id the netlify-side resolver renamed through safeAssetName) renders a
+      // broken image inside an otherwise successful PDF, with nothing anywhere saying why.
+      // <img> misses are also caught by waitForImagesDecoded, but a CSS background/font-less
+      // url() miss is not — only this warning names it.
+      if (warnings.length < MAX_BLOCKED_WARNINGS) {
+        warnings.push(`unresolved job asset: no asset named "${pathname}" was supplied for ${url}`);
+      }
       await route.abort();
       return;
     }
@@ -302,6 +317,44 @@ function buildPdfOptions(requirements: RenderRequirementsInput | undefined) {
     if (Object.keys(margin).length > 0) options.margin = margin;
   }
   return options;
+}
+
+// ---------------------------------------------------------------------------
+// D3: first-page thumbnail (best-effort, post-PDF)
+// ---------------------------------------------------------------------------
+
+/** CSS px (at the 96dpi reference used by Chromium's print layout) for the paper the PDF was
+ * produced on — the clip rect for "the first page". */
+function firstPageClipPx(requirements: RenderRequirementsInput | undefined): { width: number; height: number } {
+  const portrait = requirements?.format === "Letter" ? { width: 8.5 * 96, height: 11 * 96 } : { width: (210 / 25.4) * 96, height: (297 / 25.4) * 96 };
+  const landscape = requirements?.orientation === "landscape";
+  const width = Math.round(landscape ? portrait.height : portrait.width);
+  const height = Math.round(landscape ? portrait.width : portrait.height);
+  return { width, height };
+}
+
+/**
+ * Captures page 1 as a PNG. Runs AFTER page.pdf() has already produced the bytes, and only
+ * when the request asked for it, so it can neither change nor delay the PDF itself:
+ *   - `emulateMedia({ media: "print" })` + a paper-sized viewport make the raster line up
+ *     with what page.pdf() laid out (the default 1280px viewport would otherwise screenshot a
+ *     *screen*-width layout that the PDF never had);
+ *   - `clip` is exactly that paper rect anchored at the origin — page 1 and nothing below it.
+ * Every failure here is a warning, never an error: a template that renders a valid PDF but
+ * cannot be screenshotted still publishes (see the netlify-side thumbnail worker).
+ */
+async function captureFirstPagePng(
+  page: {
+    emulateMedia: (options: { media: "print" }) => Promise<void>;
+    setViewportSize: (size: { width: number; height: number }) => Promise<void>;
+    screenshot: (options: { type: "png"; clip: { x: number; y: number; width: number; height: number }; timeout?: number }) => Promise<Buffer>;
+  },
+  requirements: RenderRequirementsInput | undefined
+): Promise<Buffer> {
+  const { width, height } = firstPageClipPx(requirements);
+  await page.emulateMedia({ media: "print" });
+  await page.setViewportSize({ width, height });
+  return page.screenshot({ type: "png", clip: { x: 0, y: 0, width, height }, timeout: THUMBNAIL_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +466,7 @@ export interface ChromiumDiagnostics {
 }
 
 export type ChromiumRenderResult =
-  | { ok: true; pdfBytes: Buffer; diagnostics: ChromiumDiagnostics }
+  | { ok: true; pdfBytes: Buffer; thumbnailPng?: Buffer; diagnostics: ChromiumDiagnostics }
   | { ok: false; code: "RENDER_ENGINE_ERROR" | "RENDER_TIMEOUT" | "PDF_REQ_MAX_BYTES" | "DATA_BINDING_ERROR"; message: string };
 
 class RenderTimeoutError extends Error {}
@@ -482,7 +535,7 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
   let context: BrowserContext | undefined;
   let pendingContext: Promise<BrowserContext> | undefined;
   try {
-    const { pdfBytes, overflows } = await withDeadline(
+    const { pdfBytes, overflows, thumbnailPng } = await withDeadline(
       request.timeoutMs,
       async () => {
         // Capture the promise BEFORE awaiting: if the deadline fires while newContext() is
@@ -518,7 +571,23 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
         }
 
         const pdfBytes = await page.pdf(buildPdfOptions(request.requirements));
-        return { pdfBytes, overflows: overflowEntries };
+
+        // D3: strictly after the PDF exists. Not requested ⇒ nothing here runs at all and
+        // this render is byte-identical to one from before the flag existed.
+        let thumbnailPng: Buffer | undefined;
+        if (request.wantThumbnail) {
+          try {
+            const png = await captureFirstPagePng(page as never, request.requirements);
+            if (png.byteLength > MAX_THUMBNAIL_BYTES) {
+              warnings.push(`first-page thumbnail dropped: ${png.byteLength} bytes exceeds the ${MAX_THUMBNAIL_BYTES}-byte cap`);
+            } else {
+              thumbnailPng = png;
+            }
+          } catch (error) {
+            warnings.push(`first-page thumbnail capture failed: ${errMsg(error)}`);
+          }
+        }
+        return { pdfBytes, overflows: overflowEntries, thumbnailPng };
       },
       () => {
         context?.close().catch(() => {});
@@ -538,6 +607,7 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
     return {
       ok: true,
       pdfBytes,
+      ...(thumbnailPng ? { thumbnailPng } : {}),
       diagnostics: {
         pageCount: inspection.pageCount,
         sizeBytes: inspection.sizeBytes,

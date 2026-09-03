@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createArtifactJob, formatValidationIssues, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type PdfTemplateRef, type ArtifactJobStatus, type ArtifactJobOperation, type ArtifactEditMode, type SourceArtifactLock, type ArtifactReferenceHolder, type ImageEditInstructions } from "./agent-artifact-jobs.js";
+import { createArtifactJob, formatValidationIssues, isSafeOptionalPathSegment, readArtifactJob, safeError, updateArtifactJob, validateArtifactJobRequest, type ArtifactJobRequirements, type PdfTemplateRef, type ArtifactJobStatus, type ArtifactJobOperation, type ArtifactEditMode, type SourceArtifactLock, type ArtifactReferenceHolder, type ImageEditInstructions, type ArtifactJobStyle } from "./agent-artifact-jobs.js";
 import { triggerWorker } from "./agent-artifact-worker-trigger.js";
 import { readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "./artifact-core/index.js";
 import { resolveProjectArtifactIndexOptions, resolveProjectModel, validateProjectAccess } from "./project-descriptor.js";
@@ -33,6 +33,7 @@ export interface CreateAgentArtifactJobInput {
   templateRef?: PdfTemplateRef;
   data?: unknown;
   assets?: { images?: unknown[] };
+  style?: ArtifactJobStyle;
   slot?: string;
   tags?: string[];
   label?: string;
@@ -64,6 +65,34 @@ export const JOB_RUNNING_TIMEOUT_MS = 12 * 60_000;
 
 export function artifactJobPollingInstructions(projectId: string, jobId: string) {
   return { tool: "get_agent_artifact_job_status", input: { projectId, jobId }, recommendedIntervalMs: 2000, terminalStatuses: ["complete", "failed"] as ArtifactJobStatus[] };
+}
+
+export type LocalStyleSource = "override" | "visual_standard";
+
+/**
+ * D4 (BRIEF 3.4): pdf-tool does not resolve style — it has neither the site's brandImagery
+ * nor its visual_standard objects, both of which live in the platform. This is therefore
+ * NOT the full `styleSource` resolution named in the interface freeze
+ * ('override' | 'visual_standard' | 'site' | 'derived' | 'site_locked') — 'site',
+ * 'derived', and 'site_locked' all require site-level context only the platform has. It is
+ * the narrowest thing pdf-tool can say truthfully from the request alone: which of the two
+ * job-supplied fields (in R4's stated priority, override over visualStandardId) would drive
+ * resolution if pdf-tool were the one resolving. Absent when `style` carries neither field
+ * (e.g. only `note`) — there is nothing to name.
+ */
+export function deriveLocalStyleSource(style: ArtifactJobStyle | undefined): LocalStyleSource | undefined {
+  if (!style) return undefined;
+  if (style.override !== undefined) return "override";
+  if (style.visualStandardId !== undefined) return "visual_standard";
+  return undefined;
+}
+
+/** `style` + `styleSource` response fields, echoed identically on the create-job response
+ * (pending and blocked) and get_agent_artifact_job_status — see deriveLocalStyleSource. */
+function styleResponseFields(style: ArtifactJobStyle | undefined): { style?: ArtifactJobStyle; styleSource?: LocalStyleSource } {
+  if (!style) return {};
+  const styleSource = deriveLocalStyleSource(style);
+  return { style, ...(styleSource ? { styleSource } : {}) };
 }
 
 export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
@@ -133,7 +162,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     } catch (error) {
       return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
     }
-    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
+    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, ...styleResponseFields(blockedJob.style), blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
 
   let job: Awaited<ReturnType<typeof createArtifactJob>>;
@@ -150,7 +179,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), adapterVersion: job.adapterVersion, destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), adapterVersion: job.adapterVersion, ...styleResponseFields(job.style), destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {
@@ -177,7 +206,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const artifactReference = job.artifactReference ?? job.artifact;
   // A completed artifact carries a materialization proof so the CMS can verify it later.
   const materializationProof = job.status === "complete" && artifactReference ? attestArtifactReference(job.projectId, job.requestId, artifactReference) : undefined;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, ...(job.renderer ? { renderer: job.renderer } : {}), artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}) };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, ...(job.renderer ? { renderer: job.renderer } : {}), ...styleResponseFields(job.style), artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}) };
 }
 
 

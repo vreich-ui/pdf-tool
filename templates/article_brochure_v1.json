@@ -1,0 +1,368 @@
+{
+  "templateId": "article_brochure_v1",
+  "kind": "article",
+  "label": "Article Brochure",
+  "tags": [
+    "article",
+    "chromium",
+    "brochure",
+    "generic"
+  ],
+  "renderer": "chromium",
+  "templateJson": {
+    "html": "<style>\n:root {\n  --color-primary: {{ brand.colors['primary'] | default: '#1d2b53' }};\n  --color-accent: {{ brand.colors['accent'] | default: '#c9a24b' }};\n  --color-gold: {{ brand.colors['gold'] | default: '#e8c46a' }};\n  --color-heading: {{ brand.colors['text-heading'] | default: '#111111' }};\n  --color-text: {{ brand.colors['text-default'] | default: '#1f2933' }};\n  --color-muted: {{ brand.colors['text-muted'] | default: '#6b7280' }};\n  --color-surface: {{ brand.colors['bg-surface'] | default: '#f7f7f5' }};\n  --color-page: {{ brand.colors['bg-page'] | default: '#ffffff' }};\n  --font-sans: \"{{ brand.fonts.sans | default: 'NotoSans' }}\";\n  --font-serif: \"{{ brand.fonts.serif | default: 'NotoSerif' }}\";\n  --font-heading: \"{{ brand.fonts.heading | default: 'NotoSerif' }}\";\n}\n</style>\n<section class=\"cover page-frame\">\n  <div class=\"cover-top\">\n    {% if brand.logo %}<div class=\"logo\"><img src=\"https://render.assets.invalid/{{ brand.logo }}\" alt=\"logo\"></div>{% endif %}\n    {% if kicker %}<div class=\"kicker\">{{ kicker }}</div>{% endif %}\n  </div>\n  <div class=\"cover-heading\">\n    <h1>{{ title }}</h1>\n    <p class=\"deck\">{{ deck }}</p>\n    {% if author or date %}\n    <p class=\"byline\">{% if author %}{{ author }}{% endif %}{% if author and date %} &middot; {% endif %}{% if date %}{{ date }}{% endif %}</p>\n    {% endif %}\n  </div>\n  {% if coverImage %}\n  <div class=\"cover-image\"><img src=\"https://render.assets.invalid/{{ coverImage }}\" alt=\"\"></div>\n  {% endif %}\n</section>\n<main class=\"page-frame\">\n  {% for section in sections %}{% render 'section', section: section %}{% endfor %}\n  {% if pullQuotes.size > 0 %}\n  <section class=\"pull-quotes\">\n    {% for quote in pullQuotes %}{% render 'pull-quote', quote: quote %}{% endfor %}\n  </section>\n  {% endif %}\n  {% if sources.size > 0 %}\n  <section class=\"sources\">\n    <h2>Sources</h2>\n    <ol>\n      {% for source in sources %}{% render 'source-item', source: source %}{% endfor %}\n    </ol>\n  </section>\n  {% endif %}\n</main>\n<div class=\"footer\">\n  <div class=\"footer-brand\">{% if kicker %}{{ kicker }}{% else %}{{ title }}{% endif %}{% if footerNote %} &mdash; {{ footerNote }}{% endif %}</div>\n  {% if disclaimer %}<div class=\"footer-disclaimer\">{{ disclaimer }}</div>{% endif %}\n</div>",
+    "css": "@page { margin: 0; }\n* { box-sizing: border-box; }\nhtml, body {\n  margin: 0;\n  padding: 0;\n  background: var(--color-page);\n  color: var(--color-text);\n  font-family: var(--font-sans), sans-serif;\n  font-size: 11pt;\n  line-height: 1.55;\n}\n.page-frame {\n  padding: 30pt 34pt 76pt;\n}\n.cover {\n  min-height: 100vh;\n  display: flex;\n  flex-direction: column;\n  justify-content: space-between;\n  padding: 42pt 40pt;\n  background: var(--color-primary);\n  color: #ffffff;\n  page-break-after: always;\n  break-after: page;\n}\n.cover .cover-top {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 16pt;\n}\n.cover .logo img {\n  max-height: 34pt;\n  max-width: 160pt;\n  display: block;\n}\n.cover .kicker {\n  text-transform: uppercase;\n  letter-spacing: 0.14em;\n  font-size: 9.5pt;\n  color: var(--color-gold);\n  font-weight: 700;\n}\n.cover .cover-heading h1 {\n  font-family: var(--font-heading), serif;\n  font-size: 32pt;\n  line-height: 1.15;\n  margin: 14pt 0 10pt;\n}\n.cover .deck {\n  font-size: 13.5pt;\n  max-width: 34em;\n  color: rgba(255, 255, 255, 0.88);\n  margin: 0 0 10pt;\n}\n.cover .byline {\n  font-size: 9.5pt;\n  color: rgba(255, 255, 255, 0.7);\n}\n.cover .cover-image {\n  margin-top: 18pt;\n  border-radius: 4pt;\n  overflow: hidden;\n  height: 32vh;\n}\n.cover .cover-image img {\n  width: 100%;\n  height: 100%;\n  object-fit: cover;\n  display: block;\n}\n.article-section {\n  margin: 0 0 18pt;\n  page-break-inside: avoid;\n  break-inside: avoid;\n}\n.article-section h2 {\n  font-family: var(--font-heading), serif;\n  color: var(--color-heading);\n  font-size: 15.5pt;\n  margin: 0 0 8pt;\n  padding-bottom: 4pt;\n  border-bottom: 1pt solid var(--color-accent);\n}\n.article-section p {\n  margin: 0 0 9pt;\n}\n.article-section figure {\n  margin: 12pt 0;\n  page-break-inside: avoid;\n  break-inside: avoid;\n}\n.article-section figure img {\n  width: 100%;\n  border-radius: 3pt;\n  display: block;\n}\n.article-section figcaption {\n  font-size: 9pt;\n  color: var(--color-muted);\n  margin-top: 5pt;\n}\n.pull-quotes {\n  margin: 6pt 0 20pt;\n}\n.pull-quote {\n  border-left: 3pt solid var(--color-accent);\n  margin: 0 0 14pt;\n  padding: 2pt 0 2pt 16pt;\n  page-break-inside: avoid;\n  break-inside: avoid;\n}\n.pull-quote p {\n  font-family: var(--font-serif), serif;\n  font-style: italic;\n  font-size: 13pt;\n  color: var(--color-heading);\n  margin: 0;\n}\n.pull-quote cite {\n  display: block;\n  margin-top: 5pt;\n  font-size: 9.5pt;\n  font-style: normal;\n  color: var(--color-muted);\n}\n.sources {\n  margin-top: 22pt;\n  border-top: 1pt solid var(--color-muted);\n  padding-top: 12pt;\n}\n.sources h2 {\n  font-family: var(--font-heading), serif;\n  font-size: 12pt;\n  margin: 0 0 8pt;\n}\n.sources ol {\n  margin: 0;\n  padding-left: 16pt;\n  font-size: 9pt;\n  color: var(--color-muted);\n}\n.sources li {\n  margin-bottom: 4pt;\n}\n.sources a {\n  color: var(--color-primary);\n}\n.footer {\n  position: fixed;\n  left: 0;\n  right: 0;\n  bottom: 0;\n  display: flex;\n  gap: 14pt;\n  align-items: flex-end;\n  justify-content: space-between;\n  padding: 8pt 34pt;\n  font-size: 7.5pt;\n  color: var(--color-muted);\n  border-top: 0.5pt solid var(--color-muted);\n  background: var(--color-page);\n}\n.footer .footer-brand {\n  font-weight: 700;\n}\n.footer .footer-disclaimer {\n  flex: 1;\n  text-align: right;\n}",
+    "assets": {
+      "partials": {
+        "section": "<section class=\"article-section\">\n  <h2>{{ section.heading }}</h2>\n  {% for paragraph in section.paragraphs %}<p>{{ paragraph }}</p>{% endfor %}\n  {% if section.figure %}\n  <figure>\n    <img src=\"https://render.assets.invalid/{{ section.figure.assetId }}\" alt=\"{{ section.figure.caption | default: section.heading }}\">\n    {% if section.figure.caption %}<figcaption>{{ section.figure.caption }}</figcaption>{% endif %}\n  </figure>\n  {% endif %}\n</section>",
+        "pull-quote": "<blockquote class=\"pull-quote\">\n  <p>&ldquo;{{ quote.quote }}&rdquo;</p>\n  {% if quote.attribution %}<cite>{{ quote.attribution }}</cite>{% endif %}\n</blockquote>",
+        "source-item": "<li>{% if source.url %}<a href=\"{{ source.url }}\">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if source.note %} &mdash; {{ source.note }}{% endif %}</li>"
+      }
+    }
+  },
+  "renderDataSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://pdf-tool.internal/schemas/article_brochure_v1.render-data.json",
+    "title": "article_brochure_v1 render data",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "brand",
+      "title",
+      "deck",
+      "sections",
+      "pullQuotes",
+      "sources"
+    ],
+    "properties": {
+      "brand": {
+        "$ref": "#/$defs/brand"
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "deck": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 400
+      },
+      "kicker": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 80
+      },
+      "author": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 120
+      },
+      "date": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 40
+      },
+      "coverImage": {
+        "$ref": "#/$defs/assetId"
+      },
+      "sections": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 24,
+        "items": {
+          "$ref": "#/$defs/section"
+        }
+      },
+      "pullQuotes": {
+        "type": "array",
+        "maxItems": 12,
+        "items": {
+          "$ref": "#/$defs/pullQuote"
+        }
+      },
+      "sources": {
+        "type": "array",
+        "maxItems": 40,
+        "items": {
+          "$ref": "#/$defs/source"
+        }
+      },
+      "footerNote": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200
+      },
+      "disclaimer": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 600
+      }
+    },
+    "$defs": {
+      "assetId": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9._-]{1,128}$"
+      },
+      "brand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "colors",
+          "fonts"
+        ],
+        "properties": {
+          "colors": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          "fonts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sans",
+              "serif",
+              "heading"
+            ],
+            "properties": {
+              "sans": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "serif": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "heading": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "mono": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            }
+          },
+          "logo": {
+            "$ref": "#/$defs/assetId"
+          }
+        }
+      },
+      "section": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "heading",
+          "paragraphs"
+        ],
+        "properties": {
+          "heading": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 150
+          },
+          "paragraphs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 12,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            }
+          },
+          "figure": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "assetId"
+            ],
+            "properties": {
+              "assetId": {
+                "$ref": "#/$defs/assetId"
+              },
+              "caption": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            }
+          }
+        }
+      },
+      "pullQuote": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "quote"
+        ],
+        "properties": {
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "attribution": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 150
+          }
+        }
+      },
+      "source": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "note": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      }
+    }
+  },
+  "sampleData": {
+    "brand": {
+      "colors": {
+        "primary": "#1d2b53",
+        "secondary": "#3a3f88",
+        "accent": "#c9a24b",
+        "gold": "#e8c46a",
+        "text-heading": "#111111",
+        "text-default": "#1f2933",
+        "text-muted": "#6b7280",
+        "bg-page": "#ffffff",
+        "bg-surface": "#f7f7f5",
+        "bg-page-dark": "#0b0e1a"
+      },
+      "fonts": {
+        "sans": "NotoSans",
+        "serif": "NotoSerif",
+        "heading": "NotoSerif",
+        "mono": "NotoSans"
+      },
+      "logo": "brand-logo"
+    },
+    "title": "The Quiet Rebuild: How Coastal Towns Are Rewriting Their Own Flood Plans",
+    "deck": "A season of record rainfall pushed a dozen small towns to stop waiting on state guidance and start drafting their own resilience rules — with mixed, instructive results.",
+    "kicker": "Field Report",
+    "author": "Mara Ilves",
+    "date": "September 2026",
+    "coverImage": "cover-photo",
+    "sections": [
+      {
+        "heading": "A season that changed the calculus",
+        "paragraphs": [
+          "By the time the third storm system stalled over the delta in July, the town council in Harlow Point had already exhausted its emergency repair budget for the fiscal year.",
+          "What followed was not a request for more state aid, but a decision to write the town's own building setback rules — a full year ahead of the state's own revision cycle."
+        ],
+        "figure": {
+          "assetId": "section-photo-1",
+          "caption": "Harlow Point's harbor road, closed for the second time this year after the June storm surge."
+        }
+      },
+      {
+        "heading": "Borrowing from the neighbors, cautiously",
+        "paragraphs": [
+          "Town planners across the region have started comparing notes informally, trading draft ordinances the way they once traded snowplow routes.",
+          "The approach is not without friction: a setback rule that makes sense on a barrier island reads very differently to a town built along a tidal river.",
+          "Even so, three of the five towns interviewed for this piece adopted language lifted nearly verbatim from a neighboring jurisdiction's 2025 ordinance."
+        ],
+        "figure": {
+          "assetId": "section-photo-2",
+          "caption": "Modelled surge depth for the Lower Delta district under the town's own revised 100-year assumption."
+        }
+      },
+      {
+        "heading": "What the insurers are watching",
+        "paragraphs": [
+          "Regional insurers say they are tracking these local rewrites closely, since a stricter local setback can move a parcel out of the highest-risk pricing tier well before any federal map update catches up.",
+          "That incentive is quietly doing more to drive adoption than any state grant program has managed in a decade."
+        ],
+        "figure": {
+          "assetId": "section-photo-3",
+          "caption": "The consortium's draft template, marked up by three towns before its first reading."
+        }
+      }
+    ],
+    "pullQuotes": [
+      {
+        "quote": "We stopped waiting for the map to catch up with the water.",
+        "attribution": "Dana Whitfield, Harlow Point town council"
+      },
+      {
+        "quote": "The neighboring towns' ordinances were the fastest first draft we ever had.",
+        "attribution": "Regional planning consortium, meeting minutes"
+      }
+    ],
+    "sources": [
+      {
+        "label": "Harlow Point Town Council, Ordinance 2026-14 (setback revision)",
+        "url": "https://example.gov/harlow-point/ordinance-2026-14",
+        "note": "Adopted July 2026"
+      },
+      {
+        "label": "Regional Planning Consortium, quarterly resilience briefing",
+        "note": "Meeting minutes, August 2026",
+        "url": "https://example.org/regional-consortium/resilience-briefing-q3-2026"
+      },
+      {
+        "label": "National Flood Insurance Program, risk rating methodology notes",
+        "url": "https://example.gov/nfip/risk-rating-methodology",
+        "note": "Methodology notes, revision 2.1"
+      }
+    ],
+    "footerNote": "Coastal Resilience Series",
+    "disclaimer": "This report reflects interviews and public records available as of September 2026 and may not capture ordinance changes adopted afterward."
+  },
+  "sampleAssets": {
+    "images": [
+      {
+        "assetId": "brand-logo",
+        "note": "Generic placeholder wordmark (abstract mark + bars, no real brand): a site's own logo replaces it at render time.",
+        "dataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxODAgNDgiIHdpZHRoPSIxODAiIGhlaWdodD0iNDgiPjxjaXJjbGUgY3g9IjI0IiBjeT0iMjQiIHI9IjE2IiBmaWxsPSJub25lIiBzdHJva2U9IiNlOGM0NmEiIHN0cm9rZS13aWR0aD0iNCIvPjxwYXRoIGQ9Ik0xNyAyNGw2IDcgMTEtMTUiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZmZmZmZiIgc3Ryb2tlLXdpZHRoPSI0IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48cmVjdCB4PSI1NCIgeT0iMTUiIHdpZHRoPSI5OCIgaGVpZ2h0PSI3IiByeD0iMy41IiBmaWxsPSIjZmZmZmZmIiBvcGFjaXR5PSIwLjkyIi8+PHJlY3QgeD0iNTQiIHk9IjI4IiB3aWR0aD0iNjIiIGhlaWdodD0iNyIgcng9IjMuNSIgZmlsbD0iI2ZmZmZmZiIgb3BhY2l0eT0iMC41NSIvPjwvc3ZnPg=="
+      },
+      {
+        "assetId": "cover-photo",
+        "note": "Abstract cover band in the sample palette — stands in for the article's real hero image.",
+        "dataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5MDAgNDgwIiB3aWR0aD0iOTAwIiBoZWlnaHQ9IjQ4MCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJza3kiIHgxPSIwIiB5MT0iMCIgeDI9IjAiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiM3ZDlhZDYiLz48c3RvcCBvZmZzZXQ9IjAuNjIiIHN0b3AtY29sb3I9IiMzZDU1OTAiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiMyMjMwNWUiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0iOTAwIiBoZWlnaHQ9IjQ4MCIgZmlsbD0idXJsKCNza3kpIi8+PGNpcmNsZSBjeD0iNzI2IiBjeT0iMTEyIiByPSI0NiIgZmlsbD0iI2YwZDA4OSIvPjxwYXRoIGQ9Ik0wIDI5NmMxNTAtNDAgMzAwIDQwIDQ1MCAwczMwMCA0MCA0NTAgMHYxODRIMHoiIGZpbGw9IiMxZDJiNTMiIG9wYWNpdHk9IjAuODUiLz48cGF0aCBkPSJNMCAzNjZjMTgwLTMwIDMyMCA0NCA0ODAgMHMyODAgMzIgNDIwIDB2MTE0SDB6IiBmaWxsPSIjMGYxNzMzIiBvcGFjaXR5PSIwLjkiLz48L3N2Zz4="
+      },
+      {
+        "assetId": "section-photo-1",
+        "note": "Abstract section figure — stands in for the article's real inline photo.",
+        "dataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5MDAgNTIwIiB3aWR0aD0iOTAwIiBoZWlnaHQ9IjUyMCI+PHJlY3Qgd2lkdGg9IjkwMCIgaGVpZ2h0PSI1MjAiIGZpbGw9IiNmMmYyZWYiLz48Y2lyY2xlIGN4PSI3NDIiIGN5PSIxMDgiIHI9IjM4IiBmaWxsPSIjYzlhMjRiIiBvcGFjaXR5PSIwLjU1Ii8+PHJlY3QgeD0iOTAiIHk9IjE1MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSIxNTAiIGZpbGw9IiMxZDJiNTMiIG9wYWNpdHk9IjAuNTUiLz48cmVjdCB4PSIyNDAiIHk9IjIwMCIgd2lkdGg9IjkwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iIzNhM2Y4OCIgb3BhY2l0eT0iMC41Ii8+PHJlY3QgeD0iMzYwIiB5PSIxMjAiIHdpZHRoPSIxNDAiIGhlaWdodD0iMTgwIiBmaWxsPSIjMWQyYjUzIiBvcGFjaXR5PSIwLjQiLz48cmVjdCB4PSI1MzAiIHk9IjE5MCIgd2lkdGg9IjExMCIgaGVpZ2h0PSIxMTAiIGZpbGw9IiMzYTNmODgiIG9wYWNpdHk9IjAuNDUiLz48cGF0aCBkPSJNMCAzMDBjMjAwLTMwIDM0MCAzMCA1MjAgMHMyNjAtMjYgMzgwIDB2MjIwSDB6IiBmaWxsPSIjMWQyYjUzIiBvcGFjaXR5PSIwLjMiLz48cmVjdCB5PSIzNjAiIHdpZHRoPSI5MDAiIGhlaWdodD0iMTYwIiBmaWxsPSIjM2EzZjg4IiBvcGFjaXR5PSIwLjE4Ii8+PC9zdmc+"
+      },
+      {
+        "assetId": "section-photo-2",
+        "dataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5MDAgNTIwIiB3aWR0aD0iOTAwIiBoZWlnaHQ9IjUyMCI+PHJlY3Qgd2lkdGg9IjkwMCIgaGVpZ2h0PSI1MjAiIGZpbGw9IiNlZWYxZjYiLz48cGF0aCBkPSJNMCAzMzBjMTUwLTU2IDMwMCAzNCA0NTAgNHMzMDAtNzAgNDUwLTE0djIwMEgweiIgZmlsbD0iIzNhM2Y4OCIgb3BhY2l0eT0iMC4zNSIvPjxwYXRoIGQ9Ik0wIDM5MmMxNzAtNDQgMzIwIDMwIDQ3MCA2czI4MC01MiA0MzAtMTB2MTMySDB6IiBmaWxsPSIjMWQyYjUzIiBvcGFjaXR5PSIwLjQ1Ii8+PHJlY3QgeD0iMTE4IiB5PSIxNTAiIHdpZHRoPSIxNjQiIGhlaWdodD0iMTEyIiByeD0iNiIgZmlsbD0iIzFkMmI1MyIgb3BhY2l0eT0iMC41Ii8+PHJlY3QgeD0iMTQwIiB5PSIxNzYiIHdpZHRoPSI1MiIgaGVpZ2h0PSI2MCIgZmlsbD0iI2YyZjJlZiIgb3BhY2l0eT0iMC43NSIvPjxyZWN0IHg9IjIwOCIgeT0iMTc2IiB3aWR0aD0iNTIiIGhlaWdodD0iNjAiIGZpbGw9IiNmMmYyZWYiIG9wYWNpdHk9IjAuNDUiLz48Y2lyY2xlIGN4PSI3MDAiIGN5PSIxNDAiIHI9IjUyIiBmaWxsPSIjYzlhMjRiIiBvcGFjaXR5PSIwLjUiLz48cmVjdCB4PSI0NzAiIHk9IjE5NiIgd2lkdGg9IjMwMCIgaGVpZ2h0PSIxMCIgcng9IjUiIGZpbGw9IiMxZDJiNTMiIG9wYWNpdHk9IjAuMzUiLz48cmVjdCB4PSI0NzAiIHk9IjIyNCIgd2lkdGg9IjIyMCIgaGVpZ2h0PSIxMCIgcng9IjUiIGZpbGw9IiMxZDJiNTMiIG9wYWNpdHk9IjAuMjUiLz48L3N2Zz4="
+      },
+      {
+        "assetId": "section-photo-3",
+        "dataUri": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA5MDAgNTIwIiB3aWR0aD0iOTAwIiBoZWlnaHQ9IjUyMCI+PHJlY3Qgd2lkdGg9IjkwMCIgaGVpZ2h0PSI1MjAiIGZpbGw9IiNmN2Y1ZWYiLz48cmVjdCB4PSI3MCIgeT0iODYiIHdpZHRoPSI3NjAiIGhlaWdodD0iMzQ4IiByeD0iOCIgZmlsbD0iI2ZmZmZmZiIgb3BhY2l0eT0iMC44NSIvPjxyZWN0IHg9IjExMCIgeT0iMTMwIiB3aWR0aD0iMzAwIiBoZWlnaHQ9IjE0IiByeD0iNyIgZmlsbD0iIzFkMmI1MyIgb3BhY2l0eT0iMC42Ii8+PHJlY3QgeD0iMTEwIiB5PSIxNjgiIHdpZHRoPSI0NzAiIGhlaWdodD0iOSIgcng9IjQuNSIgZmlsbD0iIzFmMjkzMyIgb3BhY2l0eT0iMC4zIi8+PHJlY3QgeD0iMTEwIiB5PSIxOTIiIHdpZHRoPSI0MzAiIGhlaWdodD0iOSIgcng9IjQuNSIgZmlsbD0iIzFmMjkzMyIgb3BhY2l0eT0iMC4zIi8+PHJlY3QgeD0iMTEwIiB5PSIyMTYiIHdpZHRoPSI0NTUiIGhlaWdodD0iOSIgcng9IjQuNSIgZmlsbD0iIzFmMjkzMyIgb3BhY2l0eT0iMC4zIi8+PHJlY3QgeD0iMTEwIiB5PSIyNjgiIHdpZHRoPSIxODAiIGhlaWdodD0iMTIwIiByeD0iNiIgZmlsbD0iIzNhM2Y4OCIgb3BhY2l0eT0iMC40Ii8+PHJlY3QgeD0iMzE2IiB5PSIyNjgiIHdpZHRoPSIxODAiIGhlaWdodD0iMTIwIiByeD0iNiIgZmlsbD0iI2M5YTI0YiIgb3BhY2l0eT0iMC40NSIvPjxyZWN0IHg9IjUyMiIgeT0iMjY4IiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjEyMCIgcng9IjYiIGZpbGw9IiMxZDJiNTMiIG9wYWNpdHk9IjAuMzUiLz48L3N2Zz4="
+      }
+    ]
+  }
+}

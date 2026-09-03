@@ -122,6 +122,9 @@ export function buildServer(): FastifyInstance {
     return {
       ok: true,
       pdfBase64: result.pdfBytes.toString("base64"),
+      // D3: only present when the request set options.wantThumbnail AND the capture
+      // succeeded — a failed capture is a diagnostics.engineWarnings entry, never an error.
+      ...(result.thumbnailPng ? { thumbnailPngBase64: result.thumbnailPng.toString("base64") } : {}),
       diagnostics: {
         ...result.diagnostics,
         engine: { id: "chromium", executedIn: "render-service" },

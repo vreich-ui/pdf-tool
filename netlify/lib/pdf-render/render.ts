@@ -13,6 +13,10 @@ export interface RenderPdfArtifactOutput {
   template: { templateId: string; version: number; renderer: string };
   validation: { pageCount: number; sizeBytes: number };
   diagnostics: RenderDiagnostics;
+  /** D3: first-page PNG. Present only when `wantThumbnail` was requested AND the engine
+   * produced one — chromium is the only engine that can, so this is always absent for
+   * pdfme/typst/react-pdf templates. */
+  thumbnailPng?: Buffer;
   /** Only with onRequirementFailure: "collect" — every failed requirement check (empty = passed). */
   requirementFailures?: RequirementFailure[];
 }
@@ -37,6 +41,19 @@ export async function renderPdfArtifact(options: {
    * are returned in requirementFailures instead — used by pre-publish validation renders,
    * which want the full failure list plus diagnostics rather than an exception. */
   onRequirementFailure?: "throw" | "collect";
+  /** D3: ask the engine for a first-page PNG alongside the PDF (chromium only — see
+   * RenderInput.wantThumbnail). Never affects the PDF bytes, and a capture failure is a
+   * warning, not an error. */
+  wantThumbnail?: boolean;
+  /** REVIEW: `mode` does two unrelated jobs — it picks WHICH version this render targets
+   * (final = the active one; validation = an exact `templateVersion`), and it sets the
+   * ENGINE's binding strictness (validation ⇒ Liquid strictVariables, where any binding the
+   * template reads and the data omits is a DATA_BINDING_ERROR). A caller that only needs the
+   * former should not be forced into the latter: D3's thumbnail worker renders sampleData for
+   * ONE exact version, but a preview of a template whose optional bindings are not all
+   * present in its sampleData should look like the production render (empty, not failed).
+   * Defaults to `mode`, so every existing caller is unchanged. */
+  engineMode?: "final" | "validation";
 }): Promise<RenderPdfArtifactOutput> {
   const { projectId, templateId, data, assets, requirements } = options;
   const mode = options.mode ?? "final";
@@ -85,7 +102,17 @@ export async function renderPdfArtifact(options: {
   // requirements.pdf is canonical; the bare top-level PDF fields are the legacy spelling.
   const pdfRequirements: NormalizedPdfRequirements | undefined = requirements?.pdf ?? requirements;
 
-  const output = await engine.render({ projectId, template: record, data, assets, requirements: pdfRequirements, mode });
+  const output = await engine.render({
+    projectId,
+    template: record,
+    data,
+    assets,
+    requirements: pdfRequirements,
+    // Version targeting above used `mode`; the ENGINE gets engineMode when the caller
+    // separated them (see the option's doc comment).
+    mode: options.engineMode ?? mode,
+    ...(options.wantThumbnail ? { wantThumbnail: true } : {}),
+  });
 
   // SHARED post-render enforcement: one pdf-lib inspector, one failure-code set — never
   // per-engine. Real page counts replace any engine-reported proxy (pdfme's schema length).
@@ -115,6 +142,7 @@ export async function renderPdfArtifact(options: {
     template: { templateId: record.templateId, version: record.version, renderer: record.renderer },
     validation: { pageCount: inspection.pageCount, sizeBytes: inspection.sizeBytes },
     diagnostics,
+    ...(output.thumbnailPng ? { thumbnailPng: output.thumbnailPng } : {}),
     ...(options.onRequirementFailure === "collect" ? { requirementFailures: failures } : {}),
   };
 }

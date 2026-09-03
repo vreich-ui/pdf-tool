@@ -113,6 +113,22 @@ export interface ImageEditInstructions {
   negativeInstructions: string[];
 }
 
+/** D4 (BRIEF 3.4): the override channel — R4's resolution order (override > visualStandardId
+ * > site.brandImagery > derived) is decided by the PLATFORM, which knows the site's
+ * visual_standard objects and brandImagery; pdf-tool has neither, so it never resolves style
+ * into pixels. It only stores this verbatim on the job record and echoes it (plus a
+ * best-effort `styleSource` derived from which of these two fields is present) back on
+ * create_agent_artifact_job and get_agent_artifact_job_status. `override` is intentionally
+ * unvalidated beyond "is an object" — BrandImagery is a platform-owned shape pdf-tool does
+ * not duplicate a schema for (single-validator rule: don't fork a schema pdf-tool doesn't
+ * own). Unknown keys inside `style` itself (i.e. anything other than these three) ARE
+ * rejected — see the `.strict()` on the zod object below. */
+export interface ArtifactJobStyle {
+  visualStandardId?: string;
+  override?: Record<string, unknown>;
+  note?: string;
+}
+
 export interface ArtifactJobRequest {
   projectId: string;
   requestId: string;
@@ -130,6 +146,9 @@ export interface ArtifactJobRequest {
   renderer?: PdfRendererId;
   data?: unknown;
   assets?: { images?: unknown[] };
+  /** D4 (BRIEF 3.4): the override channel. See ArtifactJobStyle's doc comment — pdf-tool
+   * stores and echoes this verbatim; it never resolves it into brand pixels. */
+  style?: ArtifactJobStyle;
   /** OUTPUT-ONLY (server-computed at job creation; never part of the validated input
    * schema — the three-copies rule does not apply). Static-config price estimate for the
    * routed image model. */
@@ -496,6 +515,13 @@ export function buildArtifactJobRequestSchema() {
     assets: z.object({ images: z.array(z.unknown()).optional() }).optional()
       .describe("Job-supplied binary assets for template renders: images[] entries are {assetId, dataUri} or {assetId, blobKey/artifactReference}. Binding is renderer-specific: chromium templates reference assetId via https://render.assets.invalid/<assetId> in HTML/CSS; typst via image(\"assets/<assetId>\"); react-pdf docTree via an image node's src:{kind:\"jobAsset\",assetId}. pdfme templates do NOT consume assets.images at all — bind image data through the per-render `data` object instead. Every dataUri must decode to a real image (IMAGE_DECODE_ERROR otherwise) and must not be an http(s):// URL."),
     slot: z.string().optional(),
+    style: z.object({
+      visualStandardId: z.string().min(1).optional(),
+      override: z.object({}).passthrough().optional().describe("Partial BrandImagery, applied by the PLATFORM — pdf-tool stores and echoes it verbatim, never resolves it."),
+      note: z.string().optional()
+    }).strict()
+      .describe("D4/BRIEF 3.4 override channel: { visualStandardId?, override?, note? }. pdf-tool does not resolve style into brand pixels — it stores this verbatim on the job record and echoes it back (as `style`) plus a best-effort `styleSource` on create_agent_artifact_job and get_agent_artifact_job_status; the platform is what actually resolves override > visualStandardId > site.brandImagery > derived. Unknown keys inside style are rejected.")
+      .optional(),
     tags: z.array(z.string()).default([]),
     label: z.string().optional(),
     agentName: z.string().optional(),
