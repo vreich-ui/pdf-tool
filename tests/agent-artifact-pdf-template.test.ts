@@ -178,10 +178,17 @@ test("get-pdf-template returns 404 for missing template", async () => {
   assert.equal(response.statusCode, 404);
 });
 
-test("get-pdf-template returns 404 for draft template when no version specified", async () => {
+test("get-pdf-template returns the draft record (not 404) when no version specified", async () => {
+  // FIX (incident): a template that exists but has never been published must not read as
+  // missing — see getPdfTemplateRecord. The no-version fetch now falls back to the latest
+  // version's record, whose own status ("draft") tells the caller what's really going on.
   await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "draft-only", templateJson: validTemplate }) });
   const response = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId: "draft-only" }, body: JSON.stringify({ storage: STORAGE }) });
-  assert.equal(response.statusCode, 404);
+  assert.equal(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.equal(body.status, "draft");
+  assert.equal(body.version, 1);
+  assert.equal(body.templateId, "draft-only");
 });
 
 test("get-pdf-template returns draft with explicit version", async () => {
@@ -263,9 +270,11 @@ test("lifecycle: draft is not active, publish makes it active, get/list reflect 
   // Create — status is draft
   await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson: validTemplate }) });
 
-  // Default get returns 404 (no active version)
+  // Default get returns the draft record (no active version yet, but not a 404 — see the
+  // FIX above)
   let getResp = await getHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie", templateId }, body: JSON.stringify({ storage: STORAGE }) });
-  assert.equal(getResp.statusCode, 404);
+  assert.equal(getResp.statusCode, 200);
+  assert.equal(JSON.parse(getResp.body).status, "draft");
 
   // List shows draft
   let listResp = await listHandler({ httpMethod: "GET", headers: AUTH, queryStringParameters: { projectId: "dr-lurie" }, body: JSON.stringify({ storage: STORAGE }) });
@@ -375,9 +384,12 @@ test("MCP publish_pdf_template flips status to active and get_pdf_template retur
   assert.equal(created.status, "draft");
   assert.equal(created.version, 1);
 
-  // get_pdf_template with no version should return isError (no active version yet)
+  // get_pdf_template with no version returns the draft record instead of erroring (no
+  // active version yet, but the template plainly exists — see the FIX above)
   const draftGetRes = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
-  assert.equal(JSON.parse(draftGetRes.body).result.isError, true);
+  const draftGetResult = JSON.parse(draftGetRes.body).result;
+  assert.equal(draftGetResult.isError, undefined);
+  assert.equal(draftGetResult.structuredContent.status, "draft");
 
   // Publish it
   const publishRes = await mcpRpc("tools/call", { name: "publish_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-publish-lifecycle" } });
@@ -419,13 +431,17 @@ test("MCP create_pdf_template returns isError for invalid templateJson", async (
   assert.equal(rpcResult.isError, true);
 });
 
-test("MCP get_pdf_template returns 404 content for draft without version", async () => {
+test("MCP get_pdf_template returns the draft record (not isError) without version", async () => {
+  // FIX (incident): "no active version" must not read as isError/not-found for a template
+  // that plainly exists as a draft — see getPdfTemplateRecord.
   await createHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-draft", templateJson: validTemplate }) });
   const response = await mcpRpc("tools/call", { name: "get_pdf_template", arguments: { storage: STORAGE, projectId: "dr-lurie", templateId: "mcp-get-draft" } });
   assert.equal(response.statusCode, 200);
   const rpcResult = JSON.parse(response.body).result;
-  assert.equal(rpcResult.isError, true);
-  assert.ok(JSON.parse(rpcResult.content[0].text).error);
+  assert.equal(rpcResult.isError, undefined);
+  assert.equal(rpcResult.structuredContent.status, "draft");
+  assert.equal(rpcResult.structuredContent.version, 1);
+  assert.equal(rpcResult.structuredContent.templateId, "mcp-get-draft");
 });
 
 test("MCP get_pdf_template returns template with explicit version", async () => {
