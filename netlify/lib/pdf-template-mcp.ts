@@ -134,7 +134,33 @@ export async function getPdfTemplateRecord(input: GetPdfTemplateInput) {
   }
   try {
     const record = await getPdfTemplate(input.projectId, input.templateId, input.version);
-    if (!record) return { ok: false as const, statusCode: 404, error: "Template not found or no active version" };
+    if (!record) {
+      // FIX (incident): getPdfTemplate's no-version branch — which the render dispatch path
+      // (pdf-render/render.ts) also depends on, and is deliberately left untouched here —
+      // returns null whenever meta.latestActiveVersion is null. That conflates three
+      // different states behind one "not found": the templateId genuinely does not exist,
+      // it exists as a DRAFT that was never published, or it exists but was archived before
+      // ever being published. An admin/agent caller who only sees a 404 cannot tell a draft
+      // (expected, normal, "just publish it") from something actually broken — which is
+      // exactly how this incident happened. Disambiguate at this tool-facing layer only: on
+      // a no-version lookup that came back empty, fall back to the template's LATEST version
+      // record. Its own `status` field ("draft" or "disabled") then tells the caller the
+      // real state directly, the same way an explicit `version` fetch already does — no new
+      // response shape to learn. A templateId with no meta at all is genuinely missing and
+      // still 404s below; so does an explicit `version` that doesn't exist. Active templates
+      // are entirely unaffected: this branch only runs when `record` came back null, which
+      // never happens for a template that has an active version.
+      if (input.version === undefined) {
+        const meta = await getPdfTemplateMeta(input.projectId, input.templateId);
+        if (meta) {
+          const latestRecord = await getPdfTemplate(input.projectId, input.templateId, meta.latestVersion);
+          if (latestRecord) {
+            return { ok: true as const, statusCode: 200, ...latestRecord, thumbnailKey: latestRecord.thumbnailKey ?? null };
+          }
+        }
+      }
+      return { ok: false as const, statusCode: 404, error: "Template not found or no active version" };
+    }
     // REVIEW: records written before D1 carry no `thumbnailKey` at all. The advertised
     // outputSchema (and PdfTemplateRecord) say string|null, and the list path already
     // normalizes via listEntryFromMeta — so normalize here too rather than handing one

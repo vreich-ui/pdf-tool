@@ -194,9 +194,9 @@ const TOOL_METADATA: ToolMetadata[] = [
   },
   {
     name: "get_pdf_template",
-    description: "Retrieve a stored PDF template definition. Defaults to the latest active version; pass version to retrieve a specific version.",
+    description: "Retrieve a stored PDF template definition. Defaults to the latest active version. Drafts exist and are normal: a brand-new template (or a new version saved on an existing one) starts in status \"draft\" with no active version until publish_pdf_template runs, and archived (disabled, via delete_pdf_template) templates keep their own status too. If the templateId has no active version — a draft that was never published, or one that was archived before ever being published — this returns the LATEST version's record anyway (status \"draft\" or \"disabled\") instead of a bare not-found, so \"no active version\" reads as unpublished/archived rather than broken; a genuinely nonexistent templateId, or an explicit `version` that doesn't exist, is the only case that 404s. Pass version to retrieve a specific version explicitly. Before probing templates one at a time to find out why they don't render, call list_pdf_templates: each row already reports `status` and `latestActiveVersion`, which tells you at a glance which templates are drafts (no active version yet) versus disabled versus actually active.",
     annotations: { readOnlyHint: true, openWorldHint: false },
-    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, templateJson: { type: "object" }, renderDataSchema: { type: "object" }, sampleData: {}, sampleAssets: { type: "object" }, kind: { type: "string" }, thumbnailKey: { type: ["string", "null"] } })
+    outputSchema: outputSchema({ templateId: { type: "string" }, version: { type: "number" }, status: { type: "string" }, templateJson: { type: "object" }, renderDataSchema: { type: "object" }, sampleData: {}, sampleAssets: { type: "object" }, kind: { type: "string" }, thumbnailKey: { type: ["string", "null"] } })
   },
   {
     name: "list_pdf_templates",
