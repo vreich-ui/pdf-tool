@@ -5,7 +5,8 @@ import { optimizeImageBytes } from "../agent-image-generation.js";
 import { contentTypeForImageOutputFormat } from "../agent-image-editing.js";
 import { MAX_IMAGE_OUTPUT_BYTES } from "../agent-artifact-jobs.js";
 import { imageSearchTestFixtures } from "./providers.js";
-import type { ImageLicenseInfo } from "./types.js";
+import { loadProjectImageSourcingPolicy } from "./policy.js";
+import type { ImageLicenseInfo, ImageSourcingPolicy } from "./types.js";
 
 export type SupportedImageFormat = "png" | "jpeg" | "webp";
 
@@ -185,6 +186,9 @@ export interface ImportImageFromUrlInput {
   /** Caller-asserted license; defaults to unknown. The caller owns rights clearance for direct imports. */
   license?: ImageLicenseInfo;
   maxBytes?: number;
+  /** Optional per-call longest-edge override; clamped to the project policy's
+   * quotas.maxImportDimensionPx ceiling — never allowed above it. */
+  maxDimensionPx?: number;
 }
 
 export interface ImportImageFromUrlOptions {
@@ -209,6 +213,10 @@ export interface SaveImportedImageInput extends Omit<ImportImageFromUrlInput, "u
   sourceUrl: string;
   /** Zip entry path, recorded in provenance when applicable. */
   entryName?: string;
+  /** Pre-loaded project image sourcing policy, when the caller already has one in scope
+   * (the batch url-import path loads it once for the whole batch — see url-import.ts) so
+   * this doesn't re-fetch it per item. Falls back to loading the project's policy itself. */
+  policy?: ImageSourcingPolicy;
 }
 
 /** Converts/optimizes pre-fetched image bytes and saves them under the canonical layout. */
@@ -217,8 +225,23 @@ export async function saveImportedImageArtifact(input: SaveImportedImageInput, r
   if (accessIssue) throw new Error(accessIssue);
   const maxBytes = Math.min(input.maxBytes ?? MAX_IMAGE_OUTPUT_BYTES, MAX_IMAGE_OUTPUT_BYTES);
 
+  const policy = input.policy ?? await loadProjectImageSourcingPolicy(input.projectId);
+  // Dimension bound is policy-driven (quotas.maxImportDimensionPx, default 2048px on the
+  // longest edge) so a tenant can change it without a deploy; a per-call maxDimensionPx is
+  // honoured only up to that ceiling, never above it.
+  const maxDimensionPx = Math.min(input.maxDimensionPx ?? policy.quotas.maxImportDimensionPx, policy.quotas.maxImportDimensionPx);
+
   const normalized = await normalizeToSupportedFormat(rawBytes);
-  const optimized = await optimizeImageBytes(normalized.bytes, { outputFormat: normalized.format, maxBytes, inputFormat: normalized.format });
+  const optimized = await optimizeImageBytes(normalized.bytes, {
+    outputFormat: normalized.format,
+    maxBytes,
+    inputFormat: normalized.format,
+    // fit: "inside" + withoutEnlargement, NOT the "cover" crop used for generated images at
+    // an exact size — see optimizeImageBytes' boundLongestEdgePx doc comment. Cropping an
+    // imported reference photo would silently cut off content the source never intended to
+    // lose; bounding the longest edge keeps the full frame and never upscales a small source.
+    boundLongestEdgePx: maxDimensionPx
+  });
   // Unlike create_agent_artifact_job's media policy (warn — see agent-image-generation.ts),
   // an imported image that still exceeds the byte cap after optimization is rejected here:
   // this path has no job record to attach a warning to, and no existing caller expects a
@@ -245,7 +268,10 @@ export async function saveImportedImageArtifact(input: SaveImportedImageInput, r
         sourceUrl: input.sourceUrl,
         ...(input.entryName ? { entryName: input.entryName } : {}),
         license: input.license ?? { class: "unknown", commercialUse: "unknown" },
-        importedAt: new Date().toISOString()
+        importedAt: new Date().toISOString(),
+        // Provenance for the dimension bound: lets a later reader tell a deliberately
+        // bounded import from an untouched original, and see exactly what changed.
+        ...(optimized.dimensions ? { dimensions: optimized.dimensions } : {})
       }
     }
   });

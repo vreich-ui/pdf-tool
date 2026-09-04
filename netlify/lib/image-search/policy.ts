@@ -28,7 +28,10 @@ export const DEFAULT_IMAGE_SOURCING_POLICY: ImageSourcingPolicy = {
   ],
   budget: { maxPaidImports: 0 },
   retention: { defaultState: "kept" },
-  quotas: { maxSearchesPerRequest: 4, maxResultsPerProvider: 10, maxImportBytes: 5_000_000, maxUrlImportsPerBatch: 20, maxUrlImportsPerRequest: 50 }
+  // 2048px longest edge: big enough for print-adjacent use at the 3:2 and 7:4 ratios these
+  // publications declare, small enough that an admin mood-board card isn't fetching a
+  // multi-thousand-pixel original for a thumbnail. Never upscales a smaller source.
+  quotas: { maxSearchesPerRequest: 4, maxResultsPerProvider: 10, maxImportBytes: 5_000_000, maxImportDimensionPx: 2048, maxUrlImportsPerBatch: 20, maxUrlImportsPerRequest: 50 }
 };
 
 export interface PolicyValidationIssue {
@@ -128,6 +131,7 @@ export function validateImageSourcingPolicyPatch(input: unknown): PolicyValidati
       if (quotas.maxSearchesPerRequest !== undefined && !(Number.isInteger(quotas.maxSearchesPerRequest) && numberIn(quotas.maxSearchesPerRequest, 1, 20))) issues.push({ path: ["quotas", "maxSearchesPerRequest"], message: "quotas.maxSearchesPerRequest must be an integer between 1 and 20" });
       if (quotas.maxResultsPerProvider !== undefined && !(Number.isInteger(quotas.maxResultsPerProvider) && numberIn(quotas.maxResultsPerProvider, 1, 50))) issues.push({ path: ["quotas", "maxResultsPerProvider"], message: "quotas.maxResultsPerProvider must be an integer between 1 and 50" });
       if (quotas.maxImportBytes !== undefined && !(Number.isInteger(quotas.maxImportBytes) && numberIn(quotas.maxImportBytes, 1024, 20_000_000))) issues.push({ path: ["quotas", "maxImportBytes"], message: "quotas.maxImportBytes must be an integer between 1024 and 20000000" });
+      if (quotas.maxImportDimensionPx !== undefined && !(Number.isInteger(quotas.maxImportDimensionPx) && numberIn(quotas.maxImportDimensionPx, 64, 8000))) issues.push({ path: ["quotas", "maxImportDimensionPx"], message: "quotas.maxImportDimensionPx must be an integer between 64 and 8000" });
       if (quotas.maxUrlImportsPerBatch !== undefined && !(Number.isInteger(quotas.maxUrlImportsPerBatch) && numberIn(quotas.maxUrlImportsPerBatch, 1, 100))) issues.push({ path: ["quotas", "maxUrlImportsPerBatch"], message: "quotas.maxUrlImportsPerBatch must be an integer between 1 and 100" });
       if (quotas.maxUrlImportsPerRequest !== undefined && !(Number.isInteger(quotas.maxUrlImportsPerRequest) && numberIn(quotas.maxUrlImportsPerRequest, 1, 500))) issues.push({ path: ["quotas", "maxUrlImportsPerRequest"], message: "quotas.maxUrlImportsPerRequest must be an integer between 1 and 500" });
     }

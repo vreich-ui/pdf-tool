@@ -17,6 +17,9 @@ export interface ImageSearchJobRequest {
   urls?: string[];
   /** Caller-asserted license applied to url_import artifacts; defaults to unknown. */
   license?: ImageLicenseInfo;
+  /** url_import only: per-batch longest-edge override applied to every imported image;
+   * clamped to the project policy's quotas.maxImportDimensionPx ceiling — never above it. */
+  maxDimensionPx?: number;
   /** Desired number of new candidates for this search; clamped to the per-request cap. */
   count?: number;
   tags?: string[];
@@ -72,6 +75,7 @@ export function validateImageSearchJobRequest(input: unknown): { success: true; 
   const count = value.count;
   const tags = Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : undefined;
   const label = typeof value.label === "string" ? value.label : undefined;
+  const maxDimensionPx = value.maxDimensionPx;
 
   const accessIssue = validateProjectAccess(projectId);
   if (accessIssue) issues.push({ path: ["projectId"], message: accessIssue });
@@ -90,6 +94,9 @@ export function validateImageSearchJobRequest(input: unknown): { success: true; 
     for (const [index, url] of (urls ?? []).entries()) {
       if (!url.startsWith("https://")) issues.push({ path: ["urls", String(index)], message: "urls must use https" });
     }
+    if (maxDimensionPx !== undefined && !(Number.isInteger(maxDimensionPx) && typeof maxDimensionPx === "number" && maxDimensionPx > 0 && maxDimensionPx <= 8000)) {
+      issues.push({ path: ["maxDimensionPx"], message: "maxDimensionPx must be a positive integer no greater than 8000" });
+    }
   }
   if (value.policyOverrides !== undefined) {
     for (const issue of validateImageSourcingPolicyPatch(value.policyOverrides)) {
@@ -98,7 +105,7 @@ export function validateImageSearchJobRequest(input: unknown): { success: true; 
   }
 
   if (issues.length > 0) return { success: false, error: { issues } };
-  return { success: true, data: { projectId, requestId, kind, query: query || undefined, urls, license, count: count as number | undefined, tags, label, policyOverrides: value.policyOverrides } };
+  return { success: true, data: { projectId, requestId, kind, query: query || undefined, urls, license, count: count as number | undefined, tags, label, maxDimensionPx: maxDimensionPx as number | undefined, policyOverrides: value.policyOverrides } };
 }
 
 export async function createImageSearchJobRecord(input: ImageSearchJobRequest): Promise<ImageSearchJobRecord> {

@@ -201,7 +201,8 @@ export const MCP_TOOL_SCHEMAS = {
     tags: z.array(z.string()).optional(),
     label: z.string().optional(),
     license: licenseSchema.optional().describe("Caller-asserted license recorded in artifact metadata; defaults to unknown"),
-    maxBytes: z.number().optional().describe("Optional byte cap for the stored image (max 5000000)")
+    maxBytes: z.number().optional().describe("Optional byte cap for the stored image (max 5000000)"),
+    maxDimensionPx: z.number().optional().describe("Optional longest-edge cap in pixels for the stored image, preserving aspect ratio and never upscaling (fit: inside, not a crop). Clamped to the project's image sourcing policy quotas.maxImportDimensionPx ceiling (default 2048) — this can only ask for something smaller, never larger.")
   }).strict(),
 
   import_images_from_url: z.object({
@@ -211,6 +212,7 @@ export const MCP_TOOL_SCHEMAS = {
     tags: z.array(z.string()).optional(),
     label: z.string().optional(),
     license: licenseSchema.optional().describe("Caller-asserted license applied to all imported images; defaults to unknown"),
+    maxDimensionPx: z.number().optional().describe("Optional longest-edge cap in pixels applied to every imported image, preserving aspect ratio and never upscaling (fit: inside, not a crop). Clamped to the project's image sourcing policy quotas.maxImportDimensionPx ceiling (default 2048) — this can only ask for something smaller, never larger."),
     policyOverrides: z.object({}).passthrough().optional().describe("Partial image sourcing policy (e.g. quotas.maxUrlImportsPerBatch) merged for this job only")
   }).strict(),
 

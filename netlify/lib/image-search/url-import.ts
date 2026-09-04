@@ -153,7 +153,11 @@ export async function runUrlImportBatch(job: ImageSearchJobRecord, options: { fe
           entryName: item.entryName,
           tags: job.tags,
           label: job.label,
-          license
+          license,
+          maxDimensionPx: job.maxDimensionPx,
+          // Reuse the batch's already-loaded, already-merged policy instead of a per-item
+          // re-fetch — this loop can run up to maxUrlImportsPerBatch times.
+          policy
         }, item.bytes);
         if (seen.has(`sha:${artifact.sha256}`)) {
           addDiagnostic(`${item.entryName ?? item.sourceUrl} skipped: identical bytes already in bank`);

@@ -73,12 +73,39 @@ export interface OptimizedImageBytes {
    * media policy is warn, not block, so the caller stores these bytes anyway and surfaces
    * this instead of failing the job with no artifact at all. */
   sizeWarning?: { maxBytes: number; actualBytes: number };
+  /**
+   * Populated only when the caller requested `boundLongestEdgePx` (currently just the image
+   * import path — see image-search/import.ts). Original vs. stored pixel dimensions plus
+   * whether a resize actually happened, computed here (from the decode this function already
+   * does) so the caller can record import provenance without a second sharp decode.
+   */
+  dimensions?: {
+    original: { width: number; height: number };
+    stored: { width: number; height: number };
+    resized: boolean;
+  };
 }
 
 export async function optimizeImageBytes(
   bytes: Buffer,
   options: {
+    /**
+     * Exact target WxH for a generated/edited image; crops to it (`fit: "cover"`, see below).
+     * Mutually exclusive with `boundLongestEdgePx` in practice — when both are set, `size`
+     * wins and `dimensions` is not populated.
+     */
     size?: string;
+    /**
+     * Bounds the longest edge to at most this many pixels, preserving aspect ratio and never
+     * upscaling a smaller source (`fit: "inside"` + `withoutEnlargement: true`). This is
+     * deliberately a DIFFERENT fit from `size`'s `cover`: `cover` crops to hit an exact
+     * target size, which is correct when the target size *is* the generation request (the
+     * model was asked for that frame) but wrong for importing a reference photo — cropping
+     * would silently cut content off a mood-board image the platform never generated and
+     * has no business trimming. `boundLongestEdgePx` is a ceiling, not a target: it only
+     * ever shrinks, never crops and never enlarges.
+     */
+    boundLongestEdgePx?: number;
     outputFormat?: "png" | "jpeg" | "webp";
     maxBytes?: number;
     inputFormat?: string;
@@ -87,18 +114,36 @@ export async function optimizeImageBytes(
   const outputFormat = options.outputFormat ?? "png";
   const inputFormat = options.inputFormat;
 
-  if (!options.size && outputFormat === inputFormat && (!options.maxBytes || bytes.byteLength <= options.maxBytes)) {
+  // Trap: a dimension bound must still be evaluated even when the image is already under
+  // maxBytes — a large-but-under-budget image used to skip optimization entirely via this
+  // guard, which meant a byte cap was no substitute for a pixel-dimension cap.
+  if (!options.size && !options.boundLongestEdgePx && outputFormat === inputFormat && (!options.maxBytes || bytes.byteLength <= options.maxBytes)) {
     return { bytes };
   }
 
   const { default: sharp } = await import("sharp");
   let transform = sharp(bytes).withMetadata({ exif: undefined });
 
+  let originalDimensions: { width: number; height: number } | undefined;
   if (options.size) {
     const [width, height] = options.size.split("x").map(Number);
     if (width && height) {
+      // Generation/editing target an exact size and are fine cropping to hit it — see the
+      // boundLongestEdgePx doc comment above for why import uses a different fit instead.
       transform = transform.resize(width, height, { fit: "cover" });
     }
+  } else if (options.boundLongestEdgePx) {
+    const metadata = await transform.metadata();
+    originalDimensions = { width: metadata.width ?? 0, height: metadata.height ?? 0 };
+    const longestEdge = Math.max(originalDimensions.width, originalDimensions.height);
+    if (longestEdge <= options.boundLongestEdgePx && outputFormat === inputFormat && (!options.maxBytes || bytes.byteLength <= options.maxBytes)) {
+      // Already within the dimension bound (and needs no format/byte-cap work either): hand
+      // back the original bytes untouched rather than round-tripping through sharp for a
+      // resize that withoutEnlargement would refuse to perform anyway. This is also what
+      // keeps a small source from ever being upscaled.
+      return { bytes, dimensions: { original: originalDimensions, stored: originalDimensions, resized: false } };
+    }
+    transform = transform.resize(options.boundLongestEdgePx, options.boundLongestEdgePx, { fit: "inside", withoutEnlargement: true });
   }
 
   const applyFormat = (t: import("sharp").Sharp, format: string, quality?: number) => {
@@ -124,10 +169,16 @@ export async function optimizeImageBytes(
   if (options.maxBytes && currentBytes.byteLength > options.maxBytes) {
     // If still over, try reducing dimensions as a last resort
     const [reqWidth] = options.size ? options.size.split("x").map(Number) : [undefined];
-    const metadata = await transform.metadata();
-    const baseWidth = reqWidth || metadata.width || 1024;
+    const baseWidth = reqWidth || originalDimensions?.width || (await transform.metadata()).width || 1024;
     for (let scale = 0.8; scale >= 0.2; scale -= 0.2) {
-      const scaledTransform = transform.clone().resize({ width: Math.round(baseWidth * scale) });
+      // A second .resize() call replaces the pipeline's queued resize options (sharp keeps
+      // only the last call's fit/withoutEnlargement), so a boundLongestEdgePx import must
+      // restate "inside" + no-upscale here too — otherwise this last-resort shrink would
+      // silently fall back to the default cover fit and crop an import that must not crop.
+      const scaledTransform = transform.clone().resize({
+        width: Math.round(baseWidth * scale),
+        ...(originalDimensions ? { fit: "inside" as const, withoutEnlargement: true } : {})
+      });
       const candidate = await applyFormat(scaledTransform, outputFormat, 5).toBuffer();
       if (candidate.byteLength <= options.maxBytes) {
         currentBytes = candidate;
@@ -140,11 +191,21 @@ export async function optimizeImageBytes(
   // F4: the documented media policy is warn, not block (over_budget: "warn") — this
   // previously threw here, hard-rejecting the job with NO artifact stored even when the
   // overage was tiny (e.g. ~2% over cap). Store the best-effort result and flag it instead.
-  if (options.maxBytes && currentBytes.byteLength > options.maxBytes) {
-    return { bytes: currentBytes, sizeWarning: { maxBytes: options.maxBytes, actualBytes: currentBytes.byteLength } };
+  const sizeWarning = options.maxBytes && currentBytes.byteLength > options.maxBytes
+    ? { maxBytes: options.maxBytes, actualBytes: currentBytes.byteLength }
+    : undefined;
+
+  let dimensions: OptimizedImageBytes["dimensions"];
+  if (originalDimensions) {
+    // Re-decode the FINAL bytes rather than trusting the requested bound: the maxBytes
+    // ladder above can shrink dimensions further as a last resort, so the bound alone would
+    // under-report how small the stored image actually ended up.
+    const storedMetadata = await sharp(currentBytes).metadata();
+    const stored = { width: storedMetadata.width ?? originalDimensions.width, height: storedMetadata.height ?? originalDimensions.height };
+    dimensions = { original: originalDimensions, stored, resized: stored.width !== originalDimensions.width || stored.height !== originalDimensions.height };
   }
 
-  return { bytes: currentBytes };
+  return { bytes: currentBytes, ...(sizeWarning ? { sizeWarning } : {}), ...(dimensions ? { dimensions } : {}) };
 }
 
 /** Explicit request timeout when the caller supplies no budget-derived one. */

@@ -10,7 +10,7 @@ import { handler as jobHandler } from "../netlify/functions/agent-artifact-job.j
 import { triggerWorker } from "../netlify/lib/agent-artifact-worker-trigger.js";
 import { handler as workerHandler } from "../netlify/functions/agent-artifact-worker-background.js";
 import { executeAgentArtifactWorkflow } from "../netlify/lib/agent-artifact-workflow.js";
-import { generateImageArtifactBytes, imageGenerationRequest } from "../netlify/lib/agent-image-generation.js";
+import { generateImageArtifactBytes, imageGenerationRequest, optimizeImageBytes } from "../netlify/lib/agent-image-generation.js";
 import { readArtifactIndex, retainedArtifactIndexKeys } from "../netlify/lib/artifact-core/index.js";
 import { artifactFilenamePointerKey, artifactSlotPointerKey, latestArtifactSlotPointerKey, legacyArtifactFilenamePointerKey, legacyArtifactSlotPointerKey, readArtifactIndexKeys, readArtifactReferenceByFilename, readArtifactReferenceBySlot } from "../netlify/lib/artifact-core/artifact-index.js";
 import { handler as mcpCreateHandler } from "../netlify/functions/create-agent-artifact-job.js";
@@ -186,6 +186,35 @@ test("mock OpenAI image response returns base64 bytes", async () => {
   });
   assert.deepEqual(generated.bytes, pngBytes);
   assert.equal(generated.contentType, "image/png");
+});
+
+// Trap 1 regression: `size` (generation/editing) must keep cropping to the exact requested
+// dimensions via `fit: "cover"`, unaffected by the separate `boundLongestEdgePx` option added
+// for imports (`fit: "inside"`, never crops). A wide 400x100 source resized to a square
+// 200x200 target proves it's still "cover": "inside" would produce 200x50, not 200x200.
+test("optimizeImageBytes: size-based resize (generation/editing) still crops via fit: cover", async () => {
+  const { default: sharp } = await import("sharp");
+  const wideSource = await sharp({ create: { width: 400, height: 100, channels: 3, background: { r: 10, g: 200, b: 30 } } }).png().toBuffer();
+
+  const optimized = await optimizeImageBytes(wideSource, { size: "200x200", outputFormat: "png", inputFormat: "png" });
+  const metadata = await sharp(optimized.bytes).metadata();
+  assert.equal(metadata.width, 200, "cover must hit the exact requested width, not preserve aspect ratio");
+  assert.equal(metadata.height, 200, "cover must hit the exact requested height by cropping, not letterboxing");
+  assert.equal(optimized.dimensions, undefined, "dimensions provenance is only populated for boundLongestEdgePx (import) calls");
+});
+
+test("generateImageArtifactBytes: size still produces the exact requested (cropped) dimensions", async () => {
+  const { default: sharp } = await import("sharp");
+  const wideSource = await sharp({ create: { width: 400, height: 100, channels: 3, background: { r: 10, g: 200, b: 30 } } }).png().toBuffer();
+  const generated = await generateImageArtifactBytes({
+    prompt: "x",
+    model: "test-image-model",
+    size: "200x200",
+    client: { images: { generate: async () => ({ data: [{ b64_json: wideSource.toString("base64") }] }) } }
+  });
+  const metadata = await sharp(generated.bytes).metadata();
+  assert.equal(metadata.width, 200);
+  assert.equal(metadata.height, 200);
 });
 
 test("Agent SDK workflow executes runner and image generation tool path", async () => {
