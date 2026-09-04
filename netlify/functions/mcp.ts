@@ -288,13 +288,13 @@ const TOOL_METADATA: ToolMetadata[] = [
   },
   {
     name: "import_image_from_url",
-    description: "Import a single image from an https URL, bank it as a url_import candidate, and synchronously return its ArtifactReference + candidateId. Non-native formats convert to png/jpeg. For zips, folder pages, or multiple URLs use import_images_from_url instead. Never returns bytes; rights clearance is the caller's responsibility. Bounded to this call's remaining execution budget — a near-timeout returns a structured, retryable error rather than a dropped connection.",
+    description: "Import a single image from an https URL, bank it as a url_import candidate, and synchronously return its ArtifactReference + candidateId. Non-native formats convert to png/jpeg. The stored image is bounded to the image sourcing policy's quotas.maxImportDimensionPx on its longest edge (default 2048px) — aspect ratio preserved, never cropped, never upscaled; pass maxDimensionPx for a smaller per-call bound. For zips, folder pages, or multiple URLs use import_images_from_url instead. Never returns bytes; rights clearance is the caller's responsibility. Bounded to this call's remaining execution budget — a near-timeout returns a structured, retryable error rather than a dropped connection.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     outputSchema: outputSchema({ artifactReference: { type: "object" }, candidateId: { type: "string" } })
   },
   {
     name: "import_images_from_url",
-    description: "Start a batch url-import job: each source URL may be a direct image, a zip archive of images, or an https folder/index page (same-host images are collected). Every imported image is saved to the project artifact Blob store and banked as a url_import candidate; bounded by policy quotas (default 20 per batch, 50 per request). Returns job metadata and polling instructions; results include ArtifactReferences, never bytes.",
+    description: "Start a batch url-import job: each source URL may be a direct image, a zip archive of images, or an https folder/index page (same-host images are collected). Every imported image is saved to the project artifact Blob store and banked as a url_import candidate; bounded by policy quotas (default 20 per batch, 50 per request). Each stored image is bounded to the image sourcing policy's quotas.maxImportDimensionPx on its longest edge (default 2048px) — aspect ratio preserved, never cropped, never upscaled; pass maxDimensionPx for a smaller per-call bound applied to the whole batch. Returns job metadata and polling instructions; results include ArtifactReferences, never bytes.",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     outputSchema: outputSchema({ jobId: { type: "string" }, status: { type: "string" }, polling: { type: "object" } })
   },

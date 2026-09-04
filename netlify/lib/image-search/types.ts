@@ -81,6 +81,14 @@ export interface ImageSourcingPolicy {
     maxResultsPerProvider: number;
     /** Per-image import ceiling in bytes (images are optimized down to fit). */
     maxImportBytes: number;
+    /**
+     * Per-image import ceiling on the longest edge in pixels. Imports are bounded (never
+     * upscaled) to this on the way in — see saveImportedImageArtifact in image-search/import.ts
+     * — so a tenant's mood board isn't fetching full-resolution originals for thumbnail-sized
+     * cards. A per-call `maxDimensionPx` (import_image_from_url / import_images_from_url) can
+     * ask for something smaller but is clamped to this ceiling, never allowed above it.
+     */
+    maxImportDimensionPx: number;
     /** Images imported per url-import batch (after zip/folder expansion). */
     maxUrlImportsPerBatch: number;
     /** Non-discarded url-import candidates allowed per requestId. */

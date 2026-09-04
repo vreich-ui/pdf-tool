@@ -75,7 +75,7 @@ async function runSearchJob(input: { requestId: string; query: string; count?: n
   return { job, response, body: JSON.parse(response.body) };
 }
 
-async function runImportJob(input: { requestId: string; urls: string[]; policyOverrides?: unknown; tags?: string[]; label?: string }) {
+async function runImportJob(input: { requestId: string; urls: string[]; policyOverrides?: unknown; tags?: string[]; label?: string; maxDimensionPx?: number }) {
   const job = await createImageSearchJobRecord({ projectId: "dr-lurie", kind: "url_import", ...input });
   const response = await imageSearchWorkerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", jobId: job.jobId }) });
   return { job, response, body: JSON.parse(response.body) };
@@ -417,6 +417,13 @@ function pngVariant(seed: number): Buffer {
   return Buffer.concat([pngBytes, Buffer.from([seed])]);
 }
 
+/** A real, decodable PNG of exact pixel dimensions — needed for the dimension-bound import
+ * tests below, which assert actual width/height, not just that some resize happened. */
+async function makePng(width: number, height: number): Promise<Buffer> {
+  const { default: sharp } = await import("sharp");
+  return sharp({ create: { width, height, channels: 3, background: { r: 30, g: 90, b: 150 } } }).png().toBuffer();
+}
+
 test("batch import: zip archive expands into banked url_import candidates", async () => {
   const { zipSync } = await import("fflate");
   const zipBytes = Buffer.from(zipSync({
@@ -537,4 +544,156 @@ test("requirements.maxBytes: PDFs accept large values, images stay capped at 5MB
   });
   assert.ok(!imageJob.success);
   assert.ok(imageJob.success === false && imageJob.error.issues.some((issue) => issue.path.includes("maxBytes")));
+});
+
+// ── Dimension-bounded import ──
+// Images imported into a tenant's store used to be kept at their original pixel dimensions
+// forever; the admin mood board then paid the cost of downloading full-size originals for
+// thumbnail-sized cards. These tests cover the policy-driven longest-edge bound applied on
+// import (see saveImportedImageArtifact / optimizeImageBytes' boundLongestEdgePx).
+
+test("url import: oversized image is bounded to the policy's default longest edge, aspect preserved, not cropped", async () => {
+  const { default: sharp } = await import("sharp");
+  const big = await makePng(4000, 2000); // 2:1, longest edge 4000 > default policy bound (2048)
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/dim-big.png": big.toString("base64") } });
+
+  const response = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-dim-big", url: "https://cdn.example.org/dim-big.png" })
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const body = JSON.parse(response.body);
+
+  const artifactStore = await projectBlobStore("artifacts", {});
+  const stored = await artifactStore.get(body.artifactReference.blobKey);
+  assert.ok(Buffer.isBuffer(stored));
+  const metadata = await sharp(stored as Buffer).metadata();
+  // Aspect ratio (2:1) preserved, longest edge bounded to 2048 — NOT cropped to a square or
+  // any other shape. Assert both dimensions, not just one.
+  assert.equal(metadata.width, 2048);
+  assert.equal(metadata.height, 1024);
+
+  assert.deepEqual(body.artifactReference.metadata.import.dimensions, {
+    original: { width: 4000, height: 2000 },
+    stored: { width: 2048, height: 1024 },
+    resized: true
+  });
+});
+
+test("url import: small image is left untouched and never upscaled", async () => {
+  const small = await makePng(300, 150); // well under the 2048px default bound
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/dim-small.png": small.toString("base64") } });
+
+  const response = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-dim-small", url: "https://cdn.example.org/dim-small.png" })
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const body = JSON.parse(response.body);
+
+  const artifactStore = await projectBlobStore("artifacts", {});
+  const stored = await artifactStore.get(body.artifactReference.blobKey);
+  assert.ok(Buffer.isBuffer(stored) && (stored as Buffer).equals(small), "a small source must be stored byte-for-byte untouched, never upscaled or re-encoded");
+
+  assert.deepEqual(body.artifactReference.metadata.import.dimensions, {
+    original: { width: 300, height: 150 },
+    stored: { width: 300, height: 150 },
+    resized: false
+  });
+});
+
+test("url import: dimension bound applies even when the image is already under maxBytes (early-return trap)", async () => {
+  const { default: sharp } = await import("sharp");
+  // A solid-color PNG compresses to a few hundred bytes regardless of pixel dimensions, so
+  // this is comfortably under any maxBytes cap — proving the resize happens because of the
+  // dimension bound, not because a byte-cap optimization pass happened to also resize it.
+  const oversizedButTiny = await makePng(5000, 2500);
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({ bytes: { "https://cdn.example.org/dim-trap.png": oversizedButTiny.toString("base64") } });
+  assert.ok(oversizedButTiny.byteLength < 500_000, "fixture must be well under maxBytes despite large dimensions for this test to prove anything");
+
+  const response = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-dim-trap", url: "https://cdn.example.org/dim-trap.png", maxBytes: 5_000_000 })
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const body = JSON.parse(response.body);
+
+  const artifactStore = await projectBlobStore("artifacts", {});
+  const stored = await artifactStore.get(body.artifactReference.blobKey);
+  const metadata = await sharp(stored as Buffer).metadata();
+  assert.ok((stored as Buffer).byteLength < 5_000_000, "stored bytes are nowhere near maxBytes");
+  assert.equal(metadata.width, 2048, "must still be bounded even though it was already comfortably under maxBytes");
+  assert.equal(metadata.height, 1024);
+  assert.equal(body.artifactReference.metadata.import.dimensions.resized, true);
+});
+
+test("url import: per-call maxDimensionPx is honoured within the policy ceiling; above the ceiling it is clamped", async () => {
+  const { default: sharp } = await import("sharp");
+  const big = await makePng(4000, 2000);
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({
+    bytes: {
+      "https://cdn.example.org/dim-override-small.png": big.toString("base64"),
+      "https://cdn.example.org/dim-override-large.png": big.toString("base64")
+    }
+  });
+
+  // Below the default policy ceiling (2048): honoured as requested.
+  const smaller = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-dim-override-small", url: "https://cdn.example.org/dim-override-small.png", maxDimensionPx: 800 })
+  });
+  assert.equal(smaller.statusCode, 200, smaller.body);
+  const smallerBody = JSON.parse(smaller.body);
+  const artifactStore = await projectBlobStore("artifacts", {});
+  const smallerStored = await artifactStore.get(smallerBody.artifactReference.blobKey);
+  const smallerMetadata = await sharp(smallerStored as Buffer).metadata();
+  assert.equal(smallerMetadata.width, 800);
+  assert.equal(smallerMetadata.height, 400);
+
+  // Above the default policy ceiling (2048): clamped to the ceiling, never honoured past it.
+  const larger = await importFromUrlHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", requestId: "req-dim-override-large", url: "https://cdn.example.org/dim-override-large.png", maxDimensionPx: 3600 })
+  });
+  assert.equal(larger.statusCode, 200, larger.body);
+  const largerBody = JSON.parse(larger.body);
+  const largerStored = await artifactStore.get(largerBody.artifactReference.blobKey);
+  const largerMetadata = await sharp(largerStored as Buffer).metadata();
+  assert.equal(largerMetadata.width, 2048, "a per-call override above the policy ceiling must be clamped to it, not honoured");
+  assert.equal(largerMetadata.height, 1024);
+});
+
+test("batch import: maxDimensionPx bounds every image in the batch and each candidate records dimension provenance", async () => {
+  const { default: sharp } = await import("sharp");
+  const big1 = await makePng(3000, 1000);
+  const big2 = await makePng(1200, 3600);
+  process.env.IMAGE_SEARCH_TEST_FIXTURES = JSON.stringify({
+    bytes: {
+      "https://cdn.example.org/batch-dim-1.png": big1.toString("base64"),
+      "https://cdn.example.org/batch-dim-2.png": big2.toString("base64")
+    }
+  });
+
+  const { body } = await runImportJob({
+    requestId: "req-batch-dim",
+    urls: ["https://cdn.example.org/batch-dim-1.png", "https://cdn.example.org/batch-dim-2.png"],
+    maxDimensionPx: 600
+  });
+  assert.equal(body.status, "complete", JSON.stringify(body));
+  assert.equal(body.result.newCandidates, 2);
+
+  const bank = await readImageSearchBank("dr-lurie", "req-batch-dim");
+  const artifactStore = await projectBlobStore("artifacts", {});
+  for (const candidate of bank!.candidates) {
+    const stored = await artifactStore.get(candidate.artifactReference!.blobKey);
+    const metadata = await sharp(stored as Buffer).metadata();
+    assert.ok(Math.max(metadata.width!, metadata.height!) <= 600, "batch per-call override must bound every imported image");
+    const importMeta = candidate.artifactReference!.metadata!.import as { dimensions?: { resized: boolean } };
+    assert.equal(importMeta.dimensions?.resized, true);
+  }
 });

@@ -118,6 +118,9 @@ export async function importImageFromUrl(input: unknown, options: { budgetMs?: n
   if (value.maxBytes !== undefined && !(Number.isInteger(value.maxBytes) && typeof value.maxBytes === "number" && value.maxBytes > 0 && value.maxBytes <= MAX_IMAGE_OUTPUT_BYTES)) {
     return { ok: false as const, statusCode: 400, error: `maxBytes must be a positive integer no greater than ${MAX_IMAGE_OUTPUT_BYTES}` };
   }
+  if (value.maxDimensionPx !== undefined && !(Number.isInteger(value.maxDimensionPx) && typeof value.maxDimensionPx === "number" && value.maxDimensionPx > 0 && value.maxDimensionPx <= 8000)) {
+    return { ok: false as const, statusCode: 400, error: "maxDimensionPx must be a positive integer no greater than 8000" };
+  }
   if (options.budgetMs !== undefined && options.budgetMs < MIN_USABLE_IMPORT_BUDGET_MS) {
     return {
       ok: false as const,
@@ -136,7 +139,8 @@ export async function importImageFromUrl(input: unknown, options: { budgetMs?: n
       tags: Array.isArray(value.tags) ? value.tags.filter((tag): tag is string => typeof tag === "string") : undefined,
       label: typeof value.label === "string" ? value.label : undefined,
       license: value.license,
-      maxBytes: value.maxBytes
+      maxBytes: value.maxBytes,
+      maxDimensionPx: value.maxDimensionPx
     }, { timeoutMs: options.budgetMs });
     const banked = await bankSingleUrlImport({ projectId, requestId, sourceUrl: url, artifactReference, license: value.license, label: typeof value.label === "string" ? value.label : undefined });
     return { ok: true as const, statusCode: 200, projectId, requestId, artifactReference, candidateId: banked.candidateId, ...(banked.warning ? { warning: banked.warning } : {}) };
