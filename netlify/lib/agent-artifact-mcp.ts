@@ -45,6 +45,12 @@ export interface CreateAgentArtifactJobInput {
    * must not silently drop the human-approval gate. */
   requireApproval?: boolean;
   approvalAction?: string;
+  /** T1.2: PDF jobs only — opt this job out of the default strict data binding. See
+   * ArtifactJobRequest.lenient. */
+  lenient?: boolean;
+  /** T1.4: PDF jobs only — opt this job INTO failing on the content quality gate, which is
+   * warn-only by default. See ArtifactJobRequest.failOnQualityGate. */
+  failOnQualityGate?: boolean;
 }
 
 export interface GetAgentArtifactJobStatusInput { projectId: string; jobId: string }
@@ -206,7 +212,7 @@ export async function getAgentArtifactJobStatus(input: GetAgentArtifactJobStatus
   const artifactReference = job.artifactReference ?? job.artifact;
   // A completed artifact carries a materialization proof so the CMS can verify it later.
   const materializationProof = job.status === "complete" && artifactReference ? attestArtifactReference(job.projectId, job.requestId, artifactReference) : undefined;
-  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, ...(job.renderer ? { renderer: job.renderer } : {}), ...styleResponseFields(job.style), artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}) };
+  return { ok: true as const, statusCode: 200, jobId: job.jobId, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, status: job.status, slot: job.slot, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), requirements: job.requirements, workflowPatchStatus: "skipped_by_design", adapterVersion: job.adapterVersion, executor: job.executor, requiresAI: job.requiresAI, requiresModel: job.requiresModel, ...(job.renderer ? { renderer: job.renderer } : {}), ...styleResponseFields(job.style), artifactReference, artifact: artifactReference, ...(materializationProof ? { materializationProof } : {}), ...(job.blocked ? { blocked: refreshedBlockedState(job.blocked) } : {}), error: job.error, ...(job.errorCode ? { errorCode: job.errorCode, errorDetail: job.errorDetail } : {}), ...(job.warnings?.length ? { warnings: job.warnings } : {}), ...(job.qualityGate ? { qualityGate: job.qualityGate } : {}) };
 }
 
 

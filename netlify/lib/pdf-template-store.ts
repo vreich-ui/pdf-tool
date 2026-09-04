@@ -46,8 +46,46 @@ export interface PdfTemplateRecord {
    * succeeds, and permanently null for non-chromium renderers (only the chromium engine can
    * screenshot a page; rasterizing other engines' PDF output is out of scope). */
   thumbnailKey: string | null;
+  /** T1.7: WHY thumbnailKey is null, whenever that is known — a thumbnail render/dispatch
+   * that was skipped or failed, set by writePdfTemplateThumbnailFailure. Absent (not empty
+   * string) whenever no failure has been recorded, including the ordinary "never attempted
+   * yet" and "permanently out of scope for this renderer" states — those are not errors.
+   * Cleared by a later successful writePdfTemplateThumbnail. Sanitized by the caller before
+   * it ever reaches here: never a blobKey, storage grant, or tenant path (see BRIEF 1). */
+  thumbnailError?: string;
+  /** T1.5: whether this version's `renderDataSchema` / `sampleData` came from the caller or
+   * were DERIVED from the template's own placeholders (derive-render-data-schema.ts) because
+   * create_pdf_template was called without them. "derived" means "review me": the contract
+   * describes what the template reads, which is not necessarily what the author meant. */
+  renderDataSchemaSource?: "author" | "derived";
+  sampleDataSource?: "author" | "derived";
+  /** T1.5: contract-level warnings recorded at create time (a derived schema/sample, missing
+   * sampleAssets for a template that references images, a shape that could not be derived).
+   * Never a rejection — BRIEF 1 keeps authoring working. Caller-sanitized: no blobKeys,
+   * storage grants or tenant paths (BRIEF 1). */
+  contractWarnings?: string[];
+  /** T1.5: the most recent validation render's outcome for THIS version, mirrored off the
+   * validation report so `get_pdf_template` shows it without a second tool call. The report
+   * itself (diagnostics, requirement failures) stays authoritative — read it with
+   * get_pdf_template_validation. */
+  lastValidation?: PdfTemplateValidationSummary;
   createdAt: string;
   updatedAt: string;
+}
+
+/** T1.5: the record-side summary of a validation render. Deliberately carries CODES only,
+ * never the report's free-text `error` — that string is built by safeError() over engine
+ * failures and can quote storage detail (see BRIEF 3's note on job-assets.ts), which must
+ * never reach an agent-visible template record. */
+export interface PdfTemplateValidationSummary {
+  validationId: string;
+  status: "running" | "passed" | "failed";
+  /** "publish" when publish_pdf_template started/recorded it, "manual" for validate_pdf_template. */
+  source: "publish" | "manual";
+  startedAt: string;
+  completedAt?: string;
+  /** Typed failure codes only (errorCode, requirementFailure codes). */
+  failureCodes?: string[];
 }
 
 export interface PdfTemplateMeta {
@@ -61,9 +99,15 @@ export interface PdfTemplateMeta {
    * (which reads only this meta/index, never a version record — the N+1 fix) can expose
    * them without an extra read per template. */
   renderDataSchema?: JSONSchema;
+  /** T1.5: mirrors the version's renderDataSchemaSource, so the job-creation gate
+   * (validateArtifactJobRequest, which reads meta and never the version record) can tell an
+   * author-declared contract from a derived one WITHOUT a second read. */
+  renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
   thumbnailKey: string | null;
+  /** T1.7: mirrors the active version's PdfTemplateRecord.thumbnailError — see that field. */
+  thumbnailError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -75,9 +119,13 @@ export interface PdfTemplateListEntry {
   status: PdfTemplateStatus;
   renderer: PdfRendererId;
   renderDataSchema?: JSONSchema;
+  /** T1.5: "derived" means pdf-tool inferred this schema from the template's placeholders. */
+  renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
   thumbnailKey: string | null;
+  /** T1.7: mirrors the active version's PdfTemplateRecord.thumbnailError — see that field. */
+  thumbnailError?: string;
   createdAt: string;
 }
 
@@ -127,9 +175,11 @@ function listEntryFromMeta(meta: PdfTemplateMeta): PdfTemplateListEntry {
     status: meta.status,
     renderer: meta.renderer,
     ...(meta.renderDataSchema !== undefined ? { renderDataSchema: meta.renderDataSchema } : {}),
+    ...(meta.renderDataSchemaSource !== undefined ? { renderDataSchemaSource: meta.renderDataSchemaSource } : {}),
     ...(meta.sampleData !== undefined ? { sampleData: meta.sampleData } : {}),
     ...(meta.kind !== undefined ? { kind: meta.kind } : {}),
     thumbnailKey: meta.thumbnailKey ?? null,
+    ...(meta.thumbnailError !== undefined ? { thumbnailError: meta.thumbnailError } : {}),
     createdAt: meta.createdAt
   };
 }
@@ -167,6 +217,10 @@ export interface SavePdfTemplateInput {
   kind?: string;
   /** REVIEW/D3: assets `sampleData` references — see PdfTemplateRecord.sampleAssets. */
   sampleAssets?: { images?: unknown[] };
+  /** T1.5: provenance + contract warnings — see the same fields on PdfTemplateRecord. */
+  renderDataSchemaSource?: "author" | "derived";
+  sampleDataSource?: "author" | "derived";
+  contractWarnings?: string[];
 }
 
 /** The subset of a version's fields the meta/index mirrors for list_pdf_templates (BRIEF
@@ -174,15 +228,19 @@ export interface SavePdfTemplateInput {
  * which does NOT declare one of them clears it instead of leaving a stale claim behind. */
 function templateSummaryMirror(source: {
   renderDataSchema?: JSONSchema;
+  renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
   thumbnailKey?: string | null;
-}): Pick<PdfTemplateMeta, "renderDataSchema" | "sampleData" | "kind" | "thumbnailKey"> {
+  thumbnailError?: string;
+}): Pick<PdfTemplateMeta, "renderDataSchema" | "renderDataSchemaSource" | "sampleData" | "kind" | "thumbnailKey" | "thumbnailError"> {
   return {
     ...(source.renderDataSchema !== undefined ? { renderDataSchema: source.renderDataSchema } : {}),
+    ...(source.renderDataSchemaSource !== undefined ? { renderDataSchemaSource: source.renderDataSchemaSource } : {}),
     ...(source.sampleData !== undefined ? { sampleData: source.sampleData } : {}),
     ...(source.kind !== undefined ? { kind: source.kind } : {}),
-    thumbnailKey: source.thumbnailKey ?? null
+    thumbnailKey: source.thumbnailKey ?? null,
+    ...(source.thumbnailError !== undefined ? { thumbnailError: source.thumbnailError } : {})
   };
 }
 
@@ -221,6 +279,9 @@ export async function savePdfTemplate(input: SavePdfTemplateInput): Promise<PdfT
     ...(input.sampleData !== undefined ? { sampleData: input.sampleData } : {}),
     ...(input.kind !== undefined ? { kind: input.kind } : {}),
     ...(input.sampleAssets !== undefined ? { sampleAssets: input.sampleAssets } : {}),
+    ...(input.renderDataSchemaSource !== undefined ? { renderDataSchemaSource: input.renderDataSchemaSource } : {}),
+    ...(input.sampleDataSource !== undefined ? { sampleDataSource: input.sampleDataSource } : {}),
+    ...(input.contractWarnings?.length ? { contractWarnings: input.contractWarnings } : {}),
     // Never client-settable here — see the field's own doc comment on PdfTemplateRecord.
     thumbnailKey: null,
     createdAt: existingMeta?.createdAt ?? now,
@@ -434,19 +495,59 @@ export async function writePdfTemplateThumbnail(projectId: string, templateId: s
   await store.set(key, png);
 
   const now = new Date().toISOString();
-  await store.setJSON(versionKey(templateId, version), { ...record, thumbnailKey: key, updatedAt: now } satisfies PdfTemplateRecord);
+  // A SUCCESSFUL render clears any previously recorded thumbnailError (T1.7) — destructured
+  // out rather than spread over, the same "clear, don't leave a stale claim standing"
+  // convention templateSummaryMirror already uses.
+  const { thumbnailError: _clearedRecordError, ...recordRest } = record;
+  await store.setJSON(versionKey(templateId, version), { ...recordRest, thumbnailKey: key, updatedAt: now } satisfies PdfTemplateRecord);
 
   const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
   // REVIEW: `latestActiveVersion === null` means nothing is published yet, so there is no
   // active version this thumbnail could be the preview OF — previously `?? 0` let a
   // directly-invoked worker put a DRAFT version's thumbnail into the listing.
   if (meta && meta.projectId === projectId && meta.latestActiveVersion !== null && version >= meta.latestActiveVersion) {
-    const updatedMeta: PdfTemplateMeta = { ...meta, thumbnailKey: key, updatedAt: now };
+    const { thumbnailError: _clearedMetaError, ...metaRest } = meta;
+    const updatedMeta: PdfTemplateMeta = { ...metaRest, thumbnailKey: key, updatedAt: now };
     await store.setJSON(metaKey(templateId), updatedMeta);
     await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
   }
 
   return key;
+}
+
+/**
+ * T1.7: records WHY a thumbnail is missing, so `thumbnailKey: null` is never mysterious —
+ * get_pdf_template / list_pdf_templates surface `thumbnailError` right alongside it. Called
+ * both from the enqueue half (a render could not even be started — no sampleData, or the
+ * worker trigger failed) and from the worker half (a render was attempted and failed).
+ *
+ * `message` MUST already be caller-sanitized: never a blobKey, storage grant, or tenant
+ * path (BRIEF 1) — this function only persists whatever string it is given, verbatim.
+ *
+ * Mirrors onto meta/index under the exact same "at least the active version" rule as
+ * writePdfTemplateThumbnail, so a stale draft's failure can never clobber what the listing
+ * says about the version that actually renders. Best-effort and silent on its own storage
+ * errors: annotating why a thumbnail is missing must never itself become a new failure mode
+ * (the same policy that already governs the render outcome it is describing).
+ */
+export async function writePdfTemplateThumbnailFailure(projectId: string, templateId: string, version: number, message: string): Promise<void> {
+  try {
+    const store = await openTemplateStore(projectId);
+    const record = await store.get(versionKey(templateId, version), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
+    if (!record || record.projectId !== projectId) return;
+
+    const now = new Date().toISOString();
+    await store.setJSON(versionKey(templateId, version), { ...record, thumbnailError: message, updatedAt: now } satisfies PdfTemplateRecord);
+
+    const meta = await store.get(metaKey(templateId), { type: "json" }).catch(() => null) as PdfTemplateMeta | null;
+    if (meta && meta.projectId === projectId && meta.latestActiveVersion !== null && version >= meta.latestActiveVersion) {
+      const updatedMeta: PdfTemplateMeta = { ...meta, thumbnailError: message, updatedAt: now };
+      await store.setJSON(metaKey(templateId), updatedMeta);
+      await upsertTemplateIndexEntry(store, projectId, listEntryFromMeta(updatedMeta));
+    }
+  } catch {
+    // Best-effort — see the doc comment above.
+  }
 }
 
 /** Reads a stored thumbnail back as raw bytes (used by tests and by any future preview
@@ -459,6 +560,88 @@ export async function readPdfTemplateThumbnail(projectId: string, thumbnailKey: 
   if (value instanceof ArrayBuffer) return Buffer.from(value);
   if (ArrayBuffer.isView(value)) return Buffer.from(new Uint8Array(value.buffer as ArrayBuffer, value.byteOffset, value.byteLength));
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// T1.8 — on-demand render preview (distinct from the publish-time thumbnail above)
+// ---------------------------------------------------------------------------
+
+export type PdfTemplatePreviewStatus = "running" | "generated" | "failed";
+
+export interface PdfTemplatePreviewPage {
+  index: number;
+  blobKey: string;
+  /** The store this key lives in (the SAME templates store the grant already names) —
+   * included so a caller holding the grant can fetch the bytes itself; preview_pdf_template
+   * never returns bytes over MCP (see every other tool's "metadata only" convention). */
+  storeName: string;
+  contentType: "image/png";
+  sizeBytes: number;
+  sha256: string;
+}
+
+/** State for one preview_pdf_template job. Colocated with the template it previews (the
+ * templates store), NOT the thumbnail it deliberately does not share a key with: a preview
+ * can be requested for an unpublished draft, repeatedly, without ever touching the
+ * canonical publish-time thumbnailKey/thumbnailError a caller and the platform already rely
+ * on (see writePdfTemplateThumbnail's doc comment on that contract). */
+export interface PdfTemplatePreviewReport {
+  previewId: string;
+  projectId: string;
+  templateId: string;
+  version: number;
+  renderer: PdfRendererId;
+  status: PdfTemplatePreviewStatus;
+  /** Always true today — see pdfTemplatePreviewPngKey's doc comment for why. */
+  firstPageOnly: true;
+  pageCount?: number;
+  pages?: PdfTemplatePreviewPage[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  /** Sanitized (never a raw RenderError message — see writePdfTemplateThumbnailFailure's
+   * same rule): job-assets.ts's ASSET_NOT_FOUND, in particular, can embed a blobKey. */
+  error?: string;
+  errorCode?: string;
+}
+
+function previewReportKey(templateId: string, version: number): string {
+  return `${TEMPLATE_KEY_NAMESPACE}/${safeSegment(templateId)}/previews/v${version}.json`;
+}
+
+/** `previews/<templateId>/v<n>-p<page>.png` — `page` is always 1 today: the render service
+ * (render-service/src/engines/chromium.ts) returns a single FIRST-page screenshot per
+ * render, so a genuine per-page preview would need a render-service change (rasterizing
+ * every page, e.g. looping the screenshot call once per PDF page) that is out of scope for
+ * this task. The parameter still exists so that future per-page support is additive here. */
+export function pdfTemplatePreviewPngKey(templateId: string, version: number, page = 1): string {
+  return `previews/${safeSegment(templateId)}/v${version}-p${page}.png`;
+}
+
+export async function readPdfTemplatePreview(projectId: string, templateId: string, version: number): Promise<PdfTemplatePreviewReport | null> {
+  const store = await openTemplateStore(projectId);
+  const report = await store.get(previewReportKey(templateId, version), { type: "json" }).catch(() => null) as PdfTemplatePreviewReport | null;
+  if (!report || report.projectId !== projectId) return null;
+  return report;
+}
+
+export async function writePdfTemplatePreview(projectId: string, report: PdfTemplatePreviewReport): Promise<void> {
+  const store = await openTemplateStore(projectId);
+  await store.setJSON(previewReportKey(report.templateId, report.version), report);
+}
+
+/** Stores one page's preview PNG and returns its blob key. Deliberately mirrors
+ * writePdfTemplateThumbnail's PNG-magic check but, unlike it, never touches the version
+ * record or its meta/index mirror — see PdfTemplatePreviewReport's doc comment for why a
+ * preview must stay side-effect-free with respect to thumbnailKey/thumbnailError. */
+export async function writePdfTemplatePreviewPng(projectId: string, templateId: string, version: number, png: Buffer, page = 1): Promise<string> {
+  if (!Buffer.isBuffer(png) || png.byteLength <= PNG_MAGIC.byteLength || !png.subarray(0, PNG_MAGIC.byteLength).equals(PNG_MAGIC)) {
+    throw new RenderError("TEMPLATE_INVALID", `Refusing to store a preview for "${templateId}" v${version}: the bytes are not a PNG`);
+  }
+  const store = await openTemplateStore(projectId);
+  const key = pdfTemplatePreviewPngKey(templateId, version, page);
+  await store.set(key, png);
+  return key;
 }
 
 function validationKey(templateId: string, version: number): string {
@@ -475,6 +658,53 @@ export async function readPdfTemplateValidation(projectId: string, templateId: s
 export async function writePdfTemplateValidation(projectId: string, report: PdfTemplateValidationReport): Promise<void> {
   const store = await openTemplateStore(projectId);
   await store.setJSON(validationKey(report.templateId, report.version), report);
+}
+
+/**
+ * T1.5: mirrors a validation render's outcome onto the VERSION RECORD, so
+ * `get_pdf_template` answers "did this version's validation pass?" without a second call —
+ * which is what publish_pdf_template's auto-validation needs in order to be visible at all
+ * (it starts a background render, so the answer lands minutes after the publish response).
+ *
+ * Written from two places: publish_pdf_template (when it starts or finds a validation) and
+ * the validation worker (when the render completes). Record-only: NOT mirrored onto
+ * meta/index, so list_pdf_templates stays small — same policy as sampleAssets.
+ *
+ * Best-effort and silent on its own storage errors: annotating a record with a validation
+ * outcome must never become a new way for a publish or a worker run to fail.
+ */
+/** Typed failure codes only — never the report's free-text `error` (see
+ * PdfTemplateValidationSummary). Lives here so both the publish path and the validation
+ * worker build the summary the same way. */
+export function validationFailureCodes(errorCode: string | undefined, failures: Array<{ code: string }> | undefined): string[] {
+  const codes = new Set<string>();
+  if (errorCode) codes.add(errorCode);
+  for (const failure of failures ?? []) if (failure?.code) codes.add(failure.code);
+  return [...codes];
+}
+
+export async function writePdfTemplateValidationSummary(
+  projectId: string,
+  templateId: string,
+  version: number,
+  summary: PdfTemplateValidationSummary
+): Promise<void> {
+  try {
+    const store = await openTemplateStore(projectId);
+    const record = await store.get(versionKey(templateId, version), { type: "json" }).catch(() => null) as PdfTemplateRecord | null;
+    if (!record || record.projectId !== projectId) return;
+    // A completed outcome never loses to a stale "running" one for the same validationId,
+    // and a NEWER validationId always wins (the previous run was superseded).
+    const existing = record.lastValidation;
+    if (existing && existing.validationId === summary.validationId && existing.completedAt && !summary.completedAt) return;
+    // The run's ORIGIN does not change when its outcome lands: a validation publish started
+    // stays source "publish" when the worker later completes it.
+    const merged: PdfTemplateValidationSummary =
+      existing && existing.validationId === summary.validationId ? { ...summary, source: existing.source } : summary;
+    await store.setJSON(versionKey(templateId, version), { ...record, lastValidation: merged, updatedAt: new Date().toISOString() } satisfies PdfTemplateRecord);
+  } catch {
+    // Best-effort — see the doc comment above.
+  }
 }
 
 export interface PublishPdfTemplateResult {
@@ -561,13 +791,20 @@ export async function publishPdfTemplate(projectId: string, templateId: string, 
   const becomesLatestActive = targetVersion >= (meta.latestActiveVersion ?? 0);
   // Destructured out so the mirror below can CLEAR a field the newly-active version does not
   // declare — spreading `...meta` would leave the previous version's claim standing.
-  const { renderDataSchema: _schema, sampleData: _sample, kind: _kind, thumbnailKey: _thumb, ...metaBase } = meta;
+  const { renderDataSchema: _schema, renderDataSchemaSource: _schemaSource, sampleData: _sample, kind: _kind, thumbnailKey: _thumb, thumbnailError: _thumbErr, ...metaBase } = meta;
   const updatedMeta: PdfTemplateMeta = {
     ...metaBase,
     latestActiveVersion: Math.max(meta.latestActiveVersion ?? 0, targetVersion),
     status: "active",
     ...(becomesLatestActive
-      ? templateSummaryMirror({ ...updatedRecord, thumbnailKey: updatedRecord.thumbnailKey ?? meta.thumbnailKey ?? null })
+      ? templateSummaryMirror({
+          ...updatedRecord,
+          thumbnailKey: updatedRecord.thumbnailKey ?? meta.thumbnailKey ?? null,
+          // Same grace period as thumbnailKey above: this version's own thumbnail
+          // outcome (success, skip, or failure) has not landed yet, so keep showing
+          // whatever the listing said a moment ago rather than blanking a real error.
+          thumbnailError: updatedRecord.thumbnailError ?? meta.thumbnailError
+        })
       : templateSummaryMirror(meta)),
     updatedAt: now
   };

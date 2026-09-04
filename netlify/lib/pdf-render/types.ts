@@ -48,6 +48,18 @@ export interface RenderInput {
    * pdfme/typst/react-pdf templates (rasterizing their PDF output, e.g. with poppler, is
    * explicitly out of scope). */
   wantThumbnail?: boolean;
+  /** T1.2: per-job opt-out of strict data binding. Binding is strict by default in EVERY
+   * mode — a template that reads a variable/path the job's `data` omits fails the render
+   * with `DATA_BINDING_ERROR` instead of silently emitting empty output that still ends up
+   * in a "complete" job. `lenient: true` restores the old permissive behaviour (missing
+   * data renders as empty + an engineWarnings entry). Honored by chromium (Liquid
+   * `strictVariables`) and react-pdf (the docTree interpreter's `{{path}}`/`$if`/`$for`
+   * binding); typst has no equivalent permissive path to opt out of — accessing an
+   * undefined key in a typst dict is a compile error at the language level regardless of
+   * this flag, so typst simply ignores it. pdfme is also unaffected — its schema-field
+   * binding already defaults-then-warns unconditionally (see pdfme-render.ts's
+   * resolveRenderInputs), with no `mode`-based strict/lenient split to begin with. */
+  lenient?: boolean;
 }
 
 export interface RenderOutput {

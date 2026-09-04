@@ -16,6 +16,7 @@ import { safeError } from "./agent-artifact-jobs.js";
 import { artifactWorkerBaseUrl } from "./agent-artifact-worker-trigger.js";
 import { currentStorageGrant, forwardableGrant } from "./storage-grant.js";
 import { currentProjectDescriptor } from "./project-descriptor.js";
+import { writePdfTemplateThumbnailFailure } from "./pdf-template-store.js";
 import type { PdfRendererId } from "./pdf-render/types.js";
 
 export const THUMBNAIL_WORKER_FUNCTION = "pdf-template-thumbnail-worker-background";
@@ -97,10 +98,13 @@ export async function enqueuePdfTemplateThumbnail(
     return { queued: false };
   }
   if (!input.hasSampleData) {
-    return {
-      queued: false,
-      warning: `No thumbnail was generated for "${input.templateId}" v${input.version}: the version carries no sampleData to render. Add sampleData on create_pdf_template and publish again to get one; thumbnailKey stays null until then.`,
-    };
+    // T1.7: this is also the fix's transient publish-response WARNING; below, persist the
+    // same explanation onto the record itself so it survives past this one response —
+    // get_pdf_template / list_pdf_templates keep showing it until sampleData is added and
+    // the template is published again.
+    const message = `No thumbnail was generated for "${input.templateId}" v${input.version}: the version carries no sampleData to render. Add sampleData on create_pdf_template and publish again to get one; thumbnailKey stays null until then.`;
+    await writePdfTemplateThumbnailFailure(input.projectId, input.templateId, input.version, message);
+    return { queued: false, warning: message };
   }
   try {
     await triggerThumbnailWorker(
@@ -111,9 +115,12 @@ export async function enqueuePdfTemplateThumbnail(
     );
     return { queued: true };
   } catch (error) {
-    return {
-      queued: false,
-      warning: `The template published successfully, but its thumbnail render could not be started: ${safeError(error)}. thumbnailKey stays null; publish again to retry.`,
-    };
+    // T1.7: safe to persist verbatim — every message triggerThumbnailWorker's own errors
+    // carry is a literal string this module constructs itself (a missing base URL/token, an
+    // unreachable fetch, or an HTTP status code); none of them ever include a tenant path or
+    // blob key.
+    const message = `The template published successfully, but its thumbnail render could not be started: ${safeError(error)}. thumbnailKey stays null; publish again to retry.`;
+    await writePdfTemplateThumbnailFailure(input.projectId, input.templateId, input.version, message);
+    return { queued: false, warning: message };
   }
 }

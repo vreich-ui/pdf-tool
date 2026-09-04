@@ -24,8 +24,8 @@
  */
 import { chromium as launchChromium, type Browser, type BrowserContext, type Route } from "playwright";
 import { Liquid } from "liquidjs";
-import type { NormalizedChromiumRenderRequest, NormalizedFont, RenderMode, RenderRequirementsInput } from "../contract.js";
-import { resolveFontDir } from "../fonts.js";
+import type { NormalizedChromiumRenderRequest, NormalizedFont, RenderRequirementsInput } from "../contract.js";
+import { bundledFallbackFamily, classifyFontFamily, classifyFontFamilyStack, isCssWideKeyword, normalizeFontFamilyStack, resolveFontDir } from "../fonts.js";
 import { inspectPdf } from "../inspect.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -159,14 +159,77 @@ function buildFontFaceCss(requestFonts: NormalizedFont[]): string {
   return rules.join("\n");
 }
 
+/**
+ * Resolves a raw template/brand `font-family` value (a single family or a comma-separated
+ * stack, quoted or not) onto a family name Chromium is actually guaranteed to render:
+ *   1. an uploaded request font (`request.fonts[]`, the render request's existing per-job
+ *      font-bytes mechanism — see NormalizedFont) whose family matches, case-insensitively,
+ *      once both sides are normalized — this is the "uploaded project font" honored here;
+ *      there is no `templates/fonts/<slug>/` directory convention in this repo for the
+ *      render-service (chromium) engine to read, and this deliberately does not invent one;
+ *   2. else a bundled Noto face chosen by matching the family's generic role (sans/serif;
+ *      mono has no bundled face and folds into sans) — see fonts.ts.
+ * An unrecognized family (case 2 with no role match) still resolves, to the sans fallback:
+ * this is a quality fix, not a new way for a render to fail.
+ */
+export function resolveFontFamilyForRequest(rawFontFamily: string, requestFonts: NormalizedFont[]): string {
+  const normalized = normalizeFontFamilyStack(rawFontFamily);
+  const uploaded = requestFonts.find((font) => normalizeFontFamilyStack(font.family).toLowerCase() === normalized.toLowerCase());
+  if (uploaded) return uploaded.family;
+  // W3: read the WHOLE stack, not just its head. A brand stack names its custom face first
+  // and its generic intent last (`"Canela Deck", Georgia, serif`); classifying only the head
+  // sent every unrecognized brand name to the sans fallback, rendering serif copy in
+  // NotoSans — the wrong-font symptom this rewrite exists to fix, arriving through it.
+  return bundledFallbackFamily(classifyFontFamily(normalized) ?? classifyFontFamilyStack(rawFontFamily));
+}
+
+// Matches `@font-face { ... }` blocks (no nested braces in practice) so their OWN
+// `font-family:` declaration — which NAMES a face, rather than referencing one — is left
+// untouched by the rewrite below.
+const FONT_FACE_BLOCK_PATTERN = /@font-face\s*\{[^{}]*\}/gi;
+const FONT_FAMILY_DECLARATION_PATTERN = /font-family\s*:\s*([^;{}]+)/gi;
+
+/**
+ * Rewrites every `font-family:` declaration in template CSS (outside `@font-face` blocks) to a
+ * single, plain, correctly-quoted family name resolved by `resolve`. This is what actually
+ * fixes the wrong-font bug: a raw brand/template stack like `Georgia,'Times New Roman',serif`
+ * or an already-quoted `'Inter Variable', system-ui, sans-serif` reaches Chromium as
+ * `font-family: "NotoSerif"` / `font-family: "NotoSans"` — never re-quoted, never a stack
+ * Chromium might partially fail to parse.
+ */
+export function rewriteFontFamilyCss(css: string, resolve: (rawFontFamily: string) => string): string {
+  const fontFaceBlocks: string[] = [];
+  const placeholder = (index: number) => `/*__FONT_FACE_BLOCK_${index}__*/`;
+  const withoutFontFaceBlocks = css.replace(FONT_FACE_BLOCK_PATTERN, (block) => {
+    fontFaceBlocks.push(block);
+    return placeholder(fontFaceBlocks.length - 1);
+  });
+  const rewritten = withoutFontFaceBlocks.replace(FONT_FAMILY_DECLARATION_PATTERN, (match, rawValue: string) => {
+    // W3: `inherit` / `initial` / `unset` / `revert` are CSS-wide keywords, not family
+    // names. Reducing one to a concrete face is a NEW wrong-font bug: an element that meant
+    // to inherit its parent's serif heading face was being pinned to NotoSans instead.
+    if (isCssWideKeyword(rawValue)) return match;
+    const resolved = resolve(rawValue);
+    return `font-family: "${escapeCssString(resolved)}"`;
+  });
+  return rewritten.replace(/\/\*__FONT_FACE_BLOCK_(\d+)__\*\//g, (_match, index: string) => fontFaceBlocks[Number(index)]);
+}
+
 // ---------------------------------------------------------------------------
 // Liquid templating
 // ---------------------------------------------------------------------------
 
-function buildLiquidEngine(mode: RenderMode, partials: Record<string, string>, data: object): Liquid {
+/** T1.2: strict Liquid variable binding is now the default for EVERY render mode — a
+ * template that reads a variable the job's `data` omits fails the render with
+ * `DATA_BINDING_ERROR` (see renderChromium's catch below) instead of silently emitting empty
+ * output that still ends up in a "complete" job. `lenient` is the one per-job opt-out that
+ * restores the old permissive behaviour (was: strict only in `mode:"validation"`, silently
+ * empty in `mode:"final"` — exactly how the drlurie moisturizer brochure went out with four
+ * blank content pages). `mode` itself no longer has any say in binding strictness. */
+function buildLiquidEngine(lenient: boolean, partials: Record<string, string>, data: object): Liquid {
   return new Liquid({
     outputEscape: "escape",
-    strictVariables: mode === "validation",
+    strictVariables: !lenient,
     strictFilters: true,
     relativeReference: false,
     ownPropertyOnly: true,
@@ -188,7 +251,15 @@ function buildLiquidEngine(mode: RenderMode, partials: Record<string, string>, d
 // Document assembly
 // ---------------------------------------------------------------------------
 
-function assembleDocument(renderedHtml: string, templateCss: string, fontFaceCss: string): string {
+/** `templateCss` is tenant/template-authored raw CSS, never Liquid-rendered — its
+ * `font-family` declarations are rewritten here (see rewriteFontFamilyCss) so a brand/template
+ * font name that render-service cannot actually serve (anything but the bundled Noto faces, or
+ * an uploaded request font) resolves to a face Chromium is guaranteed to have, instead of
+ * silently falling back to whatever generic serif/sans the container happens to ship. */
+function assembleDocument(renderedHtml: string, templateCss: string, fontFaceCss: string, requestFonts: NormalizedFont[]): string {
+  const normalizedTemplateCss = rewriteFontFamilyCss(templateCss, (rawFontFamily) =>
+    resolveFontFamilyForRequest(rawFontFamily, requestFonts)
+  );
   return [
     "<!doctype html>",
     "<html>",
@@ -197,7 +268,7 @@ function assembleDocument(renderedHtml: string, templateCss: string, fontFaceCss
     "<style>",
     fontFaceCss,
     'body { font-family: "NotoSans", sans-serif; }',
-    templateCss,
+    normalizedTemplateCss,
     "</style>",
     "</head>",
     "<body>",
@@ -475,6 +546,20 @@ function errMsg(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** T1.2: liquidjs's own `UndefinedVariableError` text already names the missing variable
+ * ("undefined variable: p2Title, line:12, col:4") — that is useful on its own, so it is kept
+ * verbatim rather than replaced. What it does NOT say is that there is a per-job escape
+ * hatch, so callers debugging a newly-strict render (this used to render fine in
+ * `mode:"final"`) get pointed at `lenient` instead of having to go read this file. */
+function dataBindingErrorMessage(error: unknown): string {
+  const message = errMsg(error);
+  const isMissingVariable = error instanceof Error && /undefined variable/i.test(message);
+  const hint = isMissingVariable
+    ? " — the template reads a variable the job's data does not provide; pass options.lenient:true to render missing variables as empty instead of failing the render"
+    : "";
+  return `Liquid template render failed: ${message}${hint}`;
+}
+
 function withDeadline<T>(ms: number, run: () => Promise<T>, onTimeout: () => void): Promise<T> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -514,10 +599,10 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
   let renderedHtml: string;
   try {
     const scope = (request.data && typeof request.data === "object" ? request.data : { data: request.data ?? null }) as object;
-    const liquidEngine = buildLiquidEngine(request.mode, request.partials, scope);
+    const liquidEngine = buildLiquidEngine(request.lenient, request.partials, scope);
     renderedHtml = await liquidEngine.parseAndRender(request.templateHtml, scope);
   } catch (error) {
-    return { ok: false, code: "DATA_BINDING_ERROR", message: `Liquid template render failed: ${errMsg(error)}` };
+    return { ok: false, code: "DATA_BINDING_ERROR", message: dataBindingErrorMessage(error) };
   }
 
   let bundledFonts: Map<string, Buffer>;
@@ -528,7 +613,7 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
   }
 
   const fontFaceCss = buildFontFaceCss(request.fonts);
-  const assembledHtml = assembleDocument(renderedHtml, request.templateCss, fontFaceCss);
+  const assembledHtml = assembleDocument(renderedHtml, request.templateCss, fontFaceCss, request.fonts);
   const assetMap = new Map(request.assets.map((asset) => [asset.name, asset]));
   const warnings: string[] = [];
 

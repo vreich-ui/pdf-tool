@@ -57,6 +57,21 @@ export const MCP_TOOL_SCHEMAS = {
     materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional but conclusive when present")
   }).strict(),
 
+  inspect_pdf_artifact: z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference to inspect (must contain at least blobKey and sha256) — same shape verify_agent_artifact takes"),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact")
+  }).strict(),
+
+  preview_pdf_template: z.object({
+    projectId: z.string().min(1),
+    templateId: z.string().min(1),
+    version: z.number().int().positive().optional().describe("Specific version to preview; omit for the latest version (drafts allowed)")
+  }).strict(),
+
   resume_agent_artifact_job: z.object({
     projectId: z.string().min(1),
     jobId: z.string().min(1),
@@ -71,8 +86,8 @@ export const MCP_TOOL_SCHEMAS = {
     renderer: z.enum(REGISTERED_RENDERERS as [string, ...string[]]).optional().describe("Target renderer. DEFAULT when omitted: chromium (HTML/CSS + Liquid templates; configurable server-side via PDF_DEFAULT_RENDERER) — EXCEPT a templateJson in pdfme's fixed-layout shape (basePdf + schemas), which stays on pdfme, and a new version of an existing templateId, which inherits that template's pinned renderer. Name pdfme/typst/react-pdf explicitly to select them. The response's rendererSource says whether the renderer was explicit, template-pinned, template-shape, or default."),
     label: z.string().optional(),
     tags: z.array(z.string()).optional(),
-    renderDataSchema: z.unknown().optional().describe("JSON Schema (draft-07-compatible, via ajv) describing the shape of `data` this template version's render expects. When both renderDataSchema and sampleData are supplied, sampleData is validated against it at create AND again at publish_pdf_template — invalid ⇒ 400 with errorCode SAMPLE_DATA_SCHEMA_MISMATCH (or RENDER_DATA_SCHEMA_INVALID if renderDataSchema itself is not a compilable schema)."),
-    sampleData: z.unknown().optional().describe("Example render data for this template version (e.g. for previews). Validated against renderDataSchema (ajv) when both are present; not validated when renderDataSchema is omitted."),
+    renderDataSchema: z.unknown().optional().describe("JSON Schema (draft-07 or 2020-12, via ajv) describing the shape of `data` this template version's render expects. When both renderDataSchema and sampleData are supplied, sampleData is validated against it at create AND again at publish_pdf_template — invalid ⇒ 400 with errorCode SAMPLE_DATA_SCHEMA_MISMATCH (or RENDER_DATA_SCHEMA_INVALID if renderDataSchema itself is not a compilable schema). OMITTING it is allowed and no longer leaves the template contract-less: one is DERIVED from the template's placeholders, stored with renderDataSchemaSource:\"derived\", and flagged in the response's warnings[] for review (call derive_render_data_schema first to see and hand-correct it)."),
+    sampleData: z.unknown().optional().describe("Example render data for this template version (e.g. for previews). Validated against renderDataSchema (ajv) when both are present. When omitted, a skeleton is derived from the template's placeholders and stored with sampleDataSource:\"derived\" — publish_pdf_template renders it for the thumbnail and the automatic validation render, so replace it with realistic content when the derived filler is not representative."),
     kind: z.string().optional().describe("Free-form template category, e.g. \"article\", \"guide\", \"checklist\" — used to select a project's default template per kind. Not renderer/schema-validated here."),
     sampleAssets: z.object({ images: z.array(z.unknown()).optional() }).optional()
       .describe("The image assets `sampleData` REFERENCES, in exactly the shape a render job's `assets` takes: { images: [{assetId, dataUri} | {assetId, blobKey}] }. Supply this whenever sampleData names image assetIds (a chromium template binds them as https://render.assets.invalid/<assetId>) — publish_pdf_template's background thumbnail render resolves sampleData's images from here, so without it the stored preview shows broken images. Resolved by the same typed resolver job assets use (ASSET_SOURCE_MISSING / ASSET_NOT_FOUND / IMAGE_DECODE_ERROR), and never returned by list_pdf_templates (it carries bytes).")
@@ -110,6 +125,12 @@ export const MCP_TOOL_SCHEMAS = {
     version: z.number().int().positive().optional().describe("Version to validate; omit for the latest version (drafts allowed)"),
     data: z.unknown().describe("Worst-case sample data for the render. Must be complete: validation mode treats missing bindings as DATA_BINDING_ERROR."),
     requirements: z.object({}).passthrough().optional().describe("Same shape as job requirements (pdf.format/orientation/margins/pageCount, maxBytes); failures are reported, not thrown")
+  }).strict(),
+
+  /** T1.5: dry, read-only contract derivation — no projectId, no storage, no writes. */
+  derive_render_data_schema: z.object({
+    templateJson: z.unknown().describe("The renderer-specific template document to read placeholders from — exactly what you would send to create_pdf_template. Nothing is stored."),
+    renderer: z.enum(REGISTERED_RENDERERS as [string, ...string[]]).optional().describe("Target renderer. Omit to resolve it the same way create_pdf_template does: a pdfme fixed-layout shape (basePdf + schemas) stays on pdfme, everything else defaults to chromium.")
   }).strict(),
 
   get_pdf_template_validation: z.object({

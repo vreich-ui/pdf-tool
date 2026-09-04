@@ -4,6 +4,10 @@ import { projectBlobStore } from "./blob-store.js";
 import { currentStorageGrant } from "./storage-grant.js";
 import type { ArtifactKind, ArtifactReference } from "./artifact-core/index.js";
 import { ALL_RENDERER_IDS, type PdfRendererId } from "./pdf-render/types.js";
+import { getPdfTemplateMeta } from "./pdf-template-store.js";
+import { RenderError } from "./pdf-render/errors.js";
+import { assertRenderDataMatchesSchema } from "./pdf-render/render-data-schema.js";
+import type { QualityGateReport } from "./pdf-render/quality-gate.js";
 import {
   PROJECT_DESCRIPTOR_VERSION,
   projectGrantLimits,
@@ -175,6 +179,20 @@ export interface ArtifactJobRequest {
   preservation?: Record<string, unknown>;
   editInstructions?: ImageEditInstructions;
   requirements?: NormalizedArtifactJobRequirements;
+  /** T1.2 (BRIEF root cause #1): PDF jobs render with strict data binding by default — a
+   * template that reads a variable/path the job's `data` omits fails the render with
+   * `DATA_BINDING_ERROR` instead of silently producing blank content in a job that still
+   * reports `complete`. `lenient: true` opts a single job OUT of that strictness, restoring
+   * the old permissive behaviour (missing data renders as empty + an engineWarnings entry).
+   * Ignored by non-PDF jobs. */
+  lenient?: boolean;
+  /** T1.4 (BRIEF ruling D-A): the PDF content quality gate WARNS by default — a render whose
+   * pages come out blank, whose images did not resolve, or which still carries `[object
+   * Object]` / `{{slot}}` / a bare `undefined` still completes, carrying `warnings[]` and a
+   * `qualityGate` report for an agent or an editor to act on. `failOnQualityGate: true` opts
+   * this ONE job into a hard stop instead: the job fails with errorCode `PDF_QUALITY_GATE`
+   * and no artifact is stored. Ignored by non-PDF jobs. */
+  failOnQualityGate?: boolean;
   /** When true (or when project/env policy demands it) the job is held in a resumable
    * `blocked` state until an operator approves it, instead of running immediately. */
   requireApproval?: boolean;
@@ -537,6 +555,10 @@ export function buildArtifactJobRequestSchema() {
     transformInstructions: z.object({}).passthrough().optional(),
     preservation: z.object({}).passthrough().optional(),
     editInstructions: z.object({ change: z.string().default(""), preserve: z.array(z.string()).default([]), negativeInstructions: z.array(z.string()).default([]) }).optional(),
+    failOnQualityGate: z.boolean().optional()
+      .describe("PDF jobs only: opt this job INTO failing on the content quality gate. By default the gate is warn-only — a render with blank pages, unresolved images or surviving template tokens ([object Object], {{slot}}, a bare `undefined`) still completes and reports `qualityGate: { passed: false, findings: [...] }` plus `warnings[]` on get_agent_artifact_job_status, so the caller decides. With failOnQualityGate:true the same report instead fails the job with errorCode PDF_QUALITY_GATE and stores no artifact."),
+    lenient: z.boolean().optional()
+      .describe("PDF jobs only: opt this job OUT of the default strict data binding (a template variable/path the job's data omits normally fails the render with DATA_BINDING_ERROR). lenient:true restores the old permissive behaviour — missing data renders as empty output plus an engineWarnings entry — for callers that genuinely want a best-effort render of incomplete data."),
     requireApproval: z.boolean().optional(),
     approvalAction: z.string().min(1).optional(),
     requirements: z.object({
@@ -645,6 +667,39 @@ export async function validateArtifactJobRequest(input: unknown): Promise<{ succ
   const normalized = normalizeArtifactJobRequirements(result.data.requirements, result.data.artifactKind as ArtifactKind, result.data.projectId);
   if (normalized.issues.length > 0) return { success: false, error: { issues: normalized.issues } };
 
+  // T1.1: enforce the template's renderDataSchema (when it has one) against THIS job's
+  // `data`, right here at create time — so the agent that submitted bad data is told
+  // immediately, with every missing/invalid slot named, instead of finding out minutes
+  // later that a "complete" job produced garbage. Zod deliberately stays `data:
+  // z.unknown()` (the shape is per-template) — this is the separate, template-aware step
+  // that comes after the zod parse, not a zod refinement. Scoped to template-driven
+  // "generate" PDF jobs with a templateId: edit jobs (template_data_patch) build their
+  // render data from baseDataRef + dataPatch at render time, not from this field, and a
+  // bare templateRef never resolves to a stored template (TEMPLATE_REF_UNSUPPORTED) so
+  // there is no schema to look up. A template lookup failure here (store unavailable, or
+  // the template simply does not exist yet) is not this check's job to report — it is
+  // swallowed and left for the existing TEMPLATE_NOT_FOUND handling at render time.
+  if (result.data.artifactKind === "pdf" && result.data.operation === "generate" && result.data.templateId) {
+    const meta = await getPdfTemplateMeta(result.data.projectId, result.data.templateId).catch(() => null);
+    // T1.5: a DERIVED renderDataSchema (inferred from the template's placeholders because
+    // the author supplied none) is skipped here on purpose. It is an inference, and turning
+    // an inference into a 400 that refuses the job would break every caller of the eight
+    // schema-less drlurie templates the moment their schema is backfilled — exactly the
+    // backwards compatibility BRIEF 1 protects. It is not dropped: renderPdfArtifact checks
+    // it in final mode and reports the mismatch as a job WARNING (BRIEF D-A: findings warn,
+    // they do not block). An AUTHOR-declared schema still blocks here, unchanged.
+    if (meta?.renderDataSchema && meta.renderDataSchemaSource !== "derived") {
+      try {
+        assertRenderDataMatchesSchema(meta.renderDataSchema, result.data.data);
+      } catch (error) {
+        if (error instanceof RenderError) {
+          return { success: false, error: { issues: [{ path: ["data"], message: error.message, code: error.code }] } };
+        }
+        throw error;
+      }
+    }
+  }
+
   // Filename normalization is applied HERE, after schema validation succeeds, so the stored
   // job record and every downstream consumer (artifact index, by-filename lookup, the CMS)
   // see the normalized value rather than the raw agent-submitted string. This is the single
@@ -678,6 +733,10 @@ export interface ArtifactJobRecord extends ArtifactJobRequest {
   errorDetail?: Record<string, unknown>;
   renderMetadata?: Record<string, unknown>;
   validationResults?: Record<string, unknown>;
+  /** T1.4: the content quality gate's report for the render that produced this artifact
+   * (PDF jobs, template renders only). `passed: false` on a `complete` job is by design —
+   * see BRIEF ruling D-A. Echoed on get_agent_artifact_job_status. */
+  qualityGate?: QualityGateReport;
   /** F4: non-fatal warnings about an otherwise-successful job — e.g. the generated image
    * still exceeded requirements.maxBytes after best-effort optimization (media policy is
    * warn, not block: the artifact is stored anyway and flagged here). */
@@ -765,7 +824,7 @@ export async function writeArtifactJob(job: ArtifactJobRecord): Promise<void> {
   await store.setJSON(jobBlobKey(job.projectId, job.jobId), job);
 }
 
-export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "renderer" | "startedAt" | "warnings" | "filename">>): Promise<ArtifactJobRecord> {
+export async function updateArtifactJob(job: ArtifactJobRecord, patch: Partial<Pick<ArtifactJobRecord, "status" | "artifact" | "artifactReference" | "blocked" | "error" | "errorCode" | "errorDetail" | "renderMetadata" | "validationResults" | "qualityGate" | "selectedModel" | "executor" | "requiresAI" | "requiresModel" | "renderer" | "startedAt" | "warnings" | "filename">>): Promise<ArtifactJobRecord> {
   const updated: ArtifactJobRecord = {
     ...job,
     ...patch,
