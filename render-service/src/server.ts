@@ -8,6 +8,7 @@ import { validateRenderRequest } from "./contract.js";
 import { capturePage, validateCaptureRequest } from "./capture.js";
 import { chromiumAvailable, renderChromium } from "./engines/chromium.js";
 import { renderTypst, typstVersion } from "./engines/typst.js";
+import { popplerVersion, rasterizePdf, validateRasterizeRequest } from "./rasterize.js";
 
 const BODY_LIMIT_BYTES = 32 * 1024 * 1024; // 32 MB
 
@@ -32,7 +33,7 @@ export function buildServer(): FastifyInstance {
   };
 
   const healthHandler = async () => {
-    const [typstVer, chromiumInfo] = await Promise.all([typstVersion(), chromiumAvailable()]);
+    const [typstVer, chromiumInfo, popplerVer] = await Promise.all([typstVersion(), chromiumAvailable(), popplerVersion()]);
     return {
       ok: true,
       service: "pdf-tool-render",
@@ -40,6 +41,11 @@ export function buildServer(): FastifyInstance {
       engines: {
         typst: { available: typstVer !== null, ...(typstVer ? { version: typstVer } : {}) },
         chromium: { available: chromiumInfo.available, ...(chromiumInfo.version ? { version: chromiumInfo.version } : {}) },
+        // B2/R2: poppler is not a template ENGINE — it is the rasterizer behind
+        // /rasterize/pdf (and therefore behind non-chromium template thumbnails). It is
+        // reported here because "why did every thumbnail stop appearing" must be
+        // answerable from outside the container, exactly like the two engines above.
+        poppler: { available: popplerVer !== null, ...(popplerVer ? { version: popplerVer } : {}) },
       },
     };
   };
@@ -129,6 +135,60 @@ export function buildServer(): FastifyInstance {
         ...result.diagnostics,
         engine: { id: "chromium", executedIn: "render-service" },
       },
+    };
+  });
+
+  // B2 / RULING R2: rasterize a FINISHED PDF into one PNG per page with poppler's pdftoppm.
+  // Unlike /render/*, this route renders no template and binds no data — it takes bytes that
+  // already exist and photographs them, which is what makes it usable for BOTH a stored PDF
+  // (the rasterize_pdf_artifact tool) and for the non-chromium renderers' thumbnails.
+  // See src/rasterize.ts for the exact invocation and every refusal code.
+  fastify.post("/rasterize/pdf", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateRasterizeRequest(request.body);
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await rasterizePdf(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "RASTERIZE_ENGINE_ERROR",
+        message: `Unexpected rasterize failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      // Every input-shaped refusal is a 400 (the caller can fix it), a missing binary is a
+      // 503 (the deploy can fix it), a timeout is a 504. Nothing here is a bare 500.
+      // RASTERIZE_PAGE_TOO_LARGE is deliberately in the 400 bucket: the page box and the dpi
+      // both came from the caller, and lowering dpi is a fix available to it.
+      const status =
+        result.code === "RASTERIZE_TIMEOUT"
+          ? 504
+          : result.code === "RASTERIZE_UNAVAILABLE"
+            ? 503
+            : result.code === "RASTERIZE_ENGINE_ERROR"
+              ? 500
+              : 400;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      pages: result.pages,
+      diagnostics: { ...result.diagnostics, engine: { id: "poppler-pdftoppm", executedIn: "render-service" } },
     };
   });
 

@@ -44,9 +44,11 @@ export interface RenderInput {
   mode: "final" | "validation";
   /** D3: ask the engine for a first-page PNG alongside the PDF. ONLY the chromium engine
    * honors this — it is the only renderer that owns a browser page to screenshot. Every
-   * other engine ignores it and returns no `thumbnailPng`, so `thumbnailKey` stays null for
-   * pdfme/typst/react-pdf templates (rasterizing their PDF output, e.g. with poppler, is
-   * explicitly out of scope). */
+   * other engine ignores it and returns no `thumbnailPng`.
+   * B2/RULING R2: that no longer means those templates go without a thumbnail. The
+   * publish-time thumbnail worker rasterizes page 1 of their finished PDF with poppler
+   * instead (see pdf-template-thumbnail.ts's `thumbnailStrategyFor`), so this flag now marks
+   * WHICH of two thumbnail strategies applies, not whether one exists. */
   wantThumbnail?: boolean;
   /** T1.2: per-job opt-out of strict data binding. Binding is strict by default in EVERY
    * mode — a template that reads a variable/path the job's `data` omits fails the render

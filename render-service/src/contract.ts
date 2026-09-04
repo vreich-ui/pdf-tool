@@ -73,10 +73,12 @@ export interface RenderOptionsInput {
   mode?: RenderMode;
   timeoutMs?: number;
   /** D3: chromium only — also return a PNG screenshot of the FIRST page alongside the PDF.
-   * Ignored by the typst engine (and by every non-chromium renderer upstream): there is no
-   * rasterizer on this side for a PDF that was produced outside a browser, and poppler
-   * rasterization is explicitly out of scope. Absent/false ⇒ byte-identical behaviour to
-   * before this flag existed. */
+   * Ignored by the typst engine (and by every non-chromium renderer upstream): this flag
+   * screenshots a live browser page, which only the chromium engine has. B2/RULING R2 added
+   * the complementary path for everything else — POST /rasterize/pdf rasterizes a FINISHED
+   * PDF with poppler's pdftoppm (see src/rasterize.ts), which is what gives the non-chromium
+   * renderers thumbnails. The two do not overlap and neither replaces the other.
+   * Absent/false ⇒ byte-identical behaviour to before this flag existed. */
   wantThumbnail?: boolean;
   /** T1.2: per-job opt-out of strict Liquid variable binding on the chromium engine. Binding
    * is strict by default (both `mode:"final"` and `mode:"validation"`) — a template that

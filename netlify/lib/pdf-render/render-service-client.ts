@@ -42,7 +42,8 @@ export interface RenderServiceRequest {
   fonts?: RenderServiceFont[];
   /** D3: `wantThumbnail` asks the chromium engine for a first-page PNG alongside the PDF.
    * The typst engine accepts and ignores it (see the service contract) — no non-chromium
-   * renderer produces a thumbnail. */
+   * renderer SCREENSHOTS one. B2/RULING R2: those renderers' thumbnails come from
+   * ./rasterize-client.ts (poppler on the finished PDF) instead. */
   options?: { mode?: "final" | "validation"; timeoutMs?: number; wantThumbnail?: boolean };
   maxOutputBytes?: number;
 }

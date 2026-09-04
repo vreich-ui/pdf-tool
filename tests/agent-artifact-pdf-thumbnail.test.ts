@@ -12,8 +12,9 @@
  *   2. a thumbnail that cannot be started leaves the publish successful, with a warning.
  *   3. a thumbnail render that comes back without a PNG leaves thumbnailKey null — the
  *      publish that queued it already returned 200 and is untouched.
- *   4. a non-chromium renderer publishes with thumbnailKey null, queues nothing, and the
- *      worker skips it (rasterizing non-chromium PDF output is out of scope).
+ *   4. B2/RULING R2: a non-chromium renderer is queued like any other — its thumbnail comes
+ *      from rasterizing page 1 of its finished PDF with poppler rather than from a browser
+ *      screenshot (the generated-thumbnail case lives in agent-artifact-pdf-rasterize.test.ts).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -471,34 +472,40 @@ test("render service returns a PDF but no thumbnail: worker reports failed, publ
   }
 });
 
-// --- 4. non-chromium renderers ---------------------------------------------
+// --- 4. non-chromium renderers (B2/RULING R2) -------------------------------
 
-test("non-chromium renderer: publishes with thumbnailKey null, no warning, nothing queued", async () => {
+/**
+ * B2 REPLACED THE OLD BEHAVIOUR HERE. Until R2, a non-chromium publish queued nothing and
+ * the worker skipped with `renderer_not_chromium`, because only chromium owns a browser page
+ * to screenshot. Poppler rasterizes a FINISHED PDF regardless of which engine produced it,
+ * so pdfme/typst/react-pdf templates are now queued and thumbnailed like any other — see
+ * tests/agent-artifact-pdf-rasterize.test.ts for the end-to-end generated case.
+ */
+test("non-chromium renderer: publishes with a thumbnail QUEUED (rasterize path), no warning", async () => {
   await createTemplate("thumb-pdfme", { templateJson: PDFME_TEMPLATE, renderer: "pdfme", sampleData: { title: "Hello" } });
 
   const { result: published, trigger } = await withStubbedTrigger(() => publish("thumb-pdfme"));
   assert.equal(published.statusCode, 200, JSON.stringify(published.body));
   assert.equal(published.body.status, "active");
+  // The publish response still carries the PRE-thumbnail value; the worker sets it after.
   assert.equal(published.body.thumbnailKey, null);
-  assert.equal(published.body.thumbnailQueued, undefined);
-  // Not a fault, so not a warning: only chromium owns a page to screenshot, and rasterizing
-  // other engines' PDF output (poppler) is out of scope.
+  assert.equal(published.body.thumbnailQueued, true);
   assert.equal(published.body.thumbnailWarning, undefined);
-  assert.equal(trigger, undefined);
-
-  assert.equal((await getTemplate("thumb-pdfme")).thumbnailKey, null);
+  assert.ok(trigger, "a non-chromium publish must now dispatch the thumbnail worker");
 });
 
-test("thumbnail worker on a non-chromium version: skipped, never a render", async () => {
+test("thumbnail worker on a non-chromium version: renders and rasterizes, and reports a missing rasterizer honestly", async () => {
   await createTemplate("thumb-pdfme-worker", { templateJson: PDFME_TEMPLATE, renderer: "pdfme", sampleData: { title: "Hello" } });
   await withStubbedTrigger(() => publish("thumb-pdfme-worker"));
 
-  // No RENDER_SERVICE_URL is configured in this test: reaching a render at all would throw
-  // RENDER_SERVICE_UNCONFIGURED, so "skipped" proves nothing was rendered.
+  // No RENDER_SERVICE_URL is configured in this test. pdfme renders in-process, so the
+  // render itself succeeds and the failure lands on the RASTERIZE hop — which is exactly
+  // what proves the worker no longer skips non-chromium versions.
   const worker = await runThumbnailWorker({ storage: STORAGE, projectId: PROJECT, templateId: "thumb-pdfme-worker", version: 1 });
   assert.equal(worker.statusCode, 200, JSON.stringify(worker.body));
-  assert.equal(worker.body.status, "skipped");
-  assert.equal(worker.body.reason, "renderer_not_chromium");
+  assert.equal(worker.body.status, "failed");
+  assert.equal(worker.body.reason, "rasterize_failed");
+  assert.equal(worker.body.errorCode, "RENDER_SERVICE_UNCONFIGURED");
   assert.equal(worker.body.thumbnailKey, null);
 });
 

@@ -9,12 +9,16 @@
  *
  * SCOPING DECISION (first page only, not documented as anything else): the render service
  * (render-service/src/engines/chromium.ts) returns exactly one screenshot — the first page —
- * per render, via `wantThumbnail`. There is no per-page rendering path anywhere in this
- * repo. A genuine multi-page preview would need a render-service change (rasterize every
- * page — e.g. loop the screenshot call once per PDF page, or convert the finished PDF's
- * pages individually) which is out of scope for this task. This tool is honest about that:
- * its description says "first page only", `firstPageOnly: true` rides on every response, and
- * `pageCount` is always 1 even when the underlying template renders more pages.
+ * per render, via `wantThumbnail`, and this tool is a thin surface over that one call. It is
+ * honest about that: its description says "first page only", `firstPageOnly: true` rides on
+ * every response, and `pageCount` is always 1 even when the underlying template renders more
+ * pages.
+ * B2/RULING R2 UPDATE: a per-page rasterizer now DOES exist (poppler, POST /rasterize/pdf —
+ * see pdf-render/rasterize-client.ts and the `rasterize_pdf_artifact` tool), so a genuine
+ * multi-page template preview is no longer blocked on a render-service change; it is simply
+ * not what this tool does today. Nothing here was rewired: this preview keeps the chromium
+ * screenshot it has always returned, and B2's rasterize path is used by the publish-time
+ * thumbnail worker and by rasterize_pdf_artifact instead.
  *
  * ASYNC, LIKE VALIDATE (not like a synchronous render): a cold chromium render can exceed a
  * synchronous function's budget (see pdf-template-validation.ts's identical note), and this

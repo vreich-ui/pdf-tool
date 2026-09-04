@@ -2,6 +2,9 @@ import { z } from "zod";
 import { zodToJsonSchema } from "./zod-json-schema.js";
 import { artifactJobRequestZodSchema } from "./agent-artifact-jobs.js";
 import { REGISTERED_RENDERERS } from "./pdf-render/registry.js";
+// B2: the rasterize caps are declared once, in the client that talks to the render service,
+// and reused here so the advertised schema can never drift from what is enforced.
+import { DEFAULT_RASTERIZE_DPI, MAX_RASTERIZE_DPI, MAX_RASTERIZE_PAGES, MAX_RASTERIZE_PAGE_PIXELS, MIN_RASTERIZE_DPI } from "./pdf-render/rasterize-client.js";
 
 /**
  * S4 (surface): single zod-sourced validator for the MCP transport layer.
@@ -64,6 +67,25 @@ export const MCP_TOOL_SCHEMAS = {
     blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
     sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
     materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact")
+  }).strict(),
+
+  rasterize_pdf_artifact: z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference of the stored PDF to rasterize (must contain at least blobKey and sha256) — same shape verify_agent_artifact / inspect_pdf_artifact take"),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact"),
+    // NOTE (B2): the RANGE bounds are deliberately NOT expressed as zod .min()/.max() here,
+    // unlike the type constraints. A zod bound fails at the transport layer with the generic
+    // "Invalid input" + issues[] shape, which is exactly what this tool's contract promises
+    // NOT to do — every dpi/page-cap refusal must carry its own named errorCode
+    // (RASTERIZE_DPI_OUT_OF_RANGE / RASTERIZE_TOO_MANY_PAGES). The bounds are enforced in
+    // agent-artifact-pdf-rasterize.ts and again, authoritatively, in the render service.
+    pages: z.array(z.number().int()).optional()
+      .describe(`1-based page numbers to rasterize; sorted and de-duplicated server-side so the response is always in document order. Omit for EVERY page. At most ${MAX_RASTERIZE_PAGES} pages per call — a larger request (or a document larger than that when pages is omitted) is REFUSED with errorCode RASTERIZE_TOO_MANY_PAGES, never silently truncated. A page beyond the document is refused with RASTERIZE_PAGE_OUT_OF_RANGE. This call is synchronous: a page count that cannot finish inside the function's remaining clock at the requested dpi is refused with RASTERIZE_BUDGET_EXCEEDED, which names how many pages would fit.`),
+    dpi: z.number().int().optional()
+      .describe(`Rasterization resolution, ${MIN_RASTERIZE_DPI}-${MAX_RASTERIZE_DPI} dpi (default ${DEFAULT_RASTERIZE_DPI}). Validated, NOT clamped: an out-of-range value is refused with errorCode RASTERIZE_DPI_OUT_OF_RANGE rather than silently answered at a different resolution. dpi is also what the per-page pixel cap is measured at: a page over ${Math.round(MAX_RASTERIZE_PAGE_PIXELS / 1_000_000)} megapixels at the dpi you asked for is refused with RASTERIZE_PAGE_TOO_LARGE, and the message names the highest dpi that page fits at.`)
   }).strict(),
 
   preview_pdf_template: z.object({
