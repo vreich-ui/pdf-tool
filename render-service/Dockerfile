@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 #
-# pdf-tool-render: fastify + native typst 0.15.0 binary + Playwright/Chromium.
+# pdf-tool-render: fastify + native typst 0.15.0 binary + Playwright/Chromium + poppler-utils
+# (pdftoppm, the PDF page rasterizer behind /rasterize/pdf).
 # NOT built in this session (no docker daemon available) — built by deploy/cloud-run.sh via
 # `gcloud builds submit`. TYPST_SHA256 has no default: the build fails loudly rather than
 # trusting an unpinned download.
@@ -58,6 +59,15 @@ RUN npm prune --omit=dev
 # is already set by this base image — left untouched here). Ships a non-root `pwuser` account.
 FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble AS runtime
 WORKDIR /app
+
+# B2 / RULING R2: poppler's pdftoppm is the PDF rasterizer behind POST /rasterize/pdf, and
+# therefore behind BOTH the rasterize_pdf_artifact tool and thumbnails for the non-chromium
+# renderers (pdfme / typst / react-pdf), none of which own a browser page to screenshot.
+# poppler-utils is the only Debian/Ubuntu package that ships pdftoppm; without it the route
+# answers RASTERIZE_UNAVAILABLE rather than failing opaquely.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends poppler-utils \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=typst-fetch /usr/local/bin/typst /usr/local/bin/typst
 COPY --from=build /app/dist ./dist

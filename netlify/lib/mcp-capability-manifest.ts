@@ -38,7 +38,7 @@ export const MCP_CAPABILITIES: McpCapability[] = [
     id: "artifact_generation_pdf",
     description: "Render a PDF artifact from a stored template and retrieve it once complete.",
     requiredTools: ["create_agent_artifact_job", "get_agent_artifact_job_status", "get_pdf_template", "list_pdf_templates"],
-    optionalTools: ["verify_agent_artifact", "resume_agent_artifact_job", "get_agent_artifact_by_slot", "get_agent_artifact_by_filename", "inspect_pdf_artifact"]
+    optionalTools: ["verify_agent_artifact", "resume_agent_artifact_job", "get_agent_artifact_by_slot", "get_agent_artifact_by_filename", "inspect_pdf_artifact", "rasterize_pdf_artifact"]
   },
   {
     id: "template_lifecycle",

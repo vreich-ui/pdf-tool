@@ -75,7 +75,47 @@ export type RenderErrorCode =
    * raised ONLY for a job created with `failOnQualityGate: true`. The gate is warn-only by
    * default: a failing report normally rides along on a `complete` job as `qualityGate` plus
    * `warnings[]`, for an agent or an editor to act on. */
-  | "PDF_QUALITY_GATE";
+  | "PDF_QUALITY_GATE"
+  /** B2/RULING R2 — every way `rasterize_pdf_artifact` (and the non-chromium thumbnail path
+   * that shares its machinery) can refuse. Each maps 1:1 onto a render-service
+   * RasterizeErrorCode (render-service/src/rasterize.ts) except the two artifact-resolution
+   * codes, which are raised on this side before any bytes leave Netlify. */
+  /** The verified reference names no readable blob in the project's artifacts store. */
+  | "RASTERIZE_ARTIFACT_NOT_FOUND"
+  /** The blob is not a PDF — either its reference says so (artifactKind/contentType) or its
+   * bytes lack the %PDF- header. Rasterizing an image or a JSON snapshot is a caller error,
+   * not an engine failure. */
+  | "RASTERIZE_ARTIFACT_NOT_PDF"
+  /** `dpi` outside the supported 72..150 band. Validated, never clamped: silently returning
+   * 150 for a request that asked for 600 would misdescribe the output. */
+  | "RASTERIZE_DPI_OUT_OF_RANGE"
+  /** A requested page number is < 1 or beyond the document's own page count. */
+  | "RASTERIZE_PAGE_OUT_OF_RANGE"
+  /** More than the per-call page cap was requested (explicitly, or implied by a document
+   * larger than the cap). The call is REFUSED rather than silently truncated. */
+  | "RASTERIZE_TOO_MANY_PAGES"
+  /** A requested page would rasterize to more pixels than the per-page cap allows at the
+   * requested dpi. Capping dpi and page count does not bound the work — the page BOX is
+   * caller-supplied — and a page in the refused band OOMs the render-service container
+   * (measured: 25000x25000px = 2.45 GB RSS against a 2Gi limit shared by two requests). See
+   * MAX_RASTERIZE_PAGE_PIXELS in render-service/src/rasterize.ts for the derivation. Raised
+   * on BOTH sides: a fast local refusal here, authoritatively in the service before it
+   * spawns poppler. */
+  | "RASTERIZE_PAGE_TOO_LARGE"
+  /** The requested pages at the requested dpi cannot plausibly finish inside the remaining
+   * synchronous-function budget (netlify/lib/execution-budget.ts). Refused BEFORE any page is
+   * rasterized or stored, so the caller gets a named refusal it can act on instead of a
+   * gateway 5xx and a half-written set of page artifacts. Netlify-side only: the render
+   * service has no notion of the calling function's clock. */
+  | "RASTERIZE_BUDGET_EXCEEDED"
+  /** The pages rasterized, but writing one of them into the project's artifacts store
+   * failed. Distinct from RASTERIZE_FAILED: poppler did its job, the store did not. */
+  | "RASTERIZE_STORE_FAILED"
+  /** poppler's pdftoppm is missing from the render-service image (see
+   * render-service/Dockerfile) — a deploy fault, distinct from a bad request. */
+  | "RASTERIZE_UNAVAILABLE"
+  /** poppler ran and failed. The only non-input rasterize failure. */
+  | "RASTERIZE_FAILED";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

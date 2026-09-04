@@ -7,6 +7,12 @@
  * best-effort: **a thumbnail failure never fails a publish**. The publish response carries a
  * `thumbnailWarning` string instead, exactly like the existing `validationWarning`.
  *
+ * B2/RULING R2: this is no longer chromium-only. A non-chromium template (pdfme / typst /
+ * react-pdf) is queued exactly the same way; the worker renders its PDF and rasterizes page 1
+ * with poppler instead of screenshotting a browser page (see `thumbnailStrategyFor`). Both
+ * strategies end at the same `writePdfTemplateThumbnail`/`thumbnailKey`, so nothing
+ * downstream — the listing, get_pdf_template, the platform — has to know which one ran.
+ *
  * Split from pdf-template-thumbnail-worker.ts for the same reason pdf-template-validation.ts
  * is split from its worker: mcp.ts (via pdf-template-mcp.ts) imports THIS file, so this file
  * must never statically reach pdf-render/render.js and drag the whole render-capable engine
@@ -21,15 +27,40 @@ import type { PdfRendererId } from "./pdf-render/types.js";
 
 export const THUMBNAIL_WORKER_FUNCTION = "pdf-template-thumbnail-worker-background";
 
-/** Only the chromium engine owns a browser page to screenshot. Rasterizing the PDF output of
- * the other engines (poppler et al.) is explicitly out of scope, so their templates publish
- * with `thumbnailKey: null` and no warning — it is the designed steady state, not a fault. */
+/** The one engine that owns a live browser page to screenshot.
+ *
+ * B2/RULING R2: this is NO LONGER the gate for HAVING a thumbnail. Every other renderer's
+ * finished PDF is rasterized with poppler instead (see `thumbnailStrategyFor` and
+ * pdf-template-thumbnail-worker.ts), which is precisely why poppler was chosen over
+ * pdfjs-in-chromium — pdfme/typst/react-pdf templates now publish WITH a thumbnail. This
+ * constant survives because two things still legitimately depend on "which renderer owns a
+ * browser page": the screenshot strategy below, and `preview_pdf_template`, whose
+ * first-page-screenshot preview is chromium-only (see pdf-template-preview.ts). */
 export const THUMBNAIL_RENDERER: PdfRendererId = "chromium";
+
+/** How a given renderer's publish-time thumbnail is produced.
+ *   - "screenshot": chromium photographs its own live page 1 (`wantThumbnail`).
+ *   - "rasterize":  the finished PDF's page 1 goes through poppler (`/rasterize/pdf`).
+ * Both end at the same place — `writePdfTemplateThumbnail` and one `thumbnailKey`. */
+export type ThumbnailStrategy = "screenshot" | "rasterize";
+
+export function thumbnailStrategyFor(renderer: PdfRendererId): ThumbnailStrategy {
+  return renderer === THUMBNAIL_RENDERER ? "screenshot" : "rasterize";
+}
+
+/** Chromium lays its thumbnail out at the 96dpi reference its print layout uses (see
+ * firstPageClipPx in render-service/src/engines/chromium.ts), so an A4 page 1 comes back
+ * ~794x1123. The rasterized path uses the same 96 dpi so a pdfme thumbnail and a chromium
+ * thumbnail are the same size on screen — a listing must not have two sizes of preview. */
+export const THUMBNAIL_RASTERIZE_DPI = 96;
 
 export interface EnqueuePdfTemplateThumbnailInput {
   projectId: string;
   templateId: string;
   version: number;
+  /** The published version's renderer. B2/RULING R2: no longer a gate — every renderer gets
+   * a thumbnail now (the worker picks screenshot vs rasterize from the record itself); kept
+   * on the input because callers already pass it and it documents what was published. */
   renderer: PdfRendererId;
   /** Whether the published version actually carries `sampleData` to render. */
   hasSampleData: boolean;
@@ -93,10 +124,6 @@ export async function enqueuePdfTemplateThumbnail(
   input: EnqueuePdfTemplateThumbnailInput,
   options: { baseUrl?: string; token?: string; event?: TriggerEvent; timeoutMs?: number } = {}
 ): Promise<EnqueuePdfTemplateThumbnailResult> {
-  if (input.renderer !== THUMBNAIL_RENDERER) {
-    // Designed steady state, not a failure — no warning.
-    return { queued: false };
-  }
   if (!input.hasSampleData) {
     // T1.7: this is also the fix's transient publish-response WARNING; below, persist the
     // same explanation onto the record itself so it survives past this one response —

@@ -2,7 +2,8 @@
 
 Stateless Cloud Run service (europe-west1) that renders PDFs using two engines: the native
 typst 0.15.0 binary (`POST /render/typst`) and Playwright/Chromium with LiquidJS templating
-(`POST /render/chromium`). This workspace has its own `package.json`/`node_modules` and is
+(`POST /render/chromium`) — plus poppler's `pdftoppm`, which rasterizes a FINISHED PDF into
+page PNGs (`POST /rasterize/pdf`, B2/RULING R2). This workspace has its own `package.json`/`node_modules` and is
 never touched by Netlify's esbuild — see `docs/plans/MULTI_RENDERER_PLAN.md`, "Render
 service (Cloud Run, europe-west1)" and "Sandboxing" for the design rationale.
 
@@ -11,13 +12,18 @@ service (Cloud Run, europe-west1)" and "Sandboxing" for the design rationale.
 ### `GET /health` (unauthenticated; `/healthz` kept as a local alias — Google's frontend intercepts the exact path `/healthz` on *.run.app)
 
 ```json
-{ "ok": true, "service": "pdf-tool-render", "engines": { "typst": { "available": true, "version": "typst 0.15.0 (…)" }, "chromium": { "available": true, "version": "141.0.7390.37" } } }
+{ "ok": true, "service": "pdf-tool-render", "engines": { "typst": { "available": true, "version": "typst 0.15.0 (…)" }, "chromium": { "available": true, "version": "141.0.7390.37" }, "poppler": { "available": true, "version": "pdftoppm version 25.03.0" } } }
 ```
 
 `engines.chromium` reflects `chromiumAvailable()` — the first successful probe launches (and
 keeps warm) the same browser singleton every render uses, so a healthy `/health` response also
 means the next `/render/chromium` call doesn't pay a cold-launch cost. A failed probe is never
 cached (so `/health` recovers once the browser becomes available), mirroring `typstVersion()`.
+
+`engines.poppler` is not a template engine — it is `pdftoppm`, the rasterizer behind
+`POST /rasterize/pdf` (and therefore behind every non-chromium template thumbnail). It is
+reported here so "why did the thumbnails stop appearing" is answerable from outside the
+container. Same never-cache-a-failure probe contract as the two engines above.
 
 ### `POST /render/typst`
 
@@ -153,8 +159,10 @@ byte-identical to one from before the flag existed** (asserted in
 cap — is an `engineWarnings` entry with no `thumbnailPngBase64`, never an error status.
 
 `/render/typst` accepts and ignores `options.wantThumbnail`: there is no browser page to
-screenshot, and rasterizing a finished PDF (poppler et al.) is out of scope. Downstream, that
-means only `chromium` PDF templates ever get a `thumbnailKey`.
+screenshot. B2/RULING R2 added the complementary path for everything else — `POST
+/rasterize/pdf` below rasterizes a finished PDF with poppler, which is how non-chromium
+templates (pdfme/typst/react-pdf) now get a `thumbnailKey`. The two are complementary:
+`wantThumbnail` photographs a live chromium page, `/rasterize/pdf` photographs bytes.
 
 `overflows` is present only in `options.mode: "validation"`, and is best-effort: it comes
 from a `page.evaluate()` post-layout scan for elements whose `scrollWidth`/`scrollHeight`
@@ -205,6 +213,92 @@ Failure (always JSON, never bytes):
 - `template.css` is **not** Liquid-templated — it is inlined into `<style>` verbatim (after a
   default `body { font-family: "NotoSans", sans-serif; }` rule the template's own CSS can
   override).
+
+### `POST /rasterize/pdf` (B2 / RULING R2 — poppler)
+
+Header: `x-render-secret: <RENDER_SERVICE_SECRET>`.
+
+Rasterizes a PDF that already exists into one PNG per requested page. It renders no template
+and binds no data — it takes bytes and photographs them — which is exactly why it works for
+PDFs produced by ANY engine, and therefore why it (not pdfjs-in-chromium) was chosen: it is
+what gives the non-chromium renderers thumbnails.
+
+Request:
+
+```json
+{ "pdfBase64": "JVBERi0…", "pages": [1, 2, 3], "dpi": 150, "timeoutMs": 60000 }
+```
+
+| Field        | Required | Notes                                                                                             |
+| ------------ | -------- | ------------------------------------------------------------------------------------------------- |
+| `pdfBase64`  | yes      | Decoded, size-capped at 25 MB, and required to start with `%PDF-`                                  |
+| `pages`      | no       | 1-based page numbers. Sorted + de-duplicated server-side. Omitted = every page. Max 40 per call    |
+| `dpi`        | no       | 72–150, default 150. **Validated, never clamped**                                                 |
+| _(per page)_ | —        | Each requested page must rasterize to ≤ **80 megapixels** at the requested dpi, else `RASTERIZE_PAGE_TOO_LARGE` |
+| `timeoutMs`  | no       | Whole-call budget, clamped to 1000–120000 (default 60000); each page additionally gets 20 s        |
+
+Success:
+
+```json
+{
+  "ok": true,
+  "pages": [{ "pageIndex": 1, "widthPx": 1240, "heightPx": 1754, "sizeBytes": 84213, "pngBase64": "iVBORw0KGgo…" }],
+  "diagnostics": { "pageCount": 3, "dpi": 150, "rasterizedPageCount": 1, "engine": { "id": "poppler-pdftoppm", "executedIn": "render-service" } }
+}
+```
+
+`pageIndex` is 1-based in the SOURCE document and the response is always in document order;
+`diagnostics.pageCount` is the source document's total, even when only a window was rendered.
+
+**Invocation.** One child process per requested page:
+
+```
+pdftoppm -png -r <dpi> -f <n> -l <n> -singlefile <tmp>/input.pdf <tmp>/page-<n>
+```
+
+`-r` sets the resolution (`dpi` maps straight onto it); `-f`/`-l` select the single page
+(`pages` maps onto one invocation per entry); `-singlefile` makes the output name exactly
+`<tmp>/page-<n>.png` — without it pdftoppm appends its own zero-padded number whose width
+depends on the last page rendered, so page 7's filename would differ between a 9- and a
+10-page document. One spawn per page also means `pages: [1, 40]` rasterizes two pages, not
+forty. The child is spawned with a scrubbed environment (PATH only) into a per-call
+`mkdtemp` root that is always removed.
+
+Failure (always JSON, never bytes):
+
+| Status | `code`                        | When                                                                                  |
+| ------ | ----------------------------- | --------------------------------------------------------------------------------------- |
+| 400    | `RASTERIZE_PDF_INVALID`       | No decodable PDF: bad base64, empty, over the 25 MB cap, no `%PDF-` header, unparseable   |
+| 400    | `RASTERIZE_DPI_OUT_OF_RANGE`  | `dpi` not an integer, or outside 72–150                                                   |
+| 400    | `RASTERIZE_PAGE_OUT_OF_RANGE` | A `pages` entry is not an integer ≥ 1, `pages` is empty, or a page is beyond the document |
+| 400    | `RASTERIZE_TOO_MANY_PAGES`    | More than 40 pages requested, or `pages` omitted on a document with more than 40 pages. **Refused, never truncated** |
+| 400    | `RASTERIZE_PAGE_TOO_LARGE`    | A requested page exceeds the 80-megapixel per-page cap at this dpi. Refused **before** poppler is spawned; the message names the dpi it would fit at |
+| 401    | `RENDER_SERVICE_AUTH`         | Missing/wrong `x-render-secret`                                                           |
+| 500    | `RASTERIZE_ENGINE_ERROR`      | pdftoppm ran and failed, produced no/empty/truncated PNG, or **exited 0 while producing a degenerate image** (it reports some fatal conditions on stderr with a zero exit — see below) |
+| 503    | `RASTERIZE_UNAVAILABLE`       | `pdftoppm` is not installed in this image (see the `poppler-utils` install in `Dockerfile`) |
+| 504    | `RASTERIZE_TIMEOUT`           | The rasterization did not finish within `timeoutMs` and was killed                        |
+
+**Why there is a pixel cap and not just a dpi cap.** poppler allocates one framebuffer of
+`ceil(w_pt·dpi/72) × ceil(h_pt·dpi/72)` pixels at ~4.1 bytes each, and the page box comes from
+the document, not from the request — so capping dpi and page count bounds neither memory nor
+time. Measured on poppler 22.02.0, one page, at the default 150 dpi:
+
+| page box | output | peak RSS | wall |
+|---|---|---|---|
+| 2000 pt | 4167×4167 (17.4 Mpx) | 77 MB | 0.48 s |
+| 3000 pt | 6250×6250 (39.1 Mpx) | 162 MB | 0.77 s |
+| 4300 pt | 8959×8959 (80.3 Mpx) | 330 MB | 1.82 s |
+| 6000 pt | 12500×12500 (156 Mpx) | 620 MB | — |
+| 12000 pt | 25000×25000 (625 Mpx) | **2.45 GB** | 13.1 s |
+
+The container is `--memory=2Gi --concurrency=2` and also hosts the capture plane's chromium, so
+the 80-megapixel cap (≈330 MB measured) is what two concurrent worst-case rasterizes can share.
+It still allows A0 (34.9 Mpx), ARCH E (38.9 Mpx) and ISO 2A0 (69.7 Mpx) at the maximum dpi.
+
+**pdftoppm's exit code is not a verdict.** Past its own allocation limit — a 14400 pt page (the
+PDF spec's maximum) at 150 dpi reproduces it — pdftoppm prints `Bogus memory allocation size`
+on **stderr**, writes a 1×1 PNG and **exits 0**. The output is therefore validated, not just the
+exit status: a degenerate image is `RASTERIZE_ENGINE_ERROR` carrying poppler's own stderr.
 
 ### `POST /capture/page` (T12.8 capture plane)
 
@@ -379,6 +473,7 @@ directly on bytes, and is intentionally not used here.)
 | `RENDER_SERVICE_FONT_DIR`        | Bundled-fonts directory (typst `--font-path`; chromium's inlined `@font-face` source)             | `/srv/fonts`, else the local `fonts/` dir                       |
 | `RENDER_CHROMIUM_ALLOWED_HOSTS`  | Comma-separated hostnames allowed through the chromium network sandbox (see Sandboxing)           | `""` (nothing allowed — everything non-virtual is blocked)     |
 | `CHROMIUM_EXECUTABLE_PATH`       | Explicit path to a Chromium executable, passed as Playwright's `launch({ executablePath })`. **Not needed in the Docker image** (the pinned `mcr.microsoft.com/playwright:v<X.Y.Z>-noble` base ships the exact matching browser). Exists for local dev / CI containers where a pre-installed Chromium revision doesn't match the installed `playwright` npm version's expected revision — e.g. this repo's dev container ships Chromium revision 1194 under `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`, while `playwright@1.61.1`'s auto-discovery looks for revision 1228; set `CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome` to bypass that lookup entirely. | — (Playwright's normal `PLAYWRIGHT_BROWSERS_PATH`-based auto-discovery) |
+| `PDFTOPPM_BIN`                   | Path to poppler's `pdftoppm` (the `/rasterize/pdf` rasterizer)                                    | `pdftoppm` (resolved via `PATH`; installed as `poppler-utils` in the image) |
 | `PORT`                           | HTTP port                                                                                          | `8080`                                                          |
 
 ## Local development
@@ -416,6 +511,11 @@ npm test    # tsx --test tests/*.test.ts
 - `tests/typst-integration.test.ts` detects a usable typst binary (`TYPST_BIN` or `typst` on
   `PATH`) and skips every case if none is found, so `npm test` stays green in environments
   without the binary.
+- `tests/rasterize.test.ts` covers `POST /rasterize/pdf`. Its contract-level half (every
+  refusal code, the dpi/pages validation, auth) runs everywhere; its integration half builds a
+  deterministic 3-page PDF with `pdf-lib` in the test itself (no committed binary fixture) and
+  skips with a printed note when `pdftoppm` is not on `PATH` — the `poppler-utils` install in
+  `Dockerfile` is what guarantees it in deploy.
 - `tests/chromium-integration.test.ts` probes `chromiumAvailable()` (falling back to
   `CHROMIUM_EXECUTABLE_PATH=/opt/pw-browsers/chromium-1194/chrome-linux/chrome` if the env var
   isn't already set — this dev container's known-good local Chromium — before probing) and

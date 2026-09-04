@@ -4,8 +4,12 @@
  * reference to renderPdfArtifact (same rationale as pdf-template-validation-worker.ts). This
  * module is imported only by pdf-template-thumbnail-worker-background.ts.
  *
- * Renders the published version's own `sampleData` through the normal render path with
- * `wantThumbnail`, then stores the first-page PNG and sets `thumbnailKey`. It runs AFTER the
+ * Renders the published version's own `sampleData` through the normal render path, then
+ * stores the first-page PNG and sets `thumbnailKey`. B2/RULING R2 gave it two ways to get
+ * that PNG, chosen by `thumbnailStrategyFor(record.renderer)`: chromium screenshots its own
+ * live page (`wantThumbnail`, unchanged), and every other renderer's finished PDF goes
+ * through poppler's `/rasterize/pdf` for page 1 — so pdfme/typst/react-pdf templates finally
+ * get thumbnails instead of a permanent `thumbnailKey: null`. It runs AFTER the
  * publish has already returned 200, so nothing it does can turn a successful publish into a
  * failure: every outcome below is a 200 with a `status` the caller can read.
  *
@@ -28,7 +32,8 @@ import { safeError } from "./agent-artifact-jobs.js";
 import { renderPdfArtifact } from "./pdf-render/render.js";
 import { structuredError } from "./pdf-render/errors.js";
 import { getPdfTemplate, writePdfTemplateThumbnail, writePdfTemplateThumbnailFailure } from "./pdf-template-store.js";
-import { THUMBNAIL_RENDERER } from "./pdf-template-thumbnail.js";
+import { callRasterizeService } from "./pdf-render/rasterize-client.js";
+import { THUMBNAIL_RASTERIZE_DPI, thumbnailStrategyFor } from "./pdf-template-thumbnail.js";
 
 export type PdfTemplateThumbnailStatus = "generated" | "skipped" | "failed";
 
@@ -61,10 +66,10 @@ export async function runPdfTemplateThumbnail(input: {
 
   const base = { ok: true as const, statusCode: 200, templateId: record.templateId, version: record.version };
 
-  if (record.renderer !== THUMBNAIL_RENDERER) {
-    // Not a fault: thumbnails exist only for the browser engine (see THUMBNAIL_RENDERER).
-    return { ...base, status: "skipped", thumbnailKey: null, reason: `renderer_not_${THUMBNAIL_RENDERER}` };
-  }
+  // B2/RULING R2: which STRATEGY produces the image, not whether there is one. chromium
+  // screenshots its own live page; every other renderer's finished PDF is rasterized with
+  // poppler. The old `renderer_not_chromium` skip is gone — that was the whole point of R2.
+  const strategy = thumbnailStrategyFor(record.renderer);
   if (record.sampleData === undefined) {
     return { ...base, status: "skipped", thumbnailKey: null, reason: "no_sample_data" };
   }
@@ -93,11 +98,40 @@ export async function runPdfTemplateThumbnail(input: {
       // by design — an empty optional block beats no preview at all.
       lenient: true,
       onRequirementFailure: "collect",
-      wantThumbnail: true,
+      // Only the screenshot strategy asks the engine for a PNG; the rasterize strategy wants
+      // the PDF and nothing else (no non-chromium engine honors this flag anyway, so passing
+      // it would be noise rather than a fallback).
+      wantThumbnail: strategy === "screenshot",
     });
     const warnings = rendered.diagnostics?.engineWarnings ?? [];
     const withWarnings = warnings.length > 0 ? { warnings } : {};
-    if (!rendered.thumbnailPng) {
+
+    // B2/RULING R2 — the non-chromium path: poppler rasterizes page 1 of the PDF that was
+    // just rendered. A rasterize failure is treated exactly like a missing screenshot: the
+    // publish already returned 200, so this is a `status: "failed"` with a persisted reason,
+    // never an exception that escapes.
+    let thumbnailPng = rendered.thumbnailPng;
+    if (strategy === "rasterize") {
+      try {
+        const rasterized = await callRasterizeService({ pdfBase64: rendered.bytes.toString("base64"), pages: [1], dpi: THUMBNAIL_RASTERIZE_DPI });
+        const firstPage = rasterized.pages[0];
+        thumbnailPng = firstPage ? Buffer.from(firstPage.pngBase64, "base64") : undefined;
+      } catch (error) {
+        const { code } = structuredError(error);
+        // T1.7: the typed code only in what gets persisted and re-served.
+        await writePdfTemplateThumbnailFailure(
+          input.projectId,
+          input.templateId,
+          input.version,
+          code
+            ? `The template rendered, but its first page could not be rasterized into a thumbnail (${code}). Publish again to retry.`
+            : "The template rendered, but its first page could not be rasterized into a thumbnail. Publish again to retry."
+        );
+        return { ...base, status: "failed", thumbnailKey: null, reason: "rasterize_failed", error: safeError(error), ...(code ? { errorCode: code } : {}), ...withWarnings };
+      }
+    }
+
+    if (!thumbnailPng) {
       // T1.7: no tenant data in this one — it names no asset, no path, nothing the engine
       // returned, just the shape of the outcome.
       await writePdfTemplateThumbnailFailure(
@@ -108,7 +142,7 @@ export async function runPdfTemplateThumbnail(input: {
       );
       return { ...base, status: "failed", thumbnailKey: null, reason: "no_thumbnail_returned", ...withWarnings };
     }
-    const thumbnailKey = await writePdfTemplateThumbnail(input.projectId, input.templateId, input.version, rendered.thumbnailPng);
+    const thumbnailKey = await writePdfTemplateThumbnail(input.projectId, input.templateId, input.version, thumbnailPng);
     return { ...base, status: "generated", thumbnailKey, ...withWarnings };
   } catch (error) {
     const { code } = structuredError(error);
