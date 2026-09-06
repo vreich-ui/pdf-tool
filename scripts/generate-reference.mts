@@ -32,7 +32,25 @@ const OUT_DIR = process.argv.includes("--out") ? process.argv[process.argv.index
 process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
 process.env.AGENT_RUN_TOKEN ??= "docs-generator-token";
 
-type Autonomy = "read-only" | "additive" | "mutating" | "destructive" | "operator";
+/**
+ * Autonomy classes (what an autonomous agent may assume before calling):
+ *  - read-only            persists nothing anywhere.
+ *  - read+lifecycle-write reads, but may persist a bounded maintenance write (a stale job
+ *                         auto-failed, a health probe key written and deleted); never creates,
+ *                         replaces or removes artifacts, templates or policies.
+ *  - additive             creates new content-addressed artifacts/records only; never rewrites
+ *                         existing bytes, never moves a lookup pointer, never changes policy.
+ *  - additive+pointer     additive, AND may REPLACE the mutable `by-slot`/`latest-by-slot`
+ *                         lookup pointer for the requested slot (the previous artifact's bytes
+ *                         stay stored; lookups return the new one).
+ *  - mutating             changes live project state or policy (what later calls resolve to).
+ *  - destructive          removes or archives data.
+ *  - operator             requires a human-held secret.
+ */
+type Autonomy = "read-only" | "read+lifecycle-write" | "additive" | "additive+pointer" | "mutating" | "destructive" | "operator";
+
+/** Which Netlify site a tool's storage traffic reaches. */
+type StoragePlane = "tenant (grant)" | "tenant (grant, optional)" | "pdf-tool own" | "pdf-tool own (without a grant; caller's site when a grant is attached — KI-01 class)" | "pdf-tool own (intended; currently written to the caller's site — KI-01)" | "none";
 
 interface ToolSemantics {
   /** netlify/functions file that calls the SAME lib handler symbol as mcp.ts, or null. */
@@ -43,45 +61,52 @@ interface ToolSemantics {
   approval: string;
   projectState: string;
   autonomy: Autonomy;
+  plane: StoragePlane;
 }
 
 // ── Hand-maintained semantics (verified against source at the SHA in the generated header) ──
 const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
   create_agent_artifact_job: {
     http: { file: "create-agent-artifact-job.ts", symbol: "createAgentArtifactJob" },
-    sideEffects: "Writes a job record to the grant `jobs` store; charges the per-request generation ledger; triggers `agent-artifact-worker-background` (unless approval-blocked). The worker later writes artifact bytes + index entries.",
+    sideEffects: "Writes a job record to the grant `jobs` store; charges the per-request generation ledger; triggers `agent-artifact-worker-background` (unless approval-blocked). The worker later writes content-addressed artifact bytes + index entries and, when `slot` is set, REPLACES the `by-slot`/`latest-by-slot` pointer for that slot (`artifact-index.ts:91-96`).",
     idempotency: "NOT idempotent: every call mints a new `jobId` (`randomUUID`). Two identical calls run twice and may overwrite the same `by-slot` pointer.",
     polling: "Poll `get_agent_artifact_job_status` every ~2 s until `complete`/`failed` (`polling` field in the response).",
     approval: "Blocked (`status: blocked`) when `requireApproval: true` or when `AGENT_ARTIFACT_APPROVAL_REQUIRED` matches the kind/operation; resume with `resume_agent_artifact_job`.",
     projectState: "Writes only pdf-tool-owned records inside the tenant's stores (job record, artifacts, indexes). Never workflow JSON.",
-    autonomy: "additive",
+    autonomy: "additive+pointer",
+    plane: "tenant (grant)",
   },
   get_agent_artifact_job_status: {
     http: { file: "get-agent-artifact-job-status.ts", symbol: "getAgentArtifactJobStatus" },
-    sideEffects: "Read, with one self-healing write: a job `running` for > 12 min is flipped to `failed` (`JOB_EXECUTION_TIMEOUT`). Re-mints a fresh `resumeToken` on blocked jobs (not persisted).",
+    sideEffects: "Read, with one PERSISTED lifecycle write: a job `running` for > 12 min after `startedAt` is written back as `failed` (`JOB_EXECUTION_TIMEOUT`, `agent-artifact-mcp.ts:201-211`). Re-mints a fresh `resumeToken` on blocked jobs (not persisted). Never creates, replaces or removes artifacts.",
     idempotency: "Idempotent.",
     polling: "This is the poll target.",
     approval: "None.",
-    projectState: "None beyond the timeout self-heal.",
-    autonomy: "read-only",
+    projectState: "Job record only (the timeout transition).",
+    autonomy: "read+lifecycle-write",
+    plane: "tenant (grant)",
   },
   get_agent_artifact_by_slot: {
     http: { file: "get-agent-artifact-by-slot.ts", symbol: "getAgentArtifactBySlot" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   get_agent_artifact_by_filename: {
     http: { file: "get-agent-artifact-by-filename.ts", symbol: "getAgentArtifactByFilename" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   verify_agent_artifact: {
     http: { file: "verify-agent-artifact.ts", symbol: "verifyArtifactMaterialization" },
     sideEffects: "None (reads index + bytes when a grant is present).",
     idempotency: "Idempotent.", polling: "n/a", approval: "None.",
     projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant, optional)",
   },
   inspect_pdf_artifact: {
     http: null,
     sideEffects: "None (reads PDF bytes in-function).", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   rasterize_pdf_artifact: {
     http: null,
@@ -89,6 +114,7 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     idempotency: "Content-addressed: re-rasterizing identical bytes at the same dpi dedupes at the blob layer; index pointers are rewritten.",
     polling: "n/a (synchronous, bounded by the remaining function budget).", approval: "None.",
     projectState: "Adds artifacts.", autonomy: "additive",
+    plane: "tenant (grant)",
   },
   resume_agent_artifact_job: {
     http: { file: "resume-agent-artifact-job.ts", symbol: "resumeAgentArtifactJob" },
@@ -97,20 +123,24 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     polling: "Poll `get_agent_artifact_job_status` afterwards.",
     approval: "REQUIRES the operator secret (`approvalToken` = `ARTIFACT_APPROVAL_SECRET` or `MCP_OAUTH_PASSWORD`) plus the job-scoped `resumeToken`.",
     projectState: "Job record only.", autonomy: "operator",
+    plane: "tenant (grant)",
   },
   create_pdf_template: {
     http: { file: "create-pdf-template.ts", symbol: "createPdfTemplate" },
     sideEffects: "Writes a new `draft` template version (`pdfme/{templateId}/v{n}.json`), `meta.json` and the per-project index into the tenant `templates` store.",
     idempotency: "NOT idempotent: each call creates a new version number for an existing `templateId` (or a new template).",
     polling: "n/a", approval: "None.", projectState: "Adds a draft version; never mutates an active version's `templateJson`.", autonomy: "additive",
+    plane: "tenant (grant)",
   },
   get_pdf_template: {
     http: { file: "get-pdf-template.ts", symbol: "getPdfTemplateRecord" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   list_pdf_templates: {
     http: { file: "list-pdf-templates.ts", symbol: "listPdfTemplatesResult" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   publish_pdf_template: {
     http: { file: "publish-pdf-template.ts", symbol: "publishPdfTemplateRecord" },
@@ -119,33 +149,39 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     polling: "Thumbnail/validation complete asynchronously; read `get_pdf_template` / `get_pdf_template_validation`.",
     approval: "None (the validation gate is mechanical, not human).",
     projectState: "Changes which template version live PDF jobs render with.", autonomy: "mutating",
+    plane: "tenant (grant)",
   },
   delete_pdf_template: {
     http: { file: "delete-pdf-template.ts", symbol: "archivePdfTemplateRecord" },
     sideEffects: "Soft-archives: version/meta status → `disabled`. Bytes are retained; no un-archive tool exists.",
     idempotency: "Idempotent (archiving an archived template returns the same state).",
     polling: "n/a", approval: "None.", projectState: "Removes the template from live use.", autonomy: "destructive",
+    plane: "tenant (grant)",
   },
   validate_pdf_template: {
     http: null,
-    sideEffects: "Writes a `running` validation report (`pdfme/{templateId}/validation/v{n}.json`) and triggers `pdf-template-validation-worker-background`, which renders the template with the supplied data.",
+    sideEffects: "Overwrites the version's validation report (`pdfme/{templateId}/validation/v{n}.json`, keyed by version) with a `running` one and triggers `pdf-template-validation-worker-background`; because the report is what the hard publish gate reads, a re-validation can make a previously publishable version unpublishable until it passes again.",
     idempotency: "NOT idempotent: a second call for the same version overwrites the report at the same key (keyed by version, not validationId).",
-    polling: "Poll `get_pdf_template_validation`.", approval: "None.", projectState: "Validation report + `lastValidation` mirror on the version record.", autonomy: "additive",
+    polling: "Poll `get_pdf_template_validation`.", approval: "None.", projectState: "Replaces the validation report + `lastValidation` mirror on the version record (publish-gate input).", autonomy: "mutating",
+    plane: "tenant (grant)",
   },
   get_pdf_template_validation: {
     http: null,
     sideEffects: "None.", idempotency: "Idempotent.", polling: "This is the poll target.", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   derive_render_data_schema: {
     http: null,
     sideEffects: "None — pure function of its arguments; needs no grant and names no project.",
     idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "none",
   },
   preview_pdf_template: {
     http: null,
     sideEffects: "Writes a `running` preview report and triggers `pdf-template-preview-worker-background`, which renders the first page and rasterizes it into `previews/{templateId}/v{n}-p{page}.png` in the tenant `templates` store. Refuses versions without `sampleData` (`PREVIEW_NO_SAMPLE_DATA`).",
     idempotency: "Enqueue-or-poll: a `generated` or `running` report for that version is returned as-is; only a `failed` report is retried (`pdf-template-preview.ts:150-156`).",
     polling: "Re-call `preview_pdf_template` with the same arguments; it returns the current report.", approval: "None.", projectState: "Preview report + PNGs only.", autonomy: "additive",
+    plane: "tenant (grant)",
   },
   search_images: {
     http: { file: "create-image-search-job.ts", symbol: "createImageSearchJob" },
@@ -153,53 +189,63 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     idempotency: "NOT idempotent: each call is a new job; the per-request bank is capped at 5 non-discarded candidates.",
     polling: "Poll `get_image_search_job_status`, then read `get_image_search_bank`.", approval: "None.",
     projectState: "Adds artifacts + bank entries.", autonomy: "additive",
+    plane: "tenant (grant)",
   },
   get_image_search_job_status: {
     http: { file: "get-image-search-job-status.ts", symbol: "getImageSearchJobStatus" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "This is the poll target.", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   get_image_search_bank: {
     http: null,
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   update_image_search_candidate: {
     http: null,
     sideEffects: "Mutates a candidate's `state` (selected/discarded/kept). With `deleteArtifact: true` on a discarded url_import candidate it DELETES the artifact bytes + sidecar (index pointers are left dangling — known gap).",
     idempotency: "State changes are idempotent; the delete is irreversible.",
     polling: "n/a", approval: "None.", projectState: "Bank state; optionally removes bytes.", autonomy: "destructive",
+    plane: "tenant (grant)",
   },
   import_image_from_url: {
     http: { file: "import-image-from-url.ts", symbol: "importImageFromUrl" },
-    sideEffects: "Synchronous https download (server-side), format normalization, optimization to ≤ 5 MB, `saveArtifactBytes`, and a `url_import` bank candidate.",
+    sideEffects: "Synchronous https download (server-side), format normalization, optimization to ≤ 5 MB, `saveArtifactBytes` (with `slot` set: REPLACES the `by-slot` pointer), and a `url_import` bank candidate.",
     idempotency: "Content-addressed: the same bytes dedupe at the blob layer; a new candidate entry is banked per call unless the bank dedupe key matches.",
     polling: "n/a (synchronous; bounded by the remaining function budget).", approval: "None.",
-    projectState: "Adds an artifact + candidate.", autonomy: "additive",
+    projectState: "Adds an artifact + candidate.", autonomy: "additive+pointer",
+    plane: "tenant (grant)",
   },
   import_images_from_url: {
     http: { file: "create-image-import-job.ts", symbol: "createImageImportJob" },
     sideEffects: "Creates a `url_import` job and triggers `image-search-worker-background`; each URL may be an image, a zip, or a same-host HTML index page.",
     idempotency: "NOT idempotent: each call is a new job.",
     polling: "Poll `get_image_search_job_status`.", approval: "None.", projectState: "Adds artifacts + candidates.", autonomy: "additive",
+    plane: "tenant (grant)",
   },
   get_image_search_policy: {
     http: { file: "image-search-policy.ts", symbol: "getImageSearchPolicy" },
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   set_image_search_policy: {
     http: { file: "image-search-policy.ts", symbol: "setImageSearchPolicy" },
     sideEffects: "Overwrites `policy.json` in the tenant `imageSearch` store.",
     idempotency: "Idempotent for the same payload (full overwrite).", polling: "n/a", approval: "None.",
     projectState: "Changes provider order/weights/quotas for all later searches in the project.", autonomy: "mutating",
+    plane: "tenant (grant)",
   },
   get_image_model_policy: {
     http: null,
     sideEffects: "None.", idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
   },
   set_image_model_policy: {
     http: null,
     sideEffects: "Overwrites `image-model-policy.json` in the tenant `imageSearch` store.",
     idempotency: "Idempotent for the same payload.", polling: "n/a", approval: "None.",
     projectState: "Changes which image model `create_agent_artifact_job` routes to per `usageContext`.", autonomy: "mutating",
+    plane: "tenant (grant)",
   },
   create_capture_job: {
     http: null,
@@ -207,26 +253,31 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     idempotency: "`requestId` is the idempotency key: a repeat for a non-terminal job re-attaches and re-triggers (continues from the frontier); a repeat after a terminal job creates a new job.",
     polling: "Poll `get_capture_job_status`; then `get_capture_snapshot`.", approval: "None (policy bounds are mechanical).",
     projectState: "None in the tenant's stores.", autonomy: "additive",
+    plane: "pdf-tool own",
   },
   get_capture_job_status: {
     http: null,
     sideEffects: "None.", idempotency: "Idempotent.", polling: "This is the poll target.", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "pdf-tool own",
   },
   get_capture_snapshot: {
     http: null,
     sideEffects: "None (reads the snapshot bytes from pdf-tool's own store, digest-checked).",
     idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "pdf-tool own",
   },
   set_storage_grant: {
     http: null,
-    sideEffects: "Persists the grant (INCLUDING the Blobs token) as `grants/{sessionId}.json`, TTL-capped to min(session TTL, grant expiry). See KNOWN_ISSUES for the store-routing defect.",
+    sideEffects: "Persists the grant (INCLUDING the Blobs token) as `grants/{sessionId}.json`, TTL-capped to min(session TTL, grant expiry). Intended for pdf-tool's own store, but the write currently lands on the caller's site while the read-back uses pdf-tool's own (KNOWN_ISSUES KI-01) — non-functional in production.",
     idempotency: "Idempotent (overwrites the session's record).", polling: "n/a", approval: "None.",
     projectState: "None.", autonomy: "mutating",
+    plane: "pdf-tool own (intended; currently written to the caller's site — KI-01)",
   },
   health: {
     http: null,
-    sideEffects: "Write/read/delete round-trip of one probe key in pdf-tool's OWN job store; returns the capability manifest.",
-    idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    sideEffects: "Write/read/delete round-trip of one probe key (`health/probe.json`) in the `agent-artifact-jobs` store — pdf-tool's OWN store when called without a grant; with a grant attached (per call or session) the probe currently runs against the caller's store (KNOWN_ISSUES KI-01 class). Returns the capability manifest.",
+    idempotency: "Idempotent.", polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read+lifecycle-write",
+    plane: "pdf-tool own (without a grant; caller's site when a grant is attached — KI-01 class)",
   },
 };
 
@@ -342,9 +393,9 @@ async function buildMcpReference(): Promise<string> {
   lines.push("");
   lines.push(`> GENERATED by \`scripts/generate-reference.mts\` from the live \`tools/list\` of \`netlify/functions/mcp.ts\`. Do not edit by hand — run \`npm run docs:generate\`. Semantics columns come from the SEMANTICS table in the generator and are checked against the registered tool set on every run.`);
   lines.push("");
-  lines.push(`Registered tools: **${tools.length}**. Transport: \`POST /mcp\` (JSON-RPC 2.0, Streamable-HTTP, \`Mcp-Session-Id\` issued on \`initialize\`). Every tool accepts \`storage\` (the client storage grant) and \`descriptor\`; \`storage\` is REQUIRED unless the tool is marked grant-optional. Results are metadata only — bytes never travel through MCP.`);
+  lines.push(`Registered tools: **${tools.length}**. Transport: \`POST /mcp\` (JSON-RPC 2.0, Streamable-HTTP, \`Mcp-Session-Id\` issued on \`initialize\`). Every tool accepts \`storage\` (the TENANT storage grant) and \`descriptor\`; \`storage\` is REQUIRED unless the tool is marked grant-optional. Two storage planes exist: tenant-plane tools read/write the caller's Netlify site under the grant; the capture tools, \`set_storage_grant\` and \`health\` use pdf-tool's OWN site and ignore (or should ignore — see KNOWN_ISSUES KI-01) the grant. Results are metadata only — bytes never travel through MCP.`);
   lines.push("");
-  lines.push("Legend: `*` = required input field. Autonomy: `read-only` safe to call freely; `additive` creates new records/artifacts but never replaces live state; `mutating` changes live project policy/state; `destructive` removes or archives data; `operator` needs a human-held secret.");
+  lines.push("Legend: `*` = required input field. **Storage plane** = which Netlify site the tool's storage traffic reaches: the tenant's (under the caller's grant) or pdf-tool's own. **Autonomy**: `read-only` persists nothing; `read+lifecycle-write` reads but may persist a bounded maintenance write (stale-job auto-fail, health probe key) and never creates/replaces/removes artifacts, templates or policies; `additive` creates new content-addressed artifacts/records only — never rewrites bytes, never moves a lookup pointer; `additive+pointer` is additive AND may replace the mutable `by-slot` lookup pointer for the requested slot (previous bytes stay stored); `mutating` changes live project state/policy; `destructive` removes or archives data; `operator` needs a human-held secret. MCP `readOnlyHint` is true only for tools that persist nothing.");
   lines.push("");
   lines.push("## Capability groups (from `mcp-capability-manifest.ts`)");
   lines.push("");
@@ -357,13 +408,13 @@ async function buildMcpReference(): Promise<string> {
   lines.push("");
   lines.push("## Summary table");
   lines.push("");
-  lines.push("| Tool | Grant | HTTP twin (shared handler) | Read-only | Destructive | Autonomy | Approval |");
-  lines.push("|---|---|---|---|---|---|---|");
+  lines.push("| Tool | Grant | Storage plane | HTTP twin (shared handler) | readOnlyHint | Destructive | Autonomy | Approval |");
+  lines.push("|---|---|---|---|---|---|---|---|");
   for (const tool of tools) {
     const sem = TOOL_SEMANTICS[tool.name];
     const grantRequired = (tool.inputSchema.required ?? []).includes("storage");
     const twin = sem.http ? `\`${sem.http.file}\` → \`${sem.http.symbol}\`` : "MCP-only";
-    lines.push(`| \`${tool.name}\` | ${grantRequired ? "required" : "optional"} | ${twin} | ${tool.annotations.readOnlyHint ? "yes" : "no"} | ${tool.annotations.destructiveHint ? "yes" : "no"} | ${sem.autonomy} | ${sem.approval === "None." ? "—" : "see below"} |`);
+    lines.push(`| \`${tool.name}\` | ${grantRequired ? "required" : "optional"} | ${sem.plane} | ${twin} | ${tool.annotations.readOnlyHint ? "true" : "false"} | ${tool.annotations.destructiveHint ? "yes" : "no"} | ${sem.autonomy} | ${sem.approval === "None." ? "—" : "see below"} |`);
   }
   lines.push("");
   lines.push("## Per-tool detail");
@@ -371,6 +422,8 @@ async function buildMcpReference(): Promise<string> {
   for (const tool of tools) {
     const sem = TOOL_SEMANTICS[tool.name];
     const grantRequired = (tool.inputSchema.required ?? []).includes("storage");
+    if (tool.annotations.readOnlyHint && sem.autonomy !== "read-only") throw new Error(`${tool.name} advertises readOnlyHint but its autonomy class is ${sem.autonomy}`);
+    if (!tool.annotations.readOnlyHint && sem.autonomy === "read-only") throw new Error(`${tool.name} is classified read-only but does not advertise readOnlyHint`);
     if (sem.http) {
       const httpSource = read(`netlify/functions/${sem.http.file}`);
       if (!httpSource.includes(sem.http.symbol)) throw new Error(`${sem.http.file} does not reference ${sem.http.symbol}`);
@@ -382,7 +435,7 @@ async function buildMcpReference(): Promise<string> {
     lines.push("");
     const httpMethods = sem.http ? FUNCTION_SEMANTICS[sem.http.file].methods.join("|") : "";
     lines.push(`- **Transport:** MCP \`tools/call\`${sem.http ? `; HTTP \`${httpMethods} /.netlify/functions/${sem.http.file.replace(/\.ts$/, "")}\` (same handler \`${sem.http.symbol}\`)` : " (MCP-only)"}`);
-    lines.push(`- **Auth:** MCP endpoint auth (bearer / OAuth token / connector key). **Storage grant:** ${grantRequired ? "required" : "optional"}.`);
+    lines.push(`- **Auth:** MCP endpoint auth (bearer / OAuth token / connector key). **Storage grant:** ${grantRequired ? "required" : "optional"}. **Storage plane:** ${sem.plane}.`);
     lines.push(`- **Input:** ${schemaSummary(tool.inputSchema) || "(none beyond storage/descriptor)"}`);
     lines.push(`- **Output (structuredContent keys):** ${outputSummary(tool.outputSchema)}; errors carry \`error\` (+ \`errorCode\`, \`issues\`, \`statusCode\` when available).`);
     lines.push(`- **Annotations:** readOnly=${!!tool.annotations.readOnlyHint}, destructive=${!!tool.annotations.destructiveHint}, idempotent=${!!tool.annotations.idempotentHint}, openWorld=${!!tool.annotations.openWorldHint}`);

@@ -8,7 +8,7 @@
 |---|---|---|
 | MCP function alive | `curl https://pdf-x.netlify.app/mcp?health=1` | unauthenticated; returns `instance_age_ms`/`instance_invocations` (cold-start observability). Pinged every 5 min by `warm-ping-scheduled`. |
 | pdf-tool's own Blob store | `curl -H "Authorization: Bearer $AGENT_RUN_TOKEN" https://pdf-x.netlify.app/health` | write/read/delete round-trip on `agent-artifact-jobs`; `mode` is always `same-site` in the response even when `PDF_TOOL_SITE_ID`/`PDF_TOOL_BLOBS_TOKEN` are in use. Tenant stores are not probed (they need a grant). |
-| MCP `health` tool | `tools/call health` | same probe plus the capability manifest (`mcp-capability-manifest.ts`); note the manifest omits `delete_pdf_template`. |
+| MCP `health` tool | `tools/call health` **without `storage`** | same probe plus the capability manifest (`mcp-capability-manifest.ts`). Not read-only: it writes and deletes `health/probe.json`. With a grant attached (per call or session) the probe currently runs against the caller's `agent-artifact-jobs` store (KI-01), so its verdict then says nothing about pdf-tool's own storage. |
 | render-service | `curl $RENDER_SERVICE_URL/health` | unauthenticated; `ok`, `build.gitSha`, `build.deployedAt`, per-engine availability (typst/chromium/poppler). Use `/health`, not `/healthz`, from outside (Cloud Run's front end intercepts `/healthz`). |
 | Worker warm | `GET /.netlify/functions/agent-artifact-worker-background?health=1` | pre-warms `@pdfme/generator`. Other background functions are not warmed (KI-21). |
 
@@ -18,7 +18,7 @@ Structured per-request log line from the MCP function: `{"event":"mcp_request", 
 
 | Symptom | Cause | Action |
 |---|---|---|
-| Job `running` for a long time | worker killed by Netlify or still working | poll `get_agent_artifact_job_status`; after 12 minutes it flips to `failed` `JOB_EXECUTION_TIMEOUT` itself. The LEGACY `agent-artifact-job-status` endpoint does not — use the current one. |
+| Job `running` for a long time | worker killed by Netlify or still working | poll `get_agent_artifact_job_status`; after 12 minutes the poll itself writes `failed` `JOB_EXECUTION_TIMEOUT` back (KI-29). The LEGACY `agent-artifact-job-status` endpoint does not — use the current one. |
 | Job `failed` with `errorDetail.reason = renderer_unavailable:*` | `RENDER_SERVICE_URL`/`SECRET` unset, service down, secret mismatch, or timeout | check `render-service /health`; compare `RENDER_SERVICE_SECRET` on both sides; re-create the job (there is no retry tool — re-POSTing the worker re-runs a failed job but is an internal path, KI-06). |
 | Job `failed` at create with `Unable to determine worker base URL` | neither `DEPLOY_PRIME_URL` nor `URL` set and the request `Origin`/`Host` is not in `WORKER_ORIGIN_ALLOWLIST` | set the env; Netlify normally provides `URL`. |
 | Job `pending` forever | worker trigger returned 2xx but the worker never ran / crashed before writing `running`; or a capture chain re-trigger failed | artifact jobs: no reaper exists (KI-09) — create a new job. Capture jobs: `create_capture_job` again with the same `requestId` re-attaches and re-triggers from the frontier. |

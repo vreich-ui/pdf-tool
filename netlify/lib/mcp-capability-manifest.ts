@@ -44,7 +44,7 @@ export const MCP_CAPABILITIES: McpCapability[] = [
     id: "template_lifecycle",
     description: "Author, validate, publish, and version PDF templates.",
     requiredTools: ["create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template"],
-    optionalTools: ["validate_pdf_template", "get_pdf_template_validation", "derive_render_data_schema", "preview_pdf_template"]
+    optionalTools: ["validate_pdf_template", "get_pdf_template_validation", "derive_render_data_schema", "preview_pdf_template", "delete_pdf_template"]
   },
   {
     id: "image_sourcing",

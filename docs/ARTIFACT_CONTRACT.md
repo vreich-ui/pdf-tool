@@ -4,7 +4,7 @@
 
 ## 0. One-paragraph model
 
-pdf-tool stores bytes at a **content-addressed, request-scoped key** (`{kind}/{safeRequestId}/{sha256}{ext}`) in the tenant's `artifacts` store, writes a **canonical metadata record** (layer A) beside the bytes and into several **index records** (layer E), and returns that record inside a **response wrapper** (layer B) together with a **materialization proof** (layer D). The Platform/CMS side stores what it received in **workflow JSON** (layer G) and later publishes the bytes at a **public path** (layer F). There is no separate "project-native" shape in this repository any more (layer C ≡ A; see §C).
+pdf-tool stores bytes at a **content-addressed, request-scoped key** (`{kind}/{safeRequestId}/{sha256}{ext}`) in the tenant's `artifacts` store (tenant artifact plane) — or, for the capture plane only, in the same layout on pdf-tool's own site, where the tenant cannot read them — writes a **canonical metadata record** (layer A) beside the bytes and into several **index records** (layer E), and returns that record inside a **response wrapper** (layer B) together with a **materialization proof** (layer D). The Platform/CMS side stores what it received in **workflow JSON** (layer G) and later publishes the bytes at a **public path** (layer F). There is no separate "project-native" shape in this repository any more (layer C ≡ A; see §C).
 
 | Layer | Name | Canonical owner | Produced by | Consumed by | Persisted where | Mutable? | Secured by |
 |---|---|---|---|---|---|---|---|
@@ -76,12 +76,12 @@ Definition: `netlify/lib/artifact-attestation.ts`. Format `v1.<base64url(JSON pa
 
 ## E. Index records
 
-Written by `writeArtifactReferenceIndexes` (`artifact-core/artifact-index.ts:68-98`) into the tenant `artifact-index` store on **every** `saveArtifactBytes`:
+Written by `writeArtifactReferenceIndexes` (`artifact-core/artifact-index.ts:68-98`) into the `artifact-index` store of whichever site the active grant names (tenant plane: the tenant's; capture plane: pdf-tool's own) on **every** `saveArtifactBytes`:
 
 | Key | Value | Reader | Notes |
 |---|---|---|---|
 | `request-artifacts/{encodeURIComponent(requestId)}/{sha256}.json` | full A | `verify_agent_artifact` (`persisted`), `artifactExistenceByKey` | the authoritative request binding (injective encoding) |
-| `by-slot/{projectId}/{encodeURIComponent(requestId)}/{slot}.json` | full A | `get_agent_artifact_by_slot` | overwritten by the next artifact saved into the slot |
+| `by-slot/{projectId}/{encodeURIComponent(requestId)}/{slot}.json` | full A | `get_agent_artifact_by_slot` | **replaced** by the next artifact saved into the slot (`create_agent_artifact_job` / `import_image_from_url` with `slot`) — the one mutable pointer an otherwise additive write moves |
 | `latest-by-slot/{projectId}/{requestId}/{slot}.json` | full A | none | dead duplicate of `by-slot` |
 | `by-filename/{projectId}/{requestId}/{filename}.json` | full A | `get_agent_artifact_by_filename`, collision resolver | filename suffixing keeps distinct bytes distinct |
 | `by-tag/{tag}/{sha256}.json` | pointer `{requestId, sha256, artifactKind}` | `library` image-search provider (prefix `list()`, eventually consistent) | how `search_images` finds project media by tag |

@@ -305,7 +305,7 @@ export function currentProjectDescriptor(): ProjectDescriptor | undefined {
 export const STORAGE_GRANT_REQUIRED_CODE = "STORAGE_GRANT_REQUIRED";
 
 export const STORAGE_GRANT_REQUIRED_MESSAGE =
-  "Storage grant required: pdf-tool holds no storage credentials of its own (the server-side CLIENT_*/PDF_TOOL_* env fallbacks were removed), so every call must carry the caller's short-lived Netlify Blobs grant as the `storage` argument: " +
+  "Storage grant required: pdf-tool holds no TENANT storage credentials of its own (the server-side CLIENT_* env fallback for client stores was removed; PDF_TOOL_SITE_ID/PDF_TOOL_BLOBS_TOKEN, when set, reach only pdf-tool's own operational and capture stores), so every tenant-storage call must carry the caller's short-lived Netlify Blobs grant as the `storage` argument: " +
   '{ "storage": { "projectId": "<your project>", "siteId": "<netlify site id>", "token": "<blobs token>", "expiresAt": "<ISO>", "stores": { "artifacts", "artifactIndex", "templates", "imageSearch", "renderData", "jobs" } } }. ' +
   "Callers on a Platform site fetch a grant from their artifact bridge; direct callers mint one for their own site. " +
   "An optional `descriptor` argument ({ projectId, storeNames?, allowedModels?, defaultModel?, allowedKinds?, requestIdPattern? }) tunes project policy — omitted fields use pdf-tool defaults, so a grant alone is a complete call.";

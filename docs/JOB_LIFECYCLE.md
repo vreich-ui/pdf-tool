@@ -1,4 +1,4 @@
-# Job lifecycle, approval, and artifact verification
+# Job lifecycle, the execution-approval gate, and artifact verification
 
 > Source-verified at commit `60bdb98762e5c10849958dbd65beba73a0d1bb31`. Covers the artifact-job plane (`create_agent_artifact_job` → worker). Image-search and capture jobs reuse the same job-record store and worker-trigger pattern; their differences are called out at the end.
 
@@ -36,7 +36,7 @@ stateDiagram-v2
 | 10. `running` + `startedAt`; resolve route; persist `executor/requiresAI/requiresModel/renderer` | `:79-97` | job record ×2 | — |
 | 11. Do the work under the deadline race (`withWorkerDeadlineTimeout`, ~30 s before the 15-minute kill) | `:106-113` | provider calls / render-service calls | `failed` with `errorCode`, `errorDetail.reason = renderer_unavailable:<code>` for engine-unavailable PDFs |
 | 12. PDF byte checks (`application/pdf`, `%PDF-` magic); sha256 over final bytes | `:119-129` | — | `PDF_INVALID_BYTES` |
-| 13. `saveArtifactBytes`: validate magic/contentType, verify sha, resolve filename collision, write bytes + sidecar + indexes | `artifact-layout.ts:84-130` | tenant `artifacts` + `artifact-index` | throws → `failed` (artifact may be partially indexed) |
+| 13. `saveArtifactBytes`: validate magic/contentType, verify sha, resolve filename collision, write bytes + sidecar + indexes — with `slot` set this **replaces** the `by-slot`/`latest-by-slot` pointer (`artifact-index.ts:91-96`) | `artifact-layout.ts:84-130` | tenant `artifacts` + `artifact-index` | throws → `failed` (artifact may be partially indexed) |
 | 14. `complete` with `artifactReference`, `renderer`, `warnings`, `qualityGate`, render metadata | `:197` | job record | — |
 
 Time budget: sync functions have ~10 s (`execution-budget.ts` estimates the remaining budget for the synchronous tools `import_image_from_url` and `rasterize_pdf_artifact`); background workers have 15 minutes with a 30 s safety margin (`worker-budget.ts`, overridable via `WORKER_BACKGROUND_TIMEOUT_MS`/`WORKER_BACKGROUND_SAFETY_MARGIN_MS`).
@@ -53,7 +53,7 @@ Time budget: sync functions have ~10 s (`execution-budget.ts` estimates the rema
 |---|---|---|
 | Worker trigger fails at create | job marked `failed`; caller gets 502; no automatic retry | `agent-artifact-mcp.ts:182-187` |
 | Worker trigger fails at resume | job reverted to `blocked` with its original `blocked` payload; operator retries | `agent-artifact-approval.ts:237-244` |
-| Worker process killed by Netlify (no failure record written) | next status poll after 12 min flips `running` → `failed` `JOB_EXECUTION_TIMEOUT`; the LEGACY `agent-artifact-job-status` function does **not** do this | `agent-artifact-mcp.ts:70,201-211` |
+| Worker process killed by Netlify (no failure record written) | next status poll after 12 min flips `running` → `failed` `JOB_EXECUTION_TIMEOUT` — **a poll is therefore a write**, which is why `get_agent_artifact_job_status` is not advertised as read-only; the LEGACY `agent-artifact-job-status` function does **not** do this | `agent-artifact-mcp.ts:70,201-211` |
 | Worker hangs inside a provider call | `withWorkerDeadlineTimeout` rejects with `WORKER_TIMEOUT_APPROACHING` ~30 s before the kill; the failure record is persisted | `worker-budget.ts`, worker `:113` |
 | Same job POSTed to the worker twice concurrently | both invocations read `pending`, both set `running`, both do the work (no CAS on the record); the second `saveArtifactBytes` dedupes identical bytes but rewrites pointers; the last record write wins | `agent-artifact-worker-background.ts:64-79`, `agent-artifact-jobs.ts:822-835` |
 | `failed` job POSTed to the worker again | it **re-runs** (only `complete`/`running`/`blocked` are refused) — an undocumented retry path that needs `AGENT_RUN_TOKEN` and the grant | `:68-75` |
@@ -62,7 +62,16 @@ Time budget: sync functions have ~10 s (`execution-budget.ts` estimates the rema
 | Status poll while the worker writes | two blind read-modify-writes on one key; `updateArtifactJob` spreads the *stale* record it read, so a concurrent field update can be lost | `agent-artifact-jobs.ts:827-835` |
 | Grant expires while a job is `pending`/`blocked` | every later call with that grant fails at parse; the job cannot be resumed or polled until the caller mints a fresh grant — nothing in pdf-tool expires the job itself | `storage-grant.ts:164-170` |
 
-## 5. Operator approval (`blocked` → `pending`)
+## 5. The local execution-approval gate (`blocked` → `pending`)
+
+Two different things are called "approval" around pdf-tool; only the first exists in this repository:
+
+| | What is approved | Who decides | Where |
+|---|---|---|---|
+| **Artifact-job execution gate** (this section) | whether a specific generation/render job may *run* | anyone holding the operator secret (`ARTIFACT_APPROVAL_SECRET` → `MCP_OAUTH_PASSWORD`) | pdf-tool: `requireApproval`, `AGENT_ARTIFACT_APPROVAL_REQUIRED`, `blocked` state, `resumeToken`, `resume_agent_artifact_job` |
+| **Editorial / publishing approval** | whether content and its artifacts may be reviewed, released or published | Platform / CMS-Agent reviewers and publish gates | outside pdf-tool (workflow JSON, content items, publish decisions) |
+
+A resumed job produces an artifact exactly like an unblocked one; nothing about the resume marks the artifact as editorially approved.
 
 ```mermaid
 sequenceDiagram
@@ -89,12 +98,12 @@ Facts (`netlify/lib/agent-artifact-approval.ts`):
 - **Approval token authority:** `ARTIFACT_APPROVAL_SECRET`, falling back to `MCP_OAUTH_PASSWORD`; **never** `MCP_CONNECTOR_KEY` (callers hold that). If neither is set, resume returns 503 and blocked jobs are stuck.
 - **Resume token:** `v1.<payload>.<hmac>` with `{typ: artifact-resume, projectId, jobId, requestId, iat, exp (30 d), jti}`, signed with the attestation secret chain (`ARTIFACT_ATTESTATION_SECRET` → `MCP_OAUTH_SIGNING_SECRET` → `AGENT_RUN_TOKEN`). It binds the resume to one job; it is **not** single-use (the `jti` is never recorded) — replay is harmless because a resumed job is no longer `blocked` (200 echo for running/complete, 409 otherwise).
 - **Rotation:** `get_agent_artifact_job_status` re-mints the token on every poll (`refreshedBlockedState`), so approval can arrive after 30 days as long as someone polls; the persisted token in the record is the original one.
-- **What is not there:** no deny/reject path, no expiry of `blocked` jobs, no audit record of who approved or when (the record simply loses its `blocked` field), no per-approver identity — the secret is shared.
+- **What is not there:** no deny/reject path, no expiry of `blocked` jobs, no audit record of who approved or when (the record simply loses its `blocked` field), no per-approver identity — the secret is shared. Editorial approval of the *content* is not modelled here at all.
 - **Defence in depth:** the worker refuses to run a `blocked` job even if POSTed directly (`agent-artifact-worker-background.ts:73-75`).
 
 ## 6. Artifact verification (`verify_agent_artifact`)
 
-Implementation: `netlify/lib/agent-artifact-verification.ts:88-230`. Inputs: `projectId`, `requestId`, `artifactReference` (or `blobKey` + `sha256`), optional `materializationProof`, optional `storage` grant (the only grant-optional storage tool).
+Implementation: `netlify/lib/agent-artifact-verification.ts:88-230`. Inputs: `projectId`, `requestId`, `artifactReference` (or `blobKey` + `sha256`), optional `materializationProof`, optional `storage` grant (the only grant-optional tool that reads tenant storage).
 
 ```mermaid
 flowchart TD

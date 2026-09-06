@@ -37,28 +37,47 @@ The grant carries the **store names**: `projectStoreNames()` = canonical default
 
 ## 3. Authority table
 
+Two storage planes, never mixed: the **TENANT ARTIFACT PLANE** (artifact jobs, templates, image sourcing — every write goes through the caller's grant to the caller's Netlify site) and the **PDF-TOOL-OWNED CAPTURE PLANE** (capture jobs and all capture output on pdf-tool's own site under `runWithCaptureStorage`, which replaces any ambient grant — `capture/storage.ts:31-33`). `saveArtifactBytes` and the artifact-index writers are shared code, but which site they hit is decided by the grant in ALS; the capture plane's writes therefore appear only in the capture rows below.
+
+### 3a. Tenant artifact plane (caller's site, under the grant)
+
 | Domain | Canonical owner | Storage (site · store · key) | Writer | Reader | Mutation path |
 |---|---|---|---|---|---|
-| Artifact bytes | pdf-tool layout, tenant-owned data | tenant · `artifacts` · `{kind}/{safeRequestId}/{sha256}{ext}` | `artifact-layout.ts:saveArtifactBytes` (worker, url import, rasterize, capture) | verification (`readArtifactBytesSha256`), PDF edit source, inspect/rasterize, capture snapshot read | write-once, content-addressed; only delete: `update_image_search_candidate{deleteArtifact}` (`image-search/orchestrator.ts:314`) |
+| Artifact bytes | pdf-tool layout, tenant-owned data | tenant · `artifacts` · `{kind}/{safeRequestId}/{sha256}{ext}` | `artifact-layout.ts:saveArtifactBytes` from the artifact worker, `import_image(s)_from_url`, `search_images`, `rasterize_pdf_artifact` | verification (`readArtifactBytesSha256`), PDF edit source, inspect/rasterize | write-once, content-addressed; only delete: `update_image_search_candidate{deleteArtifact}` (`image-search/orchestrator.ts:314`) |
 | Artifact sidecar | pdf-tool | tenant · `artifacts` · `{blobKey}.json` | `saveArtifactBytes` (`:127`) | nobody in shipped code | write-once |
 | Request-scoped reference (authoritative "pdf-tool made this for request R") | pdf-tool | tenant · `artifact-index` · `request-artifacts/{encodeURIComponent(requestId)}/{sha256}.json` | `writeArtifactReferenceIndexes` | `verify_agent_artifact` `persisted` check; `artifactExistenceByKey` | write-once |
-| Slot / filename pointers | pdf-tool | `by-slot/{projectId}/{requestId}/{slot}.json`, `latest-by-slot/…` (no reader), `by-filename/{projectId}/{requestId}/{filename}.json` (+ legacy keys without projectId, read-only) | same | `get_agent_artifact_by_slot/filename`, collision resolver | `by-slot` **overwritten** by the next artifact in the slot; `by-filename` gets `-2,-3…` suffixes instead |
+| Slot / filename pointers | pdf-tool | `by-slot/{projectId}/{requestId}/{slot}.json`, `latest-by-slot/…` (no reader), `by-filename/{projectId}/{requestId}/{filename}.json` (+ legacy keys without projectId, read-only) | same | `get_agent_artifact_by_slot/filename`, collision resolver | `by-slot`/`latest-by-slot` **replaced** by the next artifact saved into the slot (`create_agent_artifact_job` and `import_image_from_url` with `slot`) — the mutable part of an otherwise additive write; `by-filename` gets `-2,-3…` suffixes instead |
 | Tag pointers | pdf-tool | `by-tag/{tag}/{sha256}.json` | same | the `library` image-search provider lists `by-tag/{token}/` (eventually consistent `list()`) to reuse project media (`image-search/providers.ts:86`) | write-once |
 | Kind / request pointers | pdf-tool | `by-kind/{kind}/{sha256}.json`, `by-request/{requestId}/{kind}/{sha256}.json` | same | **no shipped reader** (tests only) | write-once |
-| Artifact job record | pdf-tool (record) inside tenant storage | tenant · `pdf-tool-jobs` · `projects/{projectId}/jobs/{jobId}.json` | `createArtifactJob` / `updateArtifactJob` (create, worker, status auto-fail, resume) | status/resume/worker | read-modify-write, no CAS |
+| Artifact job record | pdf-tool (record) inside tenant storage | tenant · `pdf-tool-jobs` · `projects/{projectId}/jobs/{jobId}.json` | `createArtifactJob` / `updateArtifactJob` (create, worker, **`get_agent_artifact_job_status` auto-fail**, resume) | status/resume/worker | read-modify-write, no CAS; a status poll can persist `running → failed` |
 | Generation ledger | pdf-tool | tenant · `pdf-tool-jobs` · `projects/{projectId}/budget/{requestId}.json` | `chargeGenerationBudget` | same | non-atomic read-modify-write (`generation-budget.ts:23-27`) |
 | Image-search job | pdf-tool | tenant · `pdf-tool-jobs` · `projects/{projectId}/image-search-jobs/{jobId}.json` | `image-search/jobs.ts` | status tool, worker | read-modify-write |
 | Candidate bank | tenant data | tenant · `image-search` · `banks/{requestId}.json` | orchestrator, url import | `get_image_search_bank` | in-place candidate mutation |
 | Sourcing policy / image-model policy | tenant data | tenant · `image-search` · `policy.json`, `image-model-policy.json` | `set_image_search_policy`, `set_image_model_policy` | search, model routing | full overwrite |
 | PDF templates | tenant data, pdf-tool versioning rules | tenant · `pdf-templates` · `pdfme/{templateId}/v{n}.json`, `meta.json`, `_index/{projectId}.json`, `validation/v{n}.json`, `previews/v{n}.json`, plus `thumbnails/{templateId}/v{n}.png` and `previews/{templateId}/v{n}-p{page}.png` (outside the `pdfme/` prefix) | template tools + workers | template tools, job route resolution | version record: `templateJson` never rewritten; `status`, `thumbnailKey`, `lastValidation` are patched in place after publish |
 | Render data (for PDF edits) | pdf-tool | tenant · `pdf-render-data` · `render-data/{jobId}.json` | worker after a template render | `executePdfEditJob` via `baseDataRef` | write-once |
+
+### 3b. pdf-tool-owned state (pdf-tool's own site)
+
+| Domain | Canonical owner | Storage (site · store · key) | Writer | Reader | Mutation path |
+|---|---|---|---|---|---|
 | MCP session | pdf-tool | own · `mcp-sessions` · `sessions/{uuid}.json` | `initialize`, touch on every request | `checkSession` | TTL `MCP_SESSION_TTL_SECONDS` (86400), deleted on `DELETE` |
 | Session grant | pdf-tool (holds a tenant secret) | own · `mcp-session-grants` · `grants/{sessionId}.json` (**actually written to the tenant site today — KI-01**) | `set_storage_grant` | `callTool` fallback | TTL-capped; cleared on session `DELETE` |
 | OAuth | pdf-tool | own · `mcp-oauth` · `clients/{id}.json` (never read), `used-codes/{jti}.json` (never expired) | register, token | token (single-use check) | append-only |
-| Health probe | pdf-tool | own · `agent-artifact-jobs` · `health/probe.json` | `/health`, MCP `health` | same | write/read/delete each call |
+| Health probe | pdf-tool | own · `agent-artifact-jobs` · `health/probe.json` (**caller's site instead when the MCP `health` tool is called with a grant attached — KI-01 class**) | `/health`, MCP `health` | same | write/read/delete each call |
+
+### 3c. pdf-tool-owned capture plane (pdf-tool's own site; a caller's grant is parsed for the projectId check but never used for any read or write)
+
+| Domain | Canonical owner | Storage (site · store · key) | Writer | Reader | Mutation path |
+|---|---|---|---|---|---|
 | Capture job (+ frontier) | pdf-tool | own · `agent-artifact-jobs` · `projects/{projectId}/capture-jobs/{jobId}.json`, `…/by-request/{requestId}.json` | capture tools + worker | capture tools + worker | frontier rewritten after every page |
-| Capture output (snapshot, screenshots, assets) | pdf-tool (tenant has no direct access) | own · `artifacts` / `artifact-index` under the canonical layout, kind `binary`, tag `capture` | capture worker via `saveArtifactBytes` | `get_capture_snapshot` (snapshot JSON only, ≤ inline ceiling) | write-once; **screenshot/asset bytes have no export path** (`CAPTURE_ARCHITECTURE.md §6`) |
-| Workflow JSON, content items, publish state | **Platform / CMS-Agent** | not in pdf-tool | never pdf-tool | never pdf-tool | `workflowPatchStatus: "skipped_by_design"` on every job response |
+| Capture output (snapshot, screenshots, assets) | pdf-tool (tenant has no direct access) | own · `artifacts` / `artifact-index` under the canonical layout (screenshots kind `image`, snapshot and assets kind `binary`; tags `capture` + `snapshot|screenshot|asset`) | capture worker via `saveArtifactBytes` under the own-storage grant | `get_capture_snapshot` (snapshot JSON only, ≤ inline ceiling) | write-once; **screenshot/asset bytes have no export path** (`CAPTURE_ARCHITECTURE.md §6`) |
+
+### 3d. Outside pdf-tool
+
+| Domain | Canonical owner | Storage | Writer | Reader | Mutation path |
+|---|---|---|---|---|---|
+| Workflow JSON, content items, publish state, editorial approval | **Platform / CMS-Agent** | not in pdf-tool | never pdf-tool | never pdf-tool | `workflowPatchStatus: "skipped_by_design"` on every job response |
 
 ## 4. Storage-grant data flow
 

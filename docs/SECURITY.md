@@ -37,7 +37,7 @@
 | OAuth 2.1 | PKCE S256 mandatory; codes are 5-min HMAC envelopes with best-effort single-use; owner password gates issuance; redirect host allowlist optional (default: any https host, localhost http) | acceptable for a single-operator service | refresh tokens 90 d, old refresh tokens stay valid, registered clients never validated, no revocation (KI-14) |
 | Connector authentication | three independent paths, all constant-time | sound | the connector key is also the fallback owner password: a URL-key client could approve connectors if `MCP_OAUTH_PASSWORD` is unset |
 | MCP sessions | random UUID ids, TTL, `DELETE` scrubs session + grant | correlation only | any authorized caller can use another session's stored grant by presenting its id (KI-10) |
-| Approval / resume | operator secret + job-scoped HMAC resume token (30 d, re-minted per poll); worker refuses blocked jobs | sound as a gate | no audit trail, no deny, no expiry of blocked jobs, resume tokens not single-use (harmless) (KI-27) |
+| Execution-approval gate / resume | operator secret + job-scoped HMAC resume token (30 d, re-minted per poll); worker refuses blocked jobs. This gates whether a *job runs*; editorial/publishing approval is not implemented here | sound as a gate | no audit trail, no deny, no expiry of blocked jobs, resume tokens not single-use (harmless) (KI-27) |
 | Replay | worker POSTs are at-most-once; resume replay is idempotent; auth codes single-use only when Blobs is up | acceptable | a `failed` job can be re-run by re-POSTing the worker (KI-06) |
 | Malicious SVG | Imports: `sniffImageFormat` accepts only png/jpeg/webp; anything else (SVG included) is rasterized by sharp/librsvg to png/jpeg and never stored as SVG. PDF jobs: `image-decode.ts` uses a full sharp raw decode as its oracle, so an SVG data URI **passes** and reaches the engine; chromium renders it with JS off and network closed, pdfme/react-pdf fail on non-raster input rather than execute anything | acceptable | no explicit SVG rejection for PDF job images (defence relies on engine sandboxes) |
 | Malicious PDF / template content | chromium print context: JS off, network closed; typst: sandboxed, no packages, no network; react-pdf/pdfme: data-driven; output PDFs are **not** sanitized | acceptable | PDFs containing JavaScript/launch actions pass through; consumers must treat them as untrusted documents |
@@ -51,7 +51,7 @@
 
 - **Artifact / template / image-search planes:** isolated by the tenant's Blobs token. pdf-tool cannot reach a tenant's store without a grant; a grant for tenant A cannot reach tenant B's site. Within one site, `projectId` only namespaces keys.
 - **Capture plane:** all tenants share pdf-tool's own site; `projectId` is a key prefix; the tools are grant-optional; `validateProjectAccess` is a no-op without a grant. Any authorized caller can read any project's capture job and snapshot (KI-11).
-- **Own state:** sessions, session grants (tenant tokens!), OAuth codes/clients — pdf-tool's site; readable by nobody but pdf-tool.
+- **Own state:** sessions, session grants (tenant tokens!), OAuth codes/clients — pdf-tool's site; readable by nobody but pdf-tool. Exception by defect: with a tenant grant active, `set_storage_grant` and the MCP `health` probe write to the tenant's site instead (KI-01).
 
 ## 4. Site capture specifics (requested checklist)
 
@@ -61,7 +61,7 @@
 | robots handling | fetched per crawl, unreachable ⇒ refuse (`CAPTURE_ROBOTS_UNAVAILABLE`), disallowed URLs skipped with evidence, `respectRobots` cannot be turned off |
 | crawl-delay | `max(policy.delayMs, robots crawl-delay)`; every wait counted in `evidence.rate` |
 | Authenticated access | `authenticatedAccess: "prohibited"` literal; no cookies/headers/storage state are ever passed to the browser context |
-| iframe / embed | metadata only (`embeds[]`), never navigated; embed hosts are not added to the allowlist, so their subresources are aborted |
+| iframe / embed | the extractor records metadata only (`embeds[]`) and never traverses frame content; the **browser** loads a subframe whose origin is allowlisted (same-origin or another `allowedCrawlOrigins` entry) because the route handler continues allowlisted navigations; off-allowlist embed hosts are aborted (they are never added to the allowlist) |
 | Asset downloading | Netlify-side, only under `rights.media = retain_referenced_allowed_origin_media`, per-hop guarded, capped |
 | CDN / cross-origin assets | allowed for asset bytes (a CDN is routinely another host); **not** allowed for page navigation or in-browser subresources outside the allowlist |
 | Worker continuation | frontier persisted after every page; chain re-trigger with bearer; the grant is irrelevant (own storage) |

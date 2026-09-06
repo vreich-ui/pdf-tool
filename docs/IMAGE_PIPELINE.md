@@ -77,7 +77,7 @@ Licensing metadata (`ImageLicenseInfo {class, name, url, attribution, commercial
 
 | Tool | Runs | Accepts | Guard | Produces |
 |---|---|---|---|---|
-| `import_image_from_url` | synchronously inside the function budget | one https URL to an image (gif/tiff/avif/… converted by sharp) | `assertSafeImportUrl`: https only, no `localhost`/`.local`/`.internal`, no IP literals — **redirects are followed by `fetch` without re-checking the target** (`import.ts:45-65`; contrast `capture/service-client.ts:fetchAssetBytes`) | artifact + `url_import` candidate; caller-asserted `license` (default unknown) |
+| `import_image_from_url` | synchronously inside the function budget | one https URL to an image (gif/tiff/avif/… converted by sharp) | `assertSafeImportUrl`: https only, no `localhost`/`.local`/`.internal`, no IP literals — **redirects are followed by `fetch` without re-checking the target** (`import.ts:45-65`; contrast `capture/service-client.ts:fetchAssetBytes`) | artifact + `url_import` candidate; caller-asserted `license` (default unknown); with `slot` set the `by-slot` pointer is **replaced** (autonomy `additive+pointer`) |
 | `import_images_from_url` | background job | a list of https URLs: image, **zip** (expanded in memory with `fflate.unzipSync` before per-entry size checks), or **HTML index page** (same-host `<img src>`/`<a href>` image links) | same URL guard per fetched URL; caps `maxUrlImportsPerBatch`/`PerRequest` | artifacts + candidates, per-source diagnostics |
 
 **Rights clearance for direct imports is the caller's responsibility** (the tool records `license` as asserted, defaulting to unknown). Imported artifacts are ordinary image artifacts and can be edited via `create_agent_artifact_job{operation: "edit"}`.
@@ -96,7 +96,7 @@ Licensing metadata (`ImageLicenseInfo {class, name, url, attribution, commercial
 | Concern | pdf-tool | Caller (Platform / CMS-Agent / agent) |
 |---|---|---|
 | Choosing a model | routes by policy when omitted; validates against the allowlist | sets `model`/`usageContext`; maintains the policy |
-| Spend | per-request USD ledger (best-effort) | overall budget, approval policy |
+| Spend | per-request USD ledger (best-effort) | overall budget; editorial/publishing approval |
 | Rights | records provider-declared license and caller-asserted license; excludes unknown by default | verifies rights before publishing; owns attribution display |
 | Style / brand | stores `style` verbatim, echoes `styleSource` | resolves visual standards into prompts/pixels |
 | Selection | banks up to 5 candidates | picks `selected`, discards the rest |

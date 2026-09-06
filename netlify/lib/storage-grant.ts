@@ -4,8 +4,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * Per-request storage grant. Clients mint a short-lived grant carrying the Netlify site id +
  * Blobs token for their own stores; agents forward it as the `storage` argument on every
  * storage-touching pdf-tool call. pdf-tool then reads/writes the client's Blob stores under
- * that grant and holds no storage credentials of its own — there is no server-side
- * environment fallback (the CLIENT_* / PDF_TOOL_* migration-era fallbacks were removed).
+ * that grant and holds no TENANT storage credentials of its own — there is no server-side
+ * environment fallback for client stores (the CLIENT_* migration-era fallback was removed;
+ * PDF_TOOL_SITE_ID / PDF_TOOL_BLOBS_TOKEN reach only pdf-tool's own operational and capture
+ * stores — see grantBlobCredentials and blob-store.ts jobBlobStore).
  *
  * The token is treated as radioactive: it lives only in-request (tool args -> ALS ->
  * worker POST body -> worker local scope), is never persisted in a job record, and is

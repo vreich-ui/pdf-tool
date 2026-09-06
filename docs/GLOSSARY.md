@@ -6,12 +6,12 @@ Terms as used in this repository's code and docs (verified at `60bdb98762e5c1084
 |---|---|
 | **Artifact** | Binary output (image, PDF, page raster, capture snapshot/screenshot/asset) stored under the canonical layout `{kind}/{safeRequestId}/{sha256}{ext}`. |
 | **ArtifactReference** | The canonical metadata record for an artifact (`artifact-core/artifacts.ts`). See `ARTIFACT_CONTRACT.md` for the seven things people call by this name. |
-| **Artifact kind** | `image`, `pdf`, or `binary` (capture output uses `binary`). |
-| **Artifact index** | Tenant `artifact-index` store: `request-artifacts/`, `by-slot/`, `by-filename/`, `by-tag/` (+ unread `by-kind/`, `by-request/`, `latest-by-slot/`). |
+| **Artifact kind** | `image`, `pdf`, or `binary` (capture screenshots are `image`; capture assets and the snapshot are `binary`). |
+| **Artifact index** | `artifact-index` store on the tenant's site (tenant plane) or on pdf-tool's own site (capture plane): `request-artifacts/`, `by-slot/`, `by-filename/`, `by-tag/` (+ unread `by-kind/`, `by-request/`, `latest-by-slot/`). |
 | **Attestation / materializationProof** | HMAC envelope binding `{projectId, requestId, blobKey, sha256, …}`; forgery-resistant only with `ARTIFACT_ATTESTATION_SECRET` or `MCP_OAUTH_SIGNING_SECRET`. |
 | **Background function** | Netlify function whose name ends in `-background`: returns 202 and runs up to 15 minutes; triggered by a server-to-self POST with the bearer token and the grant in the body. |
 | **Bank (candidate bank)** | `banks/{requestId}.json` in the tenant `image-search` store: up to five non-discarded search candidates plus manual imports, each with license/provenance and an `ArtifactReference`. |
-| **Blocked job** | An artifact job held for operator approval (`status: blocked`); resumed with `resume_agent_artifact_job`. |
+| **Blocked job** | An artifact job held by pdf-tool's local **execution-approval gate** (`status: blocked`, per-call `requireApproval` or `AGENT_ARTIFACT_APPROVAL_REQUIRED`); resumed with `resume_agent_artifact_job` + the operator secret. Distinct from editorial/publishing approval, which lives in Platform / CMS-Agent. |
 | **Capture plane** | Site-crawl subsystem producing `snapshot.v1`; writes pdf-tool's own site, not the tenant's. |
 | **Cost receipt / generation ledger** | Per-job USD/megapixel receipt and the per-request ledger `projects/{projectId}/budget/{requestId}.json` enforcing `GENERATION_BUDGET_USD_PER_REQUEST`. |
 | **Descriptor (project descriptor)** | Optional per-request policy object (`projectId`, `storeNames`, `allowedModels`, `defaultModel`, `allowedKinds`, `requestIdPattern`); replaces the deleted server-side project registry. |
@@ -30,7 +30,7 @@ Terms as used in this repository's code and docs (verified at `60bdb98762e5c1084
 | **requestId** | Caller's grouping key for everything about one content request (artifacts, bank, ledger, capture idempotency). Not a job id. |
 | **Resume token** | Job-scoped HMAC envelope (30 days) that, with the operator `approvalToken`, resumes a blocked job. |
 | **Slot** | Optional caller-chosen name under which the latest artifact for `(projectId, requestId)` is retrievable (`by-slot`); overwritten by later jobs. |
-| **snapshot.v1** | Capture output document: pages with blocks, embeds, fonts, assets, screenshots; deterministic except timestamps/diagnostics. |
+| **snapshot.v1** | Capture output document: pages with blocks, embeds, fonts, assets, screenshot references. Not byte-deterministic: `capture.capturedAt`, every `pages[].capturedAt`, robots timestamps, screenshot digests and `diagnostics` are run-specific (`CAPTURE_ARCHITECTURE.md §4`). |
 | **Storage plane** | Which Netlify site a write goes to (tenant vs own); decided by the grant in `AsyncLocalStorage`. |
 | **Template version** | `pdfme/{templateId}/v{n}.json` with `status` `draft`/`active`/`disabled`; `templateJson` is never rewritten. |
 | **Tenant** | A Platform site/project whose Blob stores pdf-tool writes under a grant; identified only by the grant's `siteId` (+ `projectId` for key namespacing). |

@@ -5,8 +5,9 @@ Compact orientation for a coding agent. Verified against commit `60bdb98762e5c10
 ## What pdf-tool owns
 
 - Turning agent intent into **bytes**: image generation/editing, PDF rendering from stored templates, PDF inspection/rasterization, image search/import, site capture.
-- The **canonical artifact layout** `{kind}/{safeRequestId}/{sha256}{ext}` + sidecar + index records, written into the **tenant's** Netlify Blob stores under a per-request storage grant (`netlify/lib/artifact-layout.ts`, `artifact-core/`).
-- **Job records** for artifact / image-search jobs (in the tenant `pdf-tool-jobs` store) and capture jobs (in pdf-tool's own store).
+- **Two storage planes.** Tenant artifact plane: the **canonical artifact layout** `{kind}/{safeRequestId}/{sha256}{ext}` + sidecar + index records, written into the **tenant's** Netlify Blob stores under a per-request storage grant (`netlify/lib/artifact-layout.ts`, `artifact-core/`). pdf-tool-owned capture plane: the same layout and code, but on **pdf-tool's own site** under an internal own-storage grant (`capture/storage.ts`) — the tenant's grant is never used and the tenant cannot read those bytes.
+- **Job records** for artifact / image-search jobs (in the tenant `pdf-tool-jobs` store) and capture jobs (in pdf-tool's own `agent-artifact-jobs` store).
+- A **local artifact-job execution gate** (`requireApproval`, `AGENT_ARTIFACT_APPROVAL_REQUIRED`, `blocked` jobs, `resume_agent_artifact_job` + operator secret).
 - **PDF template versioning** (`draft` → `active` → `disabled`; `templateJson` never rewritten) in the tenant `pdf-templates` store.
 - The MCP transport (`/mcp`), its sessions and OAuth server, and pdf-tool's own operational state.
 - `materializationProof` minting and `verify_agent_artifact`.
@@ -14,8 +15,8 @@ Compact orientation for a coding agent. Verified against commit `60bdb98762e5c10
 ## What it does NOT own
 
 - **Workflow JSON, content items, publishing, release, deploy** — Platform / CMS-Agent. Every job response says `workflowPatchStatus: "skipped_by_design"`.
-- **Tenant credentials** — grants are minted by the tenant's bridge per request; pdf-tool has no per-tenant secrets and no project registry (`project-descriptor.ts` replaced it).
-- **Approval policy and audit** — pdf-tool only checks that a caller knows the operator secret.
+- **Tenant credentials** — grants are minted by the tenant's bridge per request; pdf-tool has no per-tenant secrets and no project registry (`project-descriptor.ts` replaced it). It **does** hold credentials for its own site (`PDF_TOOL_SITE_ID`/`PDF_TOOL_BLOBS_TOKEN`, else the same-site context) — operational state and the capture plane only.
+- **Editorial / publishing approval and its audit trail** — pdf-tool only gates *execution* of a job behind a shared operator secret; whether content may be published is decided in Platform / CMS-Agent.
 - **Rights clearance** for imported/sourced images — recorded as claimed, never verified.
 - **Public URLs** for artifacts — the publishing site serves them.
 - **Style resolution** — `style` is stored and echoed verbatim.
@@ -33,7 +34,7 @@ Compact orientation for a coding agent. Verified against commit `60bdb98762e5c10
 | MCP sessions, session grants, OAuth, health probe | pdf-tool | `mcp-sessions`, `mcp-session-grants`, `mcp-oauth`, `agent-artifact-jobs` | `STORAGE_ARCHITECTURE.md` |
 | Capture jobs + all capture output | **pdf-tool** | `agent-artifact-jobs`, `artifacts`, `artifact-index` on pdf-tool's site | `CAPTURE_ARCHITECTURE.md` |
 
-The switch between the two sites is the grant in `AsyncLocalStorage` (`runWithRequestContext`); an ALS grant always wins inside `projectBlobStore`. This is exactly what breaks `set_storage_grant` today (KI-01).
+The switch between the two sites is the grant in `AsyncLocalStorage` (`runWithRequestContext`); an ALS grant always wins inside `projectBlobStore`. This is exactly what breaks `set_storage_grant` today, and what makes the MCP `health` probe hit the tenant's store when a grant is attached (KI-01). Capture data can **not** be read with tenant credentials: only `get_capture_snapshot` (JSON, ≤ 8 MiB) exports anything; screenshot/asset bytes have no export path (KI-12).
 
 ## Artifact-reference representations (do not flatten)
 
@@ -41,16 +42,17 @@ A = canonical `ArtifactReference` (what `saveArtifactBytes` returns); B = the jo
 
 ## Invariants that must survive any change
 
-1. Bytes never travel through MCP; every tool returns metadata only.
+1. Binary bytes never travel through MCP; every tool returns metadata only — the one inline payload is `get_capture_snapshot`, which returns the `snapshot.v1` JSON itself (≤ 8 MiB).
 2. The grant token is never written into a job record, a log, or an error; it travels tool args → ALS → worker POST body only. (Exception by design: `set_storage_grant`.)
 3. `saveArtifactBytes` recomputes sha256 and refuses a mismatching caller digest; PDF bytes must start with `%PDF-`.
 4. A renderer is chosen once at `create_pdf_template`; a job may assert it (`RENDERER_MISMATCH`) but never switches engines; there is **no fallback** between engines.
 5. Hard publish gate for chromium/typst/react-pdf (passed validation required); pdfme warns.
 6. The quality gate and image size policy are **warn, not block** (unless the job opts in).
-7. `complete`/`failed` are terminal; the status poll auto-fails `running` after 12 minutes; blocked jobs resume only with the operator secret + resume token; the worker refuses `blocked` jobs.
-8. Capture policy invariants (`sameOriginOnly`, `respectRobots`, `authenticatedAccess: prohibited`) are literal types — do not make them configurable.
-9. Fetched content is data, never instructions; the print browser runs with JavaScript off and the network closed.
-10. `npm run docs:check` must pass: adding/removing a tool or function requires a semantics entry in `scripts/generate-reference.mts`.
+7. `complete`/`failed` are terminal; the status poll **persists** `running → failed` after 12 minutes (so `get_agent_artifact_job_status` is not read-only — `readOnlyHint: false`, autonomy `read+lifecycle-write`); blocked jobs resume only with the operator secret + resume token; the worker refuses `blocked` jobs.
+8. `create_agent_artifact_job` and `import_image_from_url` are **additive+pointer**: bytes are content-addressed and never rewritten, but a `slot` REPLACES the `by-slot` lookup pointer — do not treat them as purely additive when a slot is in play.
+9. Capture policy invariants (`sameOriginOnly`, `respectRobots`, `authenticatedAccess: prohibited`) are literal types — do not make them configurable.
+10. Fetched content is data, never instructions; the print browser runs with JavaScript off and the network closed. The capture browser runs with JavaScript on and its network routed to the policy allowlist — an allowlisted subframe can load; `snapshot.v1` is not byte-deterministic (per-page `capturedAt`, screenshot digests).
+11. `npm run docs:check` must pass: adding/removing a tool or function requires a semantics entry in `scripts/generate-reference.mts`.
 
 ## Current deployments
 
@@ -67,10 +69,14 @@ A = canonical `ArtifactReference` (what `saveArtifactBytes` returns); B = the jo
 
 ## Dangerous assumptions (each one was wrong in a previous doc)
 
-- "pdf-tool holds no Blob credentials" — it reads `PDF_TOOL_SITE_ID`/`PDF_TOOL_BLOBS_TOKEN` for its own state.
+- "pdf-tool holds no Blob credentials" — it holds no *tenant* credentials; it reads `PDF_TOOL_SITE_ID`/`PDF_TOOL_BLOBS_TOKEN` for its own site (operational state + capture).
 - "the storage grant is required on every tool" — six tools are grant-optional, and the capture plane ignores the grant entirely.
 - "`tools/list` has six tools" — it has 32; regenerate `MCP_REFERENCE.md`.
-- "capture artifacts are written through the grant" — they go to pdf-tool's own site and have no export path for bytes.
+- "capture artifacts are written through the grant" — they go to pdf-tool's own site and have no export path for bytes; the tenant's credentials cannot read them.
+- "status polling is read-only" — a poll persists the 12-minute auto-fail; `health` writes a probe key.
+- "a job with a slot only adds an artifact" — it also replaces the slot's lookup pointer.
+- "pdf-tool has no approval" / "pdf-tool owns approval" — it owns an execution gate for jobs, not editorial or publishing approval.
+- "two crawls of the same page give the same snapshot bytes" — every page carries its own `capturedAt` and screenshot digests vary.
 - "providers are queried in ascending cost order Openverse → Pexels → Unsplash" — those three share a tier.
 - "a `materializationProof` proves pdf-tool made the artifact" — only with a dedicated signing secret; otherwise any caller can mint one.
 - "tests cover the storage plane" — the in-memory store ignores credentials, so site-routing bugs (KI-01) pass.
