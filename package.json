@@ -7,7 +7,9 @@
     "check:eslint": "tsc --noEmit",
     "test": "npm run test:netlify && npm run test:service",
     "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js",
-    "test:service": "npm --prefix render-service run test"
+    "test:service": "npm --prefix render-service run test",
+    "docs:generate": "tsx scripts/generate-reference.mts",
+    "docs:check": "rm -rf .tmp-docs && tsx scripts/generate-reference.mts --out .tmp-docs && diff -u docs/MCP_REFERENCE.md .tmp-docs/MCP_REFERENCE.md && diff -u docs/HTTP_REFERENCE.md .tmp-docs/HTTP_REFERENCE.md && rm -rf .tmp-docs"
   },
   "dependencies": {
     "@netlify/blobs": "^9.1.2",

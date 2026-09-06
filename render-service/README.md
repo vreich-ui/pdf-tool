@@ -118,7 +118,8 @@ Request body:
     { "family": "Custom Sans", "weight": "bold", "bytesBase64": "…" }
   ],
   "options": { "mode": "final", "timeoutMs": 60000,    // timeoutMs clamped [1000, 120000], default 60000
-               "wantThumbnail": false },               // optional; also return a first-page PNG (below)
+               "wantThumbnail": false,                 // optional; also return a first-page PNG (below)
+               "lenient": false },                     // optional; true = missing Liquid paths render empty instead of DATA_BINDING_ERROR
   "maxOutputBytes": 25000000
 }
 ```
@@ -185,7 +186,7 @@ Failure (always JSON, never bytes):
 | Status | `code`                | When                                                                                              |
 | ------ | --------------------- | --------------------------------------------------------------------------------------------------- |
 | 400    | `TEMPLATE_INVALID`    | Malformed request, oversized `template.html`/`css`, bad partial name/count/size, bad asset name, invalid base64, bad option value |
-| 400    | `DATA_BINDING_ERROR`  | `data` exceeds the 2 MB serialized cap, OR the Liquid render itself failed (e.g. `strictVariables` in validation mode hit a missing path, or `{% render %}`'d a partial that isn't in `template.assets.partials`) |
+| 400    | `DATA_BINDING_ERROR`  | `data` exceeds the 2 MB serialized cap, OR the Liquid render itself failed (e.g. a missing `{{ path }}` under strict variables — every mode unless `options.lenient: true` — or `{% render %}`'d a partial that isn't in `template.assets.partials`) |
 | 400    | `ASSET_TOO_LARGE`     | A decoded asset/font (or the asset/font total) exceeds its cap                                    |
 | 401    | `RENDER_SERVICE_AUTH` | Missing/wrong `x-render-secret`, or `RENDER_SERVICE_SECRET` unset on the server (fails closed)     |
 | 500    | `RENDER_ENGINE_ERROR` | Chromium failed to launch/render, or an unexpected server error                                    |
@@ -198,10 +199,10 @@ Failure (always JSON, never bytes):
   builtin `| raw` filter (`{{ value | raw }}`) — use only for html you trust, never for
   interpolated user data.
 - `strictFilters: true` always (an unknown filter is a template bug, not a soft-fail).
-- `strictVariables` is mode-dependent: `false` in `mode: "final"` (a missing `{{ path }}`
-  renders as an empty string), `true` in `mode: "validation"` (a missing path throws ->
-  `DATA_BINDING_ERROR` — the point of validation mode is to catch this against worst-case
-  sample data before publish).
+- `strictVariables` is **on in every mode** (a missing `{{ path }}` throws ->
+  `DATA_BINDING_ERROR`) unless the request sets `options.lenient: true`, which is the per-job
+  opt-out pdf-tool forwards from `create_agent_artifact_job{lenient}` (T1.2 — `mode` no longer
+  has any say in binding strictness; see `src/engines/chromium.ts` `buildLiquidEngine`).
 - Partials resolve **only** from the in-memory map built from `template.assets.partials`, via
   liquidjs's `templates` option. That option backs `{% render %}` (and `include`/`layout`)
   with a `MapFS` that does a plain object-key lookup and never touches `node:fs` or the
@@ -343,7 +344,7 @@ document's own DOM attributes, and embed hosts are never added to `networkAllowl
 iframe's own subframe load, if it happens at all, is subject to the same allowlist as
 every other request and is typically blocked. The field-by-field contract lives as a
 comment above the embed-extraction code in `EXTRACT_PAGE_MODEL_SCRIPT`
-(`src/capture.ts`); the schema copy is `tests/fixtures/snapshot-v1.schema.json`
+(`src/capture.ts`); the schema copy is `tests/fixtures/snapshot-v1.schema.json` (repo root)
 (`properties.pages.items.properties.embeds`).
 
 `page.fonts[]` (T15.22) — `@font-face` declarations and known-provider stylesheet links
@@ -377,7 +378,7 @@ order over `document.styleSheets`/CSSOM rules is not trusted as final, and `docu
 this reason. Each entry's own `sources[]` is sorted too (by format, then URL). The
 field-by-field contract lives as a comment above the font-extraction code in
 `EXTRACT_PAGE_MODEL_SCRIPT` (`src/capture.ts`); the schema copy is
-`tests/fixtures/snapshot-v1.schema.json` (`properties.pages.items.properties.fonts`).
+`tests/fixtures/snapshot-v1.schema.json` at the repo root (`properties.pages.items.properties.fonts`).
 
 Unlike the print path, this navigates with **JavaScript ENABLED** — inside its own fresh
 per-request `BrowserContext` whose `context.route("**/*")` aborts every request to an

@@ -1,8 +1,10 @@
 # react-pdf docTree — Agent Reference
 
+> **Scope note (2026-09-06 audit):** current for the `react-pdf` engine; schema source of truth is `netlify/lib/pdf-render/doc-tree/schema.ts` (JSON copy `schema.json`). Renderer selection and the other engines: `docs/PDF_RENDERING.md`.
+
 Concise reference for the `react-pdf` engine's docTree template format (`docTreeVersion: 1`).
 Source of truth: `docs/plans/MULTI_RENDERER_PLAN.md` lines 130-296 (PR2 schema draft, published at
-`netlify/lib/renderers/react-pdf/doctree.schema.json`). DocTree is a **declarative, allowlisted**
+`netlify/lib/pdf-render/doc-tree/schema.json`). DocTree is a **declarative, allowlisted**
 JSON document — no arbitrary code, no arbitrary style passthrough, no http(s) URLs, no
 expressions. Every node type and every style property is explicitly allowlisted; anything else is
 a validation error at template-create time.

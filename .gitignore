@@ -2,3 +2,4 @@ node_modules/
 .tmp-tests/
 dist/
 .netlify/
+.tmp-docs/
