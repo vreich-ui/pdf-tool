@@ -72,7 +72,8 @@ export interface CaptureFrontier {
   /** Final (post-redirect) URLs already captured — the redirect-dedupe set. */
   capturedFinalUrls: string[];
   /** snapshot.v1 page payloads captured so far (screenshot METADATA only — binaries are
-   * already persisted as artifacts through the storage grant). */
+   * already persisted as artifacts in pdf-tool's own store via the capture plane's
+   * internal own-storage grant — see ./storage.ts). */
   pages: Array<Record<string, unknown>>;
   skipped: Array<Record<string, unknown>>;
   quarantined: Array<Record<string, unknown>>;

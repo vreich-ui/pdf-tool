@@ -1,5 +1,7 @@
 # MCP bridge parity audit
 
+> **STATUS: HISTORICAL (single-PR audit note).** Retained as the record of the bridge-parity decision; the live tool catalogue is `docs/MCP_REFERENCE.md` (generated).
+
 Platform is about to route its whole bridge through this repo's `/mcp` endpoint instead of
 eleven standalone bridge functions. This document records every field-shape divergence found
 between each `callTool` case arm in `netlify/functions/mcp.ts` and its standalone Netlify

@@ -1,5 +1,7 @@
 # Capture plane ops note (T12.8)
 
+> **Scope note (2026-09-06 audit):** operational numbers and cost estimate for the capture plane. Architecture, storage and trust model: `docs/CAPTURE_ARCHITECTURE.md`.
+
 The T12.8 capture plane adds `POST /capture/page` to the render-service (JavaScript
 ENABLED, per-request browser context, network restricted to the job's allowlist) and a
 `capture` job kind on the Netlify side (`create_capture_job` / `get_capture_job_status`

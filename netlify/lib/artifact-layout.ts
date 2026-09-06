@@ -79,7 +79,8 @@ function validateBytes(input: SaveArtifactBytesInput, bytes: Buffer): void {
  * and writes every retained index (request-artifacts, by-request, by-kind, by-tag, and —
  * when a slot/filename applies — by-slot, latest-by-slot, by-filename) into the caller's
  * `artifactIndex` store. Store names and credentials come from the active storage grant
- * (plus descriptor storeNames gaps); pdf-tool holds none of its own.
+ * (plus descriptor storeNames gaps); pdf-tool holds no tenant credentials of its own (the
+ * capture plane runs this same function under its internal own-storage grant instead).
  */
 export async function saveArtifactBytes(input: SaveArtifactBytesInput): Promise<ArtifactReference> {
   const bytes = Buffer.from(input.bytes);

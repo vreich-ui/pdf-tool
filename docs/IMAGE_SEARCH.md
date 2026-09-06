@@ -1,5 +1,7 @@
 # Image search subsystem
 
+> **Scope note (2026-09-06 audit):** the policy JSON reference and scoring algorithm below are current (`netlify/lib/image-search/policy.ts`, `scoring.ts`). The **Roadmap** section at the end predates the stateless refactor and the multi-renderer program and is historical. Pipeline overview: `docs/IMAGE_PIPELINE.md`.
+
 Least-cost image sourcing for artifact requests. An agent (or a prompt routed through MCP)
 asks for images; pdf-tool searches the project's own media library first, then online
 providers in ascending cost order, scores every result against a JSON policy, and banks up

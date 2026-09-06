@@ -131,8 +131,14 @@ test("tool annotations: read tools are readOnlyHint, the delete-capable tool is 
 
   assert.equal(byName.get("get_pdf_template")!.annotations?.readOnlyHint, true);
   assert.equal(byName.get("list_pdf_templates")!.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("get_agent_artifact_job_status")!.annotations?.readOnlyHint, true);
-  assert.equal(byName.get("health")!.annotations?.readOnlyHint, true);
+  // Architecture-audit correction (PR #78): these two tools PERSIST state on some calls — the
+  // status poll auto-fails a stale `running` job (JOB_EXECUTION_TIMEOUT) and health writes/
+  // deletes a probe key — so per the MCP readOnlyHint contract ("does not modify its
+  // environment") they must NOT be advertised as read-only. They are idempotent.
+  assert.equal(byName.get("get_agent_artifact_job_status")!.annotations?.readOnlyHint, false);
+  assert.equal(byName.get("get_agent_artifact_job_status")!.annotations?.idempotentHint, true);
+  assert.equal(byName.get("health")!.annotations?.readOnlyHint, false);
+  assert.equal(byName.get("health")!.annotations?.idempotentHint, true);
 
   assert.equal(byName.get("update_image_search_candidate")!.annotations?.destructiveHint, true, "the only tool that can delete artifact bytes (deleteArtifact:true)");
   assert.notEqual(byName.get("get_pdf_template")!.annotations?.destructiveHint, true);
