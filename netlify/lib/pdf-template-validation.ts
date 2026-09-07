@@ -18,6 +18,7 @@ import {
   writePdfTemplateValidation,
   type PdfTemplateValidationReport,
 } from "./pdf-template-store.js";
+import { storeAccessFailure } from "./store-access-error.js";
 
 /**
  * NOTE: this module deliberately does NOT import pdf-render/render.js (renderPdfArtifact).
@@ -137,7 +138,7 @@ export async function startPdfTemplateValidation(
   try {
     await writePdfTemplateValidation(input.projectId, report);
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Template store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Template store", error, safeError(error)), ok: false as const };
   }
 
   try {

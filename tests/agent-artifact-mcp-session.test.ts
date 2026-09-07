@@ -221,7 +221,7 @@ test("MCP initialize degrades to a stateless session when the session store fail
 
 // ── Robustness: a tool write failure returns a clean tool error, never a 5xx crash ──
 
-test("MCP tools/call returns a tool error (not a crash) when the job store write fails", async () => {
+test("MCP tools/call reports a Blobs 401 as a permanent grant failure, not a retryable outage", async () => {
   // Force the pdf-tool job store to reject writes, simulating a Netlify Blobs 401.
   setMemoryBlobStoreSet("agent-artifact-jobs", async () => { throw new Error("Netlify Blobs has generated an internal error (401 status code)"); });
 
@@ -233,7 +233,14 @@ test("MCP tools/call returns a tool error (not a crash) when the job store write
   assert.equal(response.statusCode, 200, "must return a JSON-RPC response, not an origin 5xx");
   const result = JSON.parse(response.body).result;
   assert.equal(result.isError, true);
-  assert.match(result.structuredContent.error, /job store unavailable/i);
+  // Blobs reports an auth failure as a generic internal error carrying the status. Passing
+  // that through as a 503 told every client the call was transient, so a wrong or expired
+  // grant got retried on a backoff forever instead of being surfaced.
+  assert.equal(result.structuredContent.errorCode, "STORAGE_GRANT_INVALID");
+  assert.equal(result.structuredContent.statusCode, 401);
+  assert.equal(result.structuredContent.retryable, false);
+  assert.match(result.structuredContent.error, /rejected the storage grant/i);
+  assert.match(result.structuredContent.error, /not transient/i);
 });
 
 // ── Transport hygiene: OPTIONS preflight, GET, unknown notifications ──

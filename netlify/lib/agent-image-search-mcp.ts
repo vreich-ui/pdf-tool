@@ -6,6 +6,7 @@ import { readImageSearchBank, updateImageSearchCandidateState, type UpdateCandid
 import { importImageArtifactFromUrl, type ImportImageFromUrlInput } from "./image-search/import.js";
 import { bankSingleUrlImport } from "./image-search/url-import.js";
 import { loadProjectImageSourcingPolicy, saveProjectImageSourcingPolicy, validateImageSourcingPolicyPatch } from "./image-search/policy.js";
+import { storeAccessFailure } from "./store-access-error.js";
 
 export const IMAGE_SEARCH_WORKER_FUNCTION = "image-search-worker-background";
 
@@ -25,7 +26,7 @@ export async function createImageSearchJob(input: unknown, options: { baseUrl?: 
   try {
     job = await createImageSearchJobRecord(parsed.data);
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Image search job store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Image search job store", error, safeError(error)), ok: false as const };
   }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId, IMAGE_SEARCH_WORKER_FUNCTION);
@@ -170,7 +171,7 @@ export async function createImageImportJob(input: unknown, options: { baseUrl?: 
   try {
     job = await createImageSearchJobRecord(parsed.data);
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Image import job store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Image import job store", error, safeError(error)), ok: false as const };
   }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId, IMAGE_SEARCH_WORKER_FUNCTION);
