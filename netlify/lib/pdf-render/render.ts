@@ -2,6 +2,7 @@ import { getPdfTemplate, getPdfTemplateMeta, type PdfTemplateRecord } from "../p
 import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type NormalizedPdfRequirements } from "../agent-artifact-jobs.js";
 import { RenderError } from "./errors.js";
 import { assertRenderDataMatchesSchema, checkRenderDataAgainstSchema } from "./render-data-schema.js";
+import { fillOptionalSlots } from "./optional-slots.js";
 import { precheckChromiumTemplateAssets } from "./asset-precheck.js";
 import { enforcePdfRequirements, inspectPdf, type RequirementFailure } from "./inspect.js";
 import { REGISTERED_RENDERERS } from "./registry.js";
@@ -90,7 +91,10 @@ export async function renderPdfArtifact(options: {
    * caller is unchanged. */
   engineMode?: "final" | "validation";
 }): Promise<RenderPdfArtifactOutput> {
-  const { projectId, templateId, data, assets, requirements } = options;
+  const { projectId, templateId, assets, requirements } = options;
+  // Reassigned below for chromium, where absent OPTIONAL slots are materialized so strict
+  // binding does not fail a template for the fields it declared optional.
+  let data = options.data;
   const mode = options.mode ?? "final";
 
   let record: PdfTemplateRecord;
@@ -170,7 +174,17 @@ export async function renderPdfArtifact(options: {
   // ASSET_MISSING instead of rendering broken-image boxes and completing (BRIEF defect class
   // 3). pdfme binds images through `data` rather than `assets.images` and has no equivalent
   // of either reference form, so it — and every other renderer — is untouched.
+  // Strict binding does not distinguish an OUTPUT position from a TEST position, so
+  // `{% if section.figure %}` — Liquid's own way of asking "is this here?" — failed the
+  // render with DATA_BINDING_ERROR on exactly the sections that legitimately have none, as
+  // did `{% for %}` over an absent collection. That made an optional field inexpressible and
+  // put the renderer at odds with this repo's deriver, which types those same slots OPTIONAL.
+  // Materializing only what the deriver calls optional keeps strict binding catching genuinely
+  // missing REQUIRED data while letting optionals behave the way the contract promises.
+  // Runs AFTER schema validation (a filled null must not be judged against the schema) and
+  // BEFORE the asset precheck, so the precheck sees the data the engine will actually get.
   if (record.renderer === "chromium") {
+    data = fillOptionalSlots(record.templateJson, record.renderer, data).data;
     precheckChromiumTemplateAssets(record.templateJson, data, assets);
   }
 

@@ -577,7 +577,7 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
   }
 
   if (node.usedAsArray) {
-    ctx.slots.push({ path, kind: "array", required: isRequired(node) });
+    ctx.slots.push({ path, kind: "array", required: slotRequired(node, path) });
     const item = node.item ?? newNode();
     const emitted = emit(item, name, `${path}[]`, ctx);
     return {
@@ -593,10 +593,13 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
     const sample: Record<string, unknown> = {};
     const required: string[] = [];
     for (const [key, child] of [...node.children.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const emitted = emit(child, key, path ? `${path}.${key}` : key, ctx);
+      const childPath = path ? `${path}.${key}` : key;
+      const emitted = emit(child, key, childPath, ctx);
       properties[key] = emitted.schema;
       sample[key] = emitted.sample;
-      if (isRequired(child)) required.push(key);
+      // Same rule the slots[] listing uses — the schema and the listing must never disagree
+      // about whether a caller has to send something.
+      if (slotRequired(child, childPath)) required.push(key);
     }
     return {
       schema: {
@@ -657,6 +660,22 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
 
   ctx.slots.push({ path, kind: "string", required: isRequired(node) });
   return { schema: { type: "string" }, sample: sampleString(name) };
+}
+
+/**
+ * Whether a caller MUST send this slot — the single answer both the JSON Schema's `required`
+ * list and the `slots[]` listing use, so the two can never disagree.
+ *
+ * A collection nested inside ANOTHER collection's element is optional per element: some rows
+ * carry a gallery, most do not, and `{% for %}` over an absent one is Liquid's own way of
+ * rendering nothing. The OUTERMOST collection stays required — a document whose `sections`
+ * are missing is broken data, and silently rendering an empty document is the blank-page
+ * defect this contract exists to catch. A SCALAR inside an element (`sections[].heading`)
+ * also stays required: a row missing its heading is bad data, not an absent option.
+ */
+function slotRequired(node: SlotNode, path: string): boolean {
+  if (node.usedAsArray && path.includes("[]")) return false;
+  return isRequired(node);
 }
 
 /** A node is required when it (or anything under it) was read outside every conditional. */

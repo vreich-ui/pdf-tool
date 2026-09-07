@@ -159,9 +159,12 @@ function evaluateCondition(when: Record<string, unknown>, ctx: BindingContext, s
   const path = when.path as string;
   const op = (when.op as string | undefined) ?? "truthy";
   const bound = resolvePath(path, ctx);
-  if (bound === MISSING && !state.options.lenient && op !== "exists") {
-    throw new RenderError("DATA_BINDING_ERROR", `Missing data for $if path "${path}" at ${where}`, { path, where });
-  }
+  // A conditional TEST is the one position where "not there" is a legitimate answer rather
+  // than missing data: `$if` exists precisely to ask whether the caller supplied something.
+  // Throwing here made an optional branch inexpressible and contradicted the contract
+  // deriver, which types an `$if`-guarded path as OPTIONAL. An absent path is falsy — the
+  // same answer `exists` already gave, and the same semantics the chromium engine now has.
+  // A path read for OUTPUT ({{...}}) is untouched and still fails strictly.
   const value = bound === MISSING ? undefined : bound;
   switch (op) {
     case "exists":

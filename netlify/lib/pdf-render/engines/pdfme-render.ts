@@ -152,6 +152,51 @@ function resolveRenderInputs(schemas: unknown, data: unknown): { inputs: Record<
   return { inputs: [resolved], unbound, defaulted };
 }
 
+/**
+ * pdfme resolves a field's geometry deep inside pdf-lib, so a non-finite coordinate surfaces
+ * as `options.start.x must be of type number, but was actually of type NaN` — an error that
+ * names no field, no page, and no template. Observed live on site_platform: a render that
+ * failed with exactly that and nothing else to go on.
+ *
+ * Checking the stored geometry first turns the template-side half of that class into a typed
+ * failure that names the field. Anything still NaN after this was COMPUTED during layout, and
+ * the catch below says so rather than repeating the bare engine text.
+ */
+export function assertFinitePdfmeGeometry(schemas: unknown): void {
+  if (!Array.isArray(schemas)) return;
+  schemas.forEach((page, pageIndex) => {
+    const fields: unknown[] = Array.isArray(page)
+      ? page
+      : page && typeof page === "object"
+        ? Object.values(page as Record<string, unknown>)
+        : [];
+    fields.forEach((field, fieldIndex) => {
+      if (!field || typeof field !== "object") return;
+      const record = field as Record<string, unknown>;
+      const name = typeof record.name === "string" && record.name ? record.name : `#${fieldIndex}`;
+      const position = (record.position ?? {}) as Record<string, unknown>;
+      const checks: Array<[string, unknown]> = [
+        ["position.x", position.x],
+        ["position.y", position.y],
+        ["width", record.width],
+        ["height", record.height],
+      ];
+      for (const [property, value] of checks) {
+        // Absent is fine — pdfme has its own defaults. Present-but-not-a-finite-number is not.
+        if (value === undefined || value === null) continue;
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          throw new RenderError(
+            "TEMPLATE_INVALID",
+            `pdfme template field "${name}" on page ${pageIndex + 1} has a non-finite ${property} (${JSON.stringify(value)}). ` +
+              "pdfme rejects this inside pdf-lib with an opaque \"must be of type number, but was actually of type NaN\" that names no field; fix the field's geometry in the template.",
+            { field: name, page: pageIndex + 1, property, value: String(value) }
+          );
+        }
+      }
+    });
+  });
+}
+
 async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   const { generate } = await import("@pdfme/generator");
   const { BLANK_PDF } = await import("@pdfme/common");
@@ -163,6 +208,8 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
     ...storedTemplate,
     basePdf: normalizeBasePdf(storedTemplate.basePdf, BLANK_PDF),
   } as PdfmeTemplate;
+
+  assertFinitePdfmeGeometry(storedTemplate.schemas);
 
   const { inputs, unbound, defaulted } = resolveRenderInputs(storedTemplate.schemas, input.data);
 
@@ -182,7 +229,17 @@ async function renderPdfme(input: RenderInput): Promise<RenderOutput> {
   try {
     pdfBytes = await generate({ template: normalizedTemplate, inputs, plugins });
   } catch (error) {
-    throw new RenderError("RENDER_ENGINE_ERROR", `pdfme generate failed: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    if (/must be of type number, but was actually of type NaN/i.test(message)) {
+      // Every stored coordinate was finite (checked above), so the non-finite value was
+      // produced during layout — which is what happens when a dynamic-height field is bound
+      // to data of an unexpected shape. Say that, instead of forwarding the bare engine text.
+      throw new RenderError(
+        "RENDER_ENGINE_ERROR",
+        `pdfme generate failed: ${message} — every field's stored position/width/height in this template is finite, so the non-finite value was COMPUTED during layout. That points at a dynamic-height field bound to data of an unexpected shape rather than at the template's geometry; check the fields this render's data binds.`
+      );
+    }
+    throw new RenderError("RENDER_ENGINE_ERROR", `pdfme generate failed: ${message}`);
   }
   const bytes = Buffer.from(pdfBytes);
 
