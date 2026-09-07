@@ -25,7 +25,7 @@
   position: absolute;
   left: 226.09px;
   top: 191.00px;
-  width: 81.16px;
+  width: 82.16px;
   margin: 0;
   font-family: sans-serif;
   font-size: 14.40px;

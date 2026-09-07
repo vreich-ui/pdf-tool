@@ -252,8 +252,12 @@ test("buildAnnotationDocument emits absolute-pixel CSS, an SVG arrow with a mark
     availableLogoIds: new Set<string>(),
   });
 
-  // Every coordinate the resolver produced reaches CSS, in px, at a fixed precision.
-  assert.match(css, /\.ann-cap \{[\s\S]*left: 12\.00px;[\s\S]*top: 34\.00px;[\s\S]*width: 200\.00px;/);
+  // Every coordinate the resolver produced reaches CSS, in px, at a fixed precision — `top`
+  // untouched, and `left`/`width` carrying KI-31's align-aware CSS-width slack (see
+  // widenedTextBox/TEXT_WIDTH_SLACK_FRACTION/_MIN_PX in render.ts): box.w=200 gets
+  // max(1, 200*0.01)=2px of slack, split evenly for `align: "center"` so the box's own center
+  // (not its raw left edge) stays where the resolver anchored it — left 12-1=11, width 200+2=202.
+  assert.match(css, /\.ann-cap \{[\s\S]*left: 11\.00px;[\s\S]*top: 34\.00px;[\s\S]*width: 202\.00px;/);
   assert.match(css, /color: #00ff00;/);
   assert.match(css, /text-align: center;/);
   // Height is deliberately unset on text and overflow deliberately visible — an

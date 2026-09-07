@@ -45,11 +45,11 @@
       "found": true,
       "x": 0,
       "y": 0,
-      "w": 142.265625,
+      "w": 143.6875,
       "h": 18,
-      "scrollW": 142,
+      "scrollW": 144,
       "scrollH": 18,
-      "clientW": 142,
+      "clientW": 144,
       "clientH": 18
     },
     {
@@ -57,11 +57,11 @@
       "found": true,
       "x": 0,
       "y": 0,
-      "w": 142.265625,
+      "w": 143.6875,
       "h": 36,
-      "scrollW": 142,
+      "scrollW": 144,
       "scrollH": 36,
-      "clientW": 142,
+      "clientW": 144,
       "clientH": 36
     },
     {
@@ -81,11 +81,11 @@
       "found": true,
       "x": 320,
       "y": 0,
-      "w": 220.390625,
+      "w": 222.59375,
       "h": 39.609375,
-      "scrollW": 220,
+      "scrollW": 223,
       "scrollH": 40,
-      "clientW": 220,
+      "clientW": 223,
       "clientH": 40
     },
     {
@@ -93,11 +93,11 @@
       "found": true,
       "x": 143.5625,
       "y": 262,
-      "w": 32.859375,
+      "w": 33.859375,
       "h": 18,
-      "scrollW": 33,
+      "scrollW": 34,
       "scrollH": 18,
-      "clientW": 33,
+      "clientW": 34,
       "clientH": 18
     },
     {
@@ -105,11 +105,11 @@
       "found": true,
       "x": 128.3125,
       "y": 280,
-      "w": 63.359375,
+      "w": 64.359375,
       "h": 18,
-      "scrollW": 63,
+      "scrollW": 64,
       "scrollH": 18,
-      "clientW": 63,
+      "clientW": 64,
       "clientH": 18
     },
     {
@@ -129,11 +129,11 @@
       "found": true,
       "x": 340.828125,
       "y": 353.390625,
-      "w": 65,
+      "w": 66,
       "h": 13.203125,
-      "scrollW": 65,
+      "scrollW": 66,
       "scrollH": 13,
-      "clientW": 65,
+      "clientW": 66,
       "clientH": 13
     }
   ]

@@ -36,8 +36,8 @@
 .ann-caption {
   position: absolute;
   left: 12.80px;
-  top: 426.00px;
-  width: 255.67px;
+  top: 420.00px;
+  width: 258.23px;
   margin: 0;
   font-family: sans-serif;
   font-size: 24.00px;

@@ -56,6 +56,7 @@ import {
   PUSH_ITERATIONS,
   STYLE_FONT_FRACTION,
   STYLE_WEIGHT,
+  TEXT_GROWTH_RESERVE_LINES,
   resolveAnnotationSpec,
   type AnnotationRenderReport,
 } from "../netlify/lib/image-annotate/resolve.js";
@@ -74,6 +75,8 @@ import {
   LUMINANCE_GRID_EDGE,
   MEASURED_BOX_DRIFT_FRACTION,
   MEASURED_BOX_DRIFT_MIN_PX,
+  TEXT_WIDTH_SLACK_FRACTION,
+  TEXT_WIDTH_SLACK_MIN_PX,
   buildAnnotationDocument,
   buildLuminanceSampler,
   escapeAnnotationText,
@@ -397,6 +400,7 @@ test("image.annotate goldens: resolver constant tables", () => {
     DEFAULT_CONTRAST_THRESHOLD,
     DEFAULT_TEXT_COLOR,
     PUSH_ITERATIONS,
+    TEXT_GROWTH_RESERVE_LINES,
   });
 });
 
@@ -416,6 +420,8 @@ test("image.annotate goldens: renderer constant tables", () => {
     DEFAULT_OUTPUT_QUALITY,
     MEASURED_BOX_DRIFT_FRACTION,
     MEASURED_BOX_DRIFT_MIN_PX,
+    TEXT_WIDTH_SLACK_FRACTION,
+    TEXT_WIDTH_SLACK_MIN_PX,
   });
 });
 

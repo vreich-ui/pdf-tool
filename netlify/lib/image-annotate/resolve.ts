@@ -572,6 +572,17 @@ export function resolveTextColor(theme: AnnotationTheme, style: TextStyle): stri
  * - MEASUREMENT_UNAVAILABLE  RAISED BY THE RENDERER. The measurement pass did not run or
  *                        returned nothing, so the ABSENCE of MEASURED_BOX_DRIFT warnings
  *                        proves nothing. Never inferred from silence.
+ * - TEXT_GROWTH_HEADROOM_INSUFFICIENT  a text box sits close enough to the canvas bottom edge
+ *                        that reserveTextGrowthHeadroom could not fully reserve room for one
+ *                        extra wrapped line (TEXT_GROWTH_RESERVE_LINES) without pushing the
+ *                        box's top above y=0 — i.e. the canvas is not tall enough to guarantee
+ *                        an unpredicted extra line stays fully visible for this element. `detail`
+ *                        carries how much reservation was still missing (`shortfallPx`) after
+ *                        shifting the box up as far as the canvas allows. This is a WARNING, not
+ *                        a correction: the box is placed at the best position this module can
+ *                        give it (as high as the canvas permits), and whether an extra line
+ *                        actually needed the missing room is unknown until the real render runs
+ *                        — see render.ts's compareMeasurements for that half of the picture.
  */
 export type WarningCode =
   | "TEXT_SHRUNK"
@@ -583,7 +594,8 @@ export type WarningCode =
   | "CONTRAST_LOW"
   | "ARROW_TARGET_NO_BOX"
   | "MEASURED_BOX_DRIFT"
-  | "MEASUREMENT_UNAVAILABLE";
+  | "MEASUREMENT_UNAVAILABLE"
+  | "TEXT_GROWTH_HEADROOM_INSUFFICIENT";
 
 export interface RenderWarning {
   code: WarningCode;
@@ -775,6 +787,55 @@ function clampToCanvas(id: string, box: PixelRect, canvas: CanvasPx, warnings: R
 
   if (box.x !== originalX || box.y !== originalY) {
     warnings.push({ code: "CLAMPED_TO_CANVAS", elementId: id, detail: { dx: box.x - originalX, dy: box.y - originalY } });
+  }
+}
+
+/** How many EXTRA wrapped lines a text box gets defensive headroom for, beyond what
+ * `autoFitText` predicted — the second half of KI-39 (the first is render.ts's CSS width
+ * slack). Growth is always DOWNWARD and CSS never caps a text block's height (see render.ts's
+ * module doc, "TEXT DEGRADES DOWNWARD"), and `clampToCanvas` above only ever sees the
+ * PREDICTED box — so a text box that predicts correctly here but needs one more line at real-
+ * render time (a measurement miss on the heuristic path, a codepoint the bundled face's cmap
+ * doesn't cover, a caller-injected `measureText` that disagrees with the renderer) grows past
+ * whatever margin the clamp left, invisibly to this module, which never runs a browser. One
+ * extra line is a deliberate, DOCUMENTED bound, not a guarantee against an arbitrarily large
+ * miss: it matches KI-30's own observed error bar ("correct, or one whole extra line", never
+ * "many" — see resolve.ts's module doc and render.ts's compareMeasurements), and a shortfall
+ * this bound cannot cover is reported (TEXT_GROWTH_HEADROOM_INSUFFICIENT) rather than silently
+ * left to crop. */
+export const TEXT_GROWTH_RESERVE_LINES = 1;
+
+/**
+ * Shifts a text placement's box UP — never down, never past y=0 — so that even one more
+ * wrapped line than predicted (at the placement's own resolved font size) still lands inside
+ * the canvas. Only `text` placements need this: badges/boxes/scrims/logos get a fixed,
+ * predicted-exact CSS box with no `overflow: visible`/no-`height` growth path (see render.ts),
+ * so `clampToCanvas` already fully bounds them.
+ *
+ * Deliberately the LAST step for text (called once more, after the generic clamp loop below):
+ * it corrects the box `clampToCanvas` already finalized, so it only ever touches a box that is
+ * near the bottom edge (`deficit <= 0` — there was already enough room below for one more line
+ * — is the overwhelmingly common case and a no-op). Running after push-out/collision is a real,
+ * documented trade-off: the reserved headroom is not re-checked against `avoid[]` zones or other
+ * elements, so a box shifted up to make room could end up overlapping something above it. The
+ * alternative — leaving a growable box exactly where the predicted-height clamp put it — is the
+ * defect this closes (a caption's last line silently missing from the image), which BRIEF.md's
+ * failure model (warn, never silently crop or misrender) rules out as the worse trade.
+ */
+function reserveTextGrowthHeadroom(placement: TextPlacement, canvas: CanvasPx, warnings: RenderWarning[]): void {
+  const reservePx = placement.fontSizePx * DEFAULT_LINE_HEIGHT_MULTIPLIER * TEXT_GROWTH_RESERVE_LINES;
+  const box = placement.box;
+  const deficit = box.y + box.h + reservePx - canvas.h;
+  if (deficit <= 0) return;
+  const shiftUp = Math.min(deficit, box.y);
+  box.y -= shiftUp;
+  const shortfallPx = deficit - shiftUp;
+  if (shortfallPx > 0) {
+    warnings.push({
+      code: "TEXT_GROWTH_HEADROOM_INSUFFICIENT",
+      elementId: placement.id,
+      detail: { reservedLines: TEXT_GROWTH_RESERVE_LINES, reservePx, shortfallPx, canvasH: canvas.h }
+    });
   }
 }
 
@@ -984,6 +1045,13 @@ export function resolveAnnotationSpec(specInput: unknown, options: ResolveOption
     if (!placement) continue;
     if (placement.type === "arrow") continue;
     clampToCanvas(placement.id, (placement as BoxPlacementUnion).box, canvas, warnings);
+  }
+
+  // Text-only last-mile: reserve headroom for one unpredicted extra wrapped line on any text
+  // box now sitting close to the canvas bottom edge — see reserveTextGrowthHeadroom's doc.
+  for (const placement of placements) {
+    if (!placement || placement.type !== "text") continue;
+    reserveTextGrowthHeadroom(placement, canvas, warnings);
   }
 
   // Contrast: only meaningful when the caller can tell us what's behind a text box.
