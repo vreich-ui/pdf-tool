@@ -272,3 +272,33 @@ test("interpretDocTree: an image with no resolved entry in the images map throws
     }
   );
 });
+
+test("interpretDocTree: $if on an absent path is FALSY, not a binding failure", () => {
+  // A conditional test is the one position where "not there" is a legitimate answer — $if
+  // exists precisely to ask whether the caller supplied something. Throwing here made an
+  // optional branch inexpressible and contradicted the contract deriver, which types an
+  // $if-guarded path as OPTIONAL.
+  const conditional = tree([
+    page([
+      { type: "$if", when: { path: "footnote" }, then: [{ type: "text", content: "shown" }], else: [{ type: "text", content: "hidden" }] },
+    ]),
+  ]);
+
+  const absent = run(conditional, {});
+  assert.equal(textOf(findAll(absent.element, "Text")[0]), "hidden", "an absent path takes the else branch");
+
+  const present = run(conditional, { footnote: "x" });
+  assert.equal(textOf(findAll(present.element, "Text")[0]), "shown");
+
+  const falsy = run(conditional, { footnote: "" });
+  assert.equal(textOf(findAll(falsy.element, "Text")[0]), "hidden", "an empty string is still falsy");
+});
+
+test("interpretDocTree: an absent path read for OUTPUT still fails strictly", () => {
+  // The fix above is scoped to conditional TESTS. {{path}} is an output position: data the
+  // template prints and the caller did not send is exactly what strict binding is for.
+  assert.throws(
+    () => run(tree([page([{ type: "text", content: "{{missing}}" }])]), {}),
+    (error: unknown) => error instanceof RenderError && error.code === "DATA_BINDING_ERROR"
+  );
+});
