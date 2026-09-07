@@ -34,6 +34,11 @@ export type RenderErrorCode =
   | "IMAGE_MODEL_UNSUPPORTED"
   | "IMAGE_EDIT_MODE_UNSUPPORTED"
   | "IMAGE_PROVIDER_ERROR"
+  /** S-15: a generated/edited image was still over its byte budget after best-effort
+   * optimization AND the request's storage grant set limits.overBudget to "block" — the
+   * job refuses instead of storing an over-budget artifact with a warning (the default,
+   * warn-only behaviour for every other grant). */
+  | "IMAGE_OVER_BUDGET"
   | "EDIT_MODE_UNSUPPORTED"
   | "WORKER_TIMEOUT_APPROACHING"
   | "PROVIDER_RATE_LIMITED"

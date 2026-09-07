@@ -181,6 +181,63 @@ test("F4/F5: an image job with no requirements.maxBytes WARNS (not rejects) outp
   assert.ok(stored?.warnings?.some((w) => /exceeds requested maxBytes/.test(w)));
 });
 
+// --- S-15: the grant's limits.overBudget switches the F4 default from warn to block --------
+
+test("S-15: an over-budget image job is BLOCKED (not warned) when the grant's limits.overBudget is \"block\"", async () => {
+  const big = await oversizedNoisePng();
+  const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: "req-s15-block-src", artifactKind: "image", filename: "big.png", contentType: "image/png", bytes: big, tags: [] });
+  const job = await createArtifactJob({
+    projectId: "dr-lurie",
+    requestId: "req-s15-block",
+    operation: "edit",
+    artifactKind: "image",
+    prompt: "recompress",
+    filename: "edit.png",
+    tags: [],
+    sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 },
+    editMode: "deterministic_transform"
+  });
+  const blockingStorage = { ...STORAGE, limits: { overBudget: "block" } };
+  const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: blockingStorage, projectId: "dr-lurie", jobId: job.jobId }) });
+  assert.equal(response.statusCode, 500, response.body);
+  const body = JSON.parse(response.body);
+  assert.equal(body.status, "failed");
+  assert.equal(body.errorCode, "IMAGE_OVER_BUDGET");
+  const stored = await readArtifactJob("dr-lurie", job.jobId);
+  assert.equal(stored?.status, "failed");
+  assert.equal(stored?.artifactReference, undefined, "a blocked job must never store the over-budget artifact");
+});
+
+test("S-15: explicit \"warn\", an unrecognised overBudget value, and no limits at all all WARN like the F4 default", async () => {
+  const big = await oversizedNoisePng();
+  const variants: Array<{ label: string; storage: Record<string, unknown> }> = [
+    { label: "explicit warn", storage: { ...STORAGE, limits: { overBudget: "warn" } } },
+    { label: "unrecognised value", storage: { ...STORAGE, limits: { overBudget: "yolo" } } },
+    { label: "no limits at all", storage: STORAGE },
+  ];
+  for (const [i, variant] of variants.entries()) {
+    const source = await saveCanonicalArtifactBytes({ projectId: "dr-lurie", requestId: `req-s15-warn-src-${i}`, artifactKind: "image", filename: "big.png", contentType: "image/png", bytes: big, tags: [] });
+    const job = await createArtifactJob({
+      projectId: "dr-lurie",
+      requestId: `req-s15-warn-${i}`,
+      operation: "edit",
+      artifactKind: "image",
+      prompt: "recompress",
+      filename: "edit.png",
+      tags: [],
+      sourceArtifact: { artifactReference: source, expectedSha256: source.sha256 },
+      editMode: "deterministic_transform"
+    });
+    const response = await workerHandler({ httpMethod: "POST", headers: AUTH, body: JSON.stringify({ storage: variant.storage, projectId: "dr-lurie", jobId: job.jobId }) });
+    assert.equal(response.statusCode, 200, `${variant.label}: ${response.body}`);
+    const body = JSON.parse(response.body);
+    assert.equal(body.status, "complete", variant.label);
+    assert.ok(Array.isArray(body.warnings) && body.warnings.length > 0, `${variant.label}: must warn, not silently accept`);
+    const stored = await readArtifactJob("dr-lurie", job.jobId);
+    assert.ok(stored?.artifactReference, `${variant.label}: artifact must still be stored (warn, not block)`);
+  }
+});
+
 // --- F6: approval gate is part of the advertised input schema ------------------------------
 
 test("F6: create_agent_artifact_job inputSchema advertises requireApproval and approvalAction", async () => {

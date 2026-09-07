@@ -59,6 +59,23 @@ test("parseStorageGrant: precise errors for missing fields and expiry", () => {
   assert.ok(!expired.ok && expired.error.includes("expired"));
 });
 
+test("parseStorageGrant: limits.overBudget validates to exactly \"warn\"/\"block\", defaulting absent/unrecognised to \"warn\"", () => {
+  const blocked = parseStorageGrant(grant({ limits: { overBudget: "block" } }));
+  assert.ok(blocked.ok && blocked.grant.limits?.overBudget === "block");
+
+  const warned = parseStorageGrant(grant({ limits: { overBudget: "warn" } }));
+  assert.ok(warned.ok && warned.grant.limits?.overBudget === "warn");
+
+  const unrecognised = parseStorageGrant(grant({ limits: { overBudget: "yolo" } }));
+  assert.ok(unrecognised.ok && unrecognised.grant.limits?.overBudget === "warn");
+
+  // No limits at all: the field is absent, not defaulted into a fabricated "warn" string —
+  // but every consumer treats "anything other than exactly block" as warn, so behaviour is
+  // identical to a tenant that never set it.
+  const absent = parseStorageGrant(grant());
+  assert.ok(absent.ok && absent.grant.limits?.overBudget !== "block");
+});
+
 test("extractStorageGrant: absent storage is not an error; invalid is", () => {
   assert.deepEqual(extractStorageGrant({ projectId: "x" }), {});
   assert.deepEqual(extractStorageGrant({ storage: { siteId: "s", token: "t" } }).grant?.siteID, "s");
