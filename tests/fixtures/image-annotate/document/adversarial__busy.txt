@@ -1,5 +1,5 @@
 === html ===
-<div class="ann-canvas"><img class="ann-base" src="https://render.assets.invalid/annotate-base" alt=""><div class="ann-shout"><div class="ann-line">MAXIMUM WATTAGE WARNING</div></div><div class="ann-para__auto-scrim"></div><div class="ann-para"><div class="ann-line">This exhaust manifold must be allowed to</div><div class="ann-line">cool completely before any component</div><div class="ann-line">downstream of the turbocharger is</div><div class="ann-line">touched.</div></div><div class="ann-dup1"><div class="ann-line">Here</div></div><div class="ann-dup2"><div class="ann-line">Also here</div></div><div class="ann-lowcontrast__auto-scrim"></div><div class="ann-lowcontrast"><div class="ann-line">Barely visible</div></div></div>
+<div class="ann-canvas"><img class="ann-base" src="https://render.assets.invalid/annotate-base" alt=""><div class="ann-shout"><div class="ann-line">MAXIMUM WATTAGE</div><div class="ann-line">WARNING</div></div><div class="ann-para__auto-scrim"></div><div class="ann-para"><div class="ann-line">This exhaust manifold must be allowed to</div><div class="ann-line">cool completely before any component</div><div class="ann-line">downstream of the turbocharger is touched.</div></div><div class="ann-dup1"><div class="ann-line">Here</div></div><div class="ann-dup2"><div class="ann-line">Also here</div></div><div class="ann-lowcontrast__auto-scrim"></div><div class="ann-lowcontrast"><div class="ann-line">Barely visible</div></div></div>
 
 === css ===
 .ann-canvas {
@@ -25,7 +25,7 @@
   position: absolute;
   left: 0.00px;
   top: 0.00px;
-  width: 172.22px;
+  width: 142.27px;
   margin: 0;
   font-family: sans-serif;
   font-size: 14.40px;
@@ -39,7 +39,7 @@
 }
 
 .ann-para__auto-scrim {
-  position: absolute; left: 320.00px; top: 0.00px; width: 219.65px; height: 52.80px;
+  position: absolute; left: 320.00px; top: 0.00px; width: 220.40px; height: 39.60px;
   background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.00) 0%, rgba(0, 0, 0, 0.60) 100%);
 }
 
@@ -47,7 +47,7 @@
   position: absolute;
   left: 320.00px;
   top: 0.00px;
-  width: 219.65px;
+  width: 220.40px;
   margin: 0;
   font-family: sans-serif;
   font-size: 10.56px;
@@ -62,9 +62,9 @@
 
 .ann-dup1 {
   position: absolute;
-  left: 145.02px;
+  left: 143.57px;
   top: 262.00px;
-  width: 29.95px;
+  width: 32.86px;
   margin: 0;
   font-family: sans-serif;
   font-size: 14.40px;
@@ -79,9 +79,9 @@
 
 .ann-dup2 {
   position: absolute;
-  left: 126.30px;
+  left: 128.32px;
   top: 280.00px;
-  width: 67.39px;
+  width: 63.36px;
   margin: 0;
   font-family: sans-serif;
   font-size: 14.40px;
@@ -95,15 +95,15 @@
 }
 
 .ann-lowcontrast__auto-scrim {
-  position: absolute; left: 334.89px; top: 353.40px; width: 76.88px; height: 13.20px;
+  position: absolute; left: 340.83px; top: 353.40px; width: 65.01px; height: 13.20px;
   background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.00) 0%, rgba(0, 0, 0, 0.60) 100%);
 }
 
 .ann-lowcontrast {
   position: absolute;
-  left: 334.89px;
+  left: 340.83px;
   top: 353.40px;
-  width: 76.88px;
+  width: 65.01px;
   margin: 0;
   font-family: sans-serif;
   font-size: 10.56px;

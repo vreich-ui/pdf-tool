@@ -37,7 +37,7 @@
   position: absolute;
   left: 12.80px;
   top: 426.00px;
-  width: 250.56px;
+  width: 255.67px;
   margin: 0;
   font-family: sans-serif;
   font-size: 24.00px;

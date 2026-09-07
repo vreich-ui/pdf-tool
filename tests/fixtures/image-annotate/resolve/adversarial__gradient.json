@@ -2,9 +2,16 @@
   "warnings": [
     {
       "code": "TEXT_WRAPPED",
+      "elementId": "shout",
+      "detail": {
+        "lines": 2
+      }
+    },
+    {
+      "code": "TEXT_WRAPPED",
       "elementId": "para",
       "detail": {
-        "lines": 4
+        "lines": 3
       }
     },
     {
@@ -25,7 +32,7 @@
       "code": "CONTRAST_LOW",
       "elementId": "para",
       "detail": {
-        "ratio": 2.047447846062631,
+        "ratio": 2.1447961210891573,
         "threshold": 4.5,
         "style": "caption",
         "color": "#8a8a8a"
@@ -35,7 +42,7 @@
       "code": "CONTRAST_LOW",
       "elementId": "lowcontrast",
       "detail": {
-        "ratio": 1.5047734118141574,
+        "ratio": 1.6027660425404364,
         "threshold": 4.5,
         "style": "caption",
         "color": "#8a8a8a"
@@ -49,18 +56,20 @@
       "box": {
         "x": 0,
         "y": 0,
-        "w": 172.224,
-        "h": 18
+        "w": 142.272,
+        "h": 36
       },
       "fontFamily": "sans-serif",
       "fontSizePx": 14.399999999999999,
       "weight": "normal",
       "lines": [
-        "MAXIMUM WATTAGE WARNING"
+        "MAXIMUM WATTAGE",
+        "WARNING"
       ],
       "align": "left",
       "style": "label",
-      "color": "#111111"
+      "color": "#111111",
+      "measurementSource": "metrics"
     },
     {
       "id": "para",
@@ -68,8 +77,8 @@
       "box": {
         "x": 320,
         "y": 0,
-        "w": 219.648,
-        "h": 52.8
+        "w": 220.39775999999995,
+        "h": 39.599999999999994
       },
       "fontFamily": "sans-serif",
       "fontSizePx": 10.559999999999999,
@@ -77,20 +86,20 @@
       "lines": [
         "This exhaust manifold must be allowed to",
         "cool completely before any component",
-        "downstream of the turbocharger is",
-        "touched."
+        "downstream of the turbocharger is touched."
       ],
       "align": "left",
       "style": "caption",
-      "color": "#8a8a8a"
+      "color": "#8a8a8a",
+      "measurementSource": "metrics"
     },
     {
       "id": "dup1",
       "type": "text",
       "box": {
-        "x": 145.024,
+        "x": 143.5696,
         "y": 262,
-        "w": 29.951999999999998,
+        "w": 32.8608,
         "h": 18
       },
       "fontFamily": "sans-serif",
@@ -101,15 +110,16 @@
       ],
       "align": "left",
       "style": "label",
-      "color": "#111111"
+      "color": "#111111",
+      "measurementSource": "metrics"
     },
     {
       "id": "dup2",
       "type": "text",
       "box": {
-        "x": 126.304,
+        "x": 128.32,
         "y": 280,
-        "w": 67.392,
+        "w": 63.36,
         "h": 18
       },
       "fontFamily": "sans-serif",
@@ -120,15 +130,16 @@
       ],
       "align": "left",
       "style": "label",
-      "color": "#111111"
+      "color": "#111111",
+      "measurementSource": "metrics"
     },
     {
       "id": "lowcontrast",
       "type": "text",
       "box": {
-        "x": 334.8949333333333,
+        "x": 340.82965333333334,
         "y": 353.4,
-        "w": 76.87679999999999,
+        "w": 65.00735999999999,
         "h": 13.2
       },
       "fontFamily": "sans-serif",
@@ -139,7 +150,8 @@
       ],
       "align": "left",
       "style": "caption",
-      "color": "#8a8a8a"
+      "color": "#8a8a8a",
+      "measurementSource": "metrics"
     },
     {
       "id": "para__auto-scrim",
@@ -147,8 +159,8 @@
       "box": {
         "x": 320,
         "y": 0,
-        "w": 219.648,
-        "h": 52.8
+        "w": 220.39775999999995,
+        "h": 39.599999999999994
       },
       "direction": "bottom",
       "strength": 0.6,
@@ -159,9 +171,9 @@
       "id": "lowcontrast__auto-scrim",
       "type": "scrim",
       "box": {
-        "x": 334.8949333333333,
+        "x": 340.82965333333334,
         "y": 353.4,
-        "w": 76.87679999999999,
+        "w": 65.00735999999999,
         "h": 13.2
       },
       "direction": "bottom",

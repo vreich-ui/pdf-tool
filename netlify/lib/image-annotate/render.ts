@@ -36,13 +36,21 @@
  *    attribute would get neither.
  * 3. TEXT DEGRADES DOWNWARD, NEVER OFF-CANVAS AND NEVER CLIPPED. See "Text fitting" below.
  *
- * TEXT FITTING — THE KNOWN ERROR THIS SHIPS WITH, AND HOW IT IS NOW MEASURED
+ * TEXT FITTING — WHAT KI-30 FIXED, WHAT IS STILL MEASURED, AND WHY
  *
- * The LAYOUT is still computed offline: line breaks and box sizes come from resolve.ts's
- * average-advance-width heuristic (`defaultMeasureText`: ~0.52 em per character for normal
- * weight, ~0.58 for bold), which is within roughly +/-15% for ordinary sentence-case Latin
- * text and materially worse for all-caps, all-narrow-glyph, condensed/monospace or non-Latin
- * text. The CSS below is written so that error is absorbed rather than amplified:
+ * The LAYOUT is still computed offline, in resolve.ts. As of the KI-30 fix, `defaultMeasureText`
+ * measures EXACTLY for the six bundled Noto faces (NotoSans/NotoSerif, each regular/bold) —
+ * a real per-glyph advance-width table (font-metrics-data.ts, parsed straight from each TTF's
+ * own `head`/`hhea`/`hmtx`/`cmap` tables by scripts/generate-font-metrics.mts) replaces the
+ * old average-advance guess for any text whose resolved font family names one of those faces
+ * (see resolve.ts's `resolveBundledFace` for exactly which family strings qualify) and whose
+ * characters that face's cmap covers. ADVANCE_RATIO (~0.52 em/char normal, ~0.58 bold) is now
+ * only the FALLBACK: a per-request uploaded font, a family resolve.ts cannot be sure resolves
+ * to a bundled face, or a codepoint the resolved bundled face doesn't cover. The fallback's
+ * own error bar is unchanged and still deserves the same caution: within roughly +/-15% for
+ * ordinary sentence-case Latin text, materially worse for all-caps, all-narrow-glyph,
+ * condensed/monospace or non-Latin text. The CSS below is written so EITHER kind of error is
+ * absorbed rather than amplified:
  *   - each text block gets an explicit `width` equal to the resolver's own measured box —
  *     the same number the anchor math and the collision push-out used — so the block's
  *     horizontal position is exactly what was computed, and the browser re-wraps INSIDE it;
@@ -51,25 +59,37 @@
  *   - nothing sets `overflow: hidden` on a text block, so an under-measured string grows
  *     DOWNWARD and stays fully legible (possibly overlapping what is beneath it) rather than
  *     being silently cut off.
- * Concretely: an over-measured string sits up to ~15% narrower than its box (visible as
- * slightly-off centering for `align: "center"`), and an under-measured one can take one extra
- * line per ~7 characters of underestimate, extending past the resolver's `box.h` by
- * `fontSizePx * 1.25` per extra line.
+ * Concretely, when the fallback is in play: an over-measured string sits up to ~15% narrower
+ * than its box (visible as slightly-off centering for `align: "center"`), and an
+ * under-measured one can take one extra line per ~7 characters of underestimate, extending
+ * past the resolver's `box.h` by `fontSizePx * 1.25` per extra line. When the exact table is
+ * in play, sum-of-advances is exactly what Chromium computes too for a simple Latin run at
+ * these sizes (no kerning at these faces/sizes — see resolve.ts's scope note), so this error
+ * does not arise in the first place FOR THAT ELEMENT — that is the whole point of KI-30's fix.
+ * The one documented exception is a script needing real shaping rather than a sum of advances
+ * (Hebrew, bundled as NotoSansHebrew but — see resolve.ts's `resolveBundledFace` doc — not
+ * reachable through this feature's font-family resolution today); see the T-report's Hebrew
+ * finding rather than assuming sum-of-advances holds there.
  *
- * That error is no longer INVISIBLE, which was its worst property. Playwright's isolated
- * world still works with `javaScriptEnabled: false` — page-authored script stays inert, but
- * the engine can still read the DOM, which is how its image-decode gate has always worked —
- * so the same render that produces the PNG also reports each element's real
- * `getBoundingClientRect()` back through `diagnostics.measurements`. `compareMeasurements`
- * turns any material difference from the predicted box into a MEASURED_BOX_DRIFT warning
- * naming the element and both boxes, and a measurement pass that did not run is reported as
- * MEASUREMENT_UNAVAILABLE rather than being mistaken for a clean fit. It is ONE render: the
- * pass reads geometry and mutates nothing, so the PNG bytes are identical either way.
+ * That error — whichever measurement path produced it — is no longer INVISIBLE, which was
+ * its worst property even before this fix. Playwright's isolated world still works with
+ * `javaScriptEnabled: false` — page-authored script stays inert, but the engine can still
+ * read the DOM, which is how its image-decode gate has always worked — so the same render
+ * that produces the PNG also reports each element's real `getBoundingClientRect()` back
+ * through `diagnostics.measurements`. `compareMeasurements` turns any material difference
+ * from the predicted box into a MEASURED_BOX_DRIFT warning naming the element, both boxes,
+ * and (see resolve.ts's WarningCode doc) which measurement path predicted it —
+ * `measurementSource: "metrics"` vs `"heuristic"` — so a caller reading the drift report can
+ * tell an exact-but-still-wrong prediction (worth investigating — see the Hebrew finding)
+ * from an expected heuristic miss (the KI-30 failure mode, now much rarer for bundled-face
+ * text). A measurement pass that did not run is reported as MEASUREMENT_UNAVAILABLE rather
+ * than being mistaken for a clean fit. It is ONE render: the pass reads geometry and mutates
+ * nothing, so the PNG bytes are identical either way.
  *
- * What this deliberately does NOT do is re-resolve. The reported drift is a diagnosis, not a
- * correction — closing the loop needs either a second render from re-measured widths, or (b)
- * shipping the bundled fonts' glyph advance tables so `measureText` is exact offline and no
- * drift arises in the first place. Both remain out of scope here.
+ * What this still deliberately does NOT do is re-resolve. The reported drift is a diagnosis,
+ * not a correction — closing the loop for whatever still reaches the heuristic (an uploaded
+ * font, an unrecognized family) needs a second render from re-measured widths, which remains
+ * out of scope here.
  */
 import {
   DEFAULT_LINE_HEIGHT_MULTIPLIER,
@@ -480,10 +500,10 @@ export function measurablePlacements(placements: Placement[], availableLogoIds: 
  * every material difference into a MEASURED_BOX_DRIFT warning.
  *
  * THIS IS THE FEATURE'S OWN ERROR BAR, MEASURED RATHER THAN ASSUMED. The layout is still
- * computed offline by resolve.ts's character-advance heuristic — this function does not
- * re-resolve anything and does not trigger a second render. What it does is stop the error
- * being invisible: an element whose real box is materially taller than predicted is exactly
- * the one that will overlap whatever sits below it, and until now nothing said so.
+ * computed offline by resolve.ts — this function does not re-resolve anything and does not
+ * trigger a second render. What it does is stop the error being invisible: an element whose
+ * real box is materially taller than predicted is exactly the one that will overlap whatever
+ * sits below it, and until KI-30 nothing said so, for either measurement path.
  *
  * `measurements` being absent (or empty when boxes were expected) is itself reported, as
  * MEASUREMENT_UNAVAILABLE — otherwise a measurement pass that silently failed would be
@@ -495,13 +515,21 @@ export function measurablePlacements(placements: Placement[], availableLogoIds: 
  * canary for a CSS regression that stops the width being applied. What an under-measurement
  * does instead is make the browser WRAP inside that too-narrow box, and height is quantized
  * to whole lines: a one-line box that mispredicts becomes two lines, i.e. +100% height, not
- * +15%. Measured on a mixed fixture against real Chromium at 15px NotoSans: sentence-case
- * Latin, a wrapping paragraph and even all-narrow-glyph text ("illiliilli") came back
- * EXACTLY as predicted (0.00px height error), while ALL-CAPS ("MAXIMUM WATTAGE WARNING")
- * and all-wide-glyph text ("MMMWWWMMMWWW") each wrapped to a second line — +18.75px, +100%.
- * So the honest error bar is not a percentage band: it is "correct, or one extra line", and
- * the cases that lose are the ones whose glyphs are far from the average advance the
- * heuristic assumes. That is precisely what MEASURED_BOX_DRIFT now names.
+ * +15%.
+ *
+ * PRE-KI-30 BASELINE (kept for context — this is what motivated the fix, not current
+ * behavior for bundled-face text): measured on a mixed fixture against real Chromium at 15px
+ * NotoSans, back when `defaultMeasureText` was ADVANCE_RATIO for every element — sentence-case
+ * Latin, a wrapping paragraph and even all-narrow-glyph text ("illiliilli") came back EXACTLY
+ * as predicted (0.00px height error), while ALL-CAPS ("MAXIMUM WATTAGE WARNING") and
+ * all-wide-glyph text ("MMMWWWMMMWWW") each wrapped to a second line — +18.75px, +100%. The
+ * honest error bar for the heuristic is therefore not a percentage band: it is "correct, or
+ * one extra line", and the cases that lose are the ones whose glyphs are far from the
+ * average advance the heuristic assumes — exactly the all-caps/all-wide cases the KI-30 table
+ * now measures exactly instead of guessing (see resolve.ts's defaultMeasureText and the
+ * T-report's before/after table for the SAME cases re-measured against real Chromium with
+ * the fix in place). `detail.measurementSource` on a MEASURED_BOX_DRIFT warning says which
+ * regime a given element was actually under when this ran.
  */
 export function compareMeasurements(
   placements: Array<Exclude<Placement, ArrowPlacement>>,
@@ -536,6 +564,9 @@ export function compareMeasurements(
     const deltaW = measurement.w - placement.box.w;
     const deltaH = measurement.h - placement.box.h;
     if (Math.abs(deltaW) > tolerance(placement.box.w) || Math.abs(deltaH) > tolerance(placement.box.h)) {
+      // measurementSource only exists on text/badge placements (see resolve.ts) — box/scrim/
+      // logo never call measureText and carry no such field.
+      const measurementSource = "measurementSource" in placement ? placement.measurementSource : undefined;
       warnings.push({
         code: "MEASURED_BOX_DRIFT",
         elementId: placement.id,
@@ -547,6 +578,13 @@ export function compareMeasurements(
           deltaH,
           toleranceW: tolerance(placement.box.w),
           toleranceH: tolerance(placement.box.h),
+          // "metrics": resolve.ts already had the bundled face's exact glyph advances for
+          // this element and STILL drifted from real Chromium — see the module doc's Hebrew
+          // finding for the one known such case. "heuristic": ADVANCE_RATIO's estimate was
+          // in play — the KI-30 failure mode this table exists to shrink. `undefined`: a
+          // caller-injected measureText was in effect; resolve.ts cannot say which path it
+          // used.
+          ...(measurementSource !== undefined ? { measurementSource } : {}),
         },
       });
     }
