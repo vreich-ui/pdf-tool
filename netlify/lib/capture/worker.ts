@@ -141,19 +141,28 @@ async function fetchRobots(seedOrigin: string, policy: ProjectCapturePolicy): Pr
   } catch (error) {
     throw new RenderError("CAPTURE_ROBOTS_UNAVAILABLE", `robots.txt fetch failed: ${safeError(error)}`, { robotsUrl });
   }
-  if (response.status < 200 || response.status >= 300) {
+  // RFC 9309 s2.3.1.3: a 4xx means the origin serves no robots.txt, and a crawler MAY then
+  // access any resource. Refusing here blocked every site that simply does not publish one
+  // (a plain Netlify deploy, most small sites). 429 is excluded: that is rate limiting, not
+  // absence, and 5xx keeps refusing because "unavailable" there means unknown, not open.
+  const robotsAbsent = response.status >= 400 && response.status < 500 && response.status !== 429;
+  if (!robotsAbsent && (response.status < 200 || response.status >= 300)) {
     throw new RenderError("CAPTURE_ROBOTS_UNAVAILABLE", `robots.txt returned HTTP ${response.status}; refusing to crawl.`, { robotsUrl, status: response.status });
   }
-  const parsed = robotsParser(robotsUrl, response.body);
+  // An empty rule set parses to allow-all, so the same code path handles both cases and the
+  // recorded sha256 describes exactly what was applied.
+  const body = robotsAbsent ? "" : response.body;
+  const parsed = robotsParser(robotsUrl, body);
   const crawlDelaySeconds = parsed.getCrawlDelay(CAPTURE_USER_AGENT) ?? parsed.getCrawlDelay("*") ?? 0;
   return {
     parsed,
-    body: response.body,
+    body,
     record: {
       url: robotsUrl,
       status: response.status,
+      basis: robotsAbsent ? "absent_allow_all" : "fetched",
       fetchedAt: new Date().toISOString(),
-      sha256: sha256(response.body),
+      sha256: sha256(body),
       sitemaps: parsed.getSitemaps(),
       crawlDelayMs: Math.ceil(crawlDelaySeconds * 1000),
       respected: policy.respectRobots,

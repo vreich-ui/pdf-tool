@@ -87,8 +87,11 @@ export interface ArchivePdfTemplateInput {
 interface DerivedContract {
   renderDataSchema?: JSONSchema;
   sampleData?: unknown;
+  /** Author-supplied, or the placeholder assets a DERIVED sampleData binds its images to. */
+  sampleAssets?: { images?: unknown[] };
   renderDataSchemaSource?: "author" | "derived";
   sampleDataSource?: "author" | "derived";
+  sampleAssetsSource?: "author" | "derived";
   warnings: string[];
   derivation: DeriveRenderDataSchemaResult;
 }
@@ -139,6 +142,8 @@ export function resolveTemplateContract(input: {
 
   let renderDataSchema = input.renderDataSchema;
   let sampleData = input.sampleData;
+  let sampleAssets = input.sampleAssets;
+  let sampleAssetsSource: "author" | "derived" | undefined = sampleAssets !== undefined ? "author" : undefined;
   let renderDataSchemaSource: "author" | "derived" | undefined = renderDataSchema !== undefined ? "author" : undefined;
   let sampleDataSource: "author" | "derived" | undefined = sampleData !== undefined ? "author" : undefined;
 
@@ -161,6 +166,13 @@ export function resolveTemplateContract(input: {
     if (needsSample && derivation.sampleData !== undefined && pairValidates(renderDataSchema, derivation.sampleData)) {
       sampleData = derivation.sampleData;
       sampleDataSource = "derived";
+      // Derived sampleData binds its image slots to placeholder job assets. Without carrying
+      // those through, the publish-time thumbnail renders every image as broken and the
+      // quality gate reports "unresolved image" findings against a template that is fine.
+      if (sampleAssets === undefined && derivation.sampleAssets) {
+        sampleAssets = derivation.sampleAssets;
+        sampleAssetsSource = "derived";
+      }
     } else if (needsSample && derivation.sampleData !== undefined) {
       warnings.push(
         "sampleData was derived from this template's placeholders but does not satisfy the renderDataSchema you supplied, so it was discarded rather than stored. Supply sampleData that matches your own schema — publish_pdf_template needs it for the preview render and the validation render."
@@ -181,14 +193,19 @@ export function resolveTemplateContract(input: {
   // images unless the job assets those ids resolve against are stored alongside it. This is
   // the second half of the moisturizer incident — every image on that PDF was a broken-image
   // icon — so it is called out even when the caller supplied the whole contract by hand.
-  const hasSampleAssets = Array.isArray(input.sampleAssets?.images) && input.sampleAssets.images.length > 0;
+  const hasSampleAssets = Array.isArray(sampleAssets?.images) && sampleAssets.images.length > 0;
   if (derivation.imageSlots.length > 0 && !hasSampleAssets) {
     warnings.push(
       `This template references ${derivation.imageSlots.length} image slot(s) (${derivation.imageSlots.join(", ")}) but the version carries no sampleAssets, so its preview and validation renders resolve no images. Send sampleAssets: { images: [{ assetId, dataUri }] } covering those slots.`
     );
   }
 
-  return { renderDataSchema, sampleData, renderDataSchemaSource, sampleDataSource, warnings, derivation };
+  if (sampleAssetsSource === "derived") {
+    warnings.push(
+      `sampleAssets were DERIVED alongside sampleData: one 1x1 placeholder image per image slot (${derivation.imageSlots.join(", ")}), so this version's preview and validation renders resolve their images instead of drawing broken ones. Replace them with real artwork before treating a thumbnail as representative.`
+    );
+  }
+  return { renderDataSchema, sampleData, sampleAssets, renderDataSchemaSource, sampleDataSource, sampleAssetsSource, warnings, derivation };
 }
 
 export async function createPdfTemplate(input: CreatePdfTemplateInput) {
@@ -241,7 +258,7 @@ export async function createPdfTemplate(input: CreatePdfTemplateInput) {
       renderDataSchema: contract.renderDataSchema,
       sampleData: contract.sampleData,
       kind: input.kind,
-      sampleAssets: input.sampleAssets,
+      sampleAssets: contract.sampleAssets,
       renderDataSchemaSource: contract.renderDataSchemaSource,
       sampleDataSource: contract.sampleDataSource,
       contractWarnings: contract.warnings

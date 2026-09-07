@@ -48,6 +48,10 @@ export interface CaptureJobRequest {
 export interface CaptureRobotsRecord {
   url: string;
   status: number;
+  /** How the rules were obtained: "fetched" for a served robots.txt, "absent_allow_all" when
+   * the origin returned a 4xx and the crawl proceeded under the RFC 9309 unavailable-means-
+   * allowed rule. Recorded so the evidence trail says WHY a crawl was permitted. */
+  basis?: "fetched" | "absent_allow_all";
   fetchedAt: string;
   sha256: string;
   sitemaps: string[];

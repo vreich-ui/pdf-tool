@@ -11,6 +11,7 @@ import { policyModelForUsageContext } from "./image-routing/policy.js";
 import { deterministicRenderCostReceipt, imageCostReceipt } from "./cost-receipt.js";
 import { chargeGenerationBudget } from "./generation-budget.js";
 import { RenderError } from "./pdf-render/errors.js";
+import { storeAccessFailure } from "./store-access-error.js";
 
 export interface CreateAgentArtifactJobInput {
   projectId: string;
@@ -166,7 +167,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     try {
       blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId });
     } catch (error) {
-      return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
+      return { ...storeAccessFailure("Artifact job store", error, safeError(error)), ok: false as const };
     }
     return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, ...styleResponseFields(blockedJob.style), blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
@@ -177,7 +178,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     // must return a clean error, not throw out of the handler into a 5xx/gateway 502.
     job = await createArtifactJob(parsed.data);
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Artifact job store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Artifact job store", error, safeError(error)), ok: false as const };
   }
   try {
     await triggerWorker(options.baseUrl, options.token ?? process.env.AGENT_RUN_TOKEN, job.projectId, job.jobId);

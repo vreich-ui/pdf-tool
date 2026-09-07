@@ -13,6 +13,7 @@ import {
 } from "./capture/jobs.js";
 import { runWithCaptureStorage } from "./capture/storage.js";
 import { CAPTURE_WORKER_FUNCTION } from "./capture/worker.js";
+import { storeAccessFailure } from "./store-access-error.js";
 
 /**
  * MCP layer for the `capture` job kind (T12.8), cloned from agent-image-search-mcp.ts:
@@ -71,7 +72,7 @@ async function createCaptureJobInOwnStorage(request: CaptureJobRequest, options:
       job = await createCaptureJobRecord(request);
     }
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Capture job store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Capture job store", error, safeError(error)), ok: false as const };
   }
 
   // A `running` job already holds a live worker invocation; triggering another would only
@@ -153,11 +154,26 @@ export async function getCaptureSnapshot(input: GetCaptureSnapshotInput) {
 async function getCaptureSnapshotInOwnStorage(input: GetCaptureSnapshotInput) {
   const job = await readCaptureJob(input.projectId, input.jobId);
   if (!job) return { ok: false as const, statusCode: 404, error: "Capture job not found", errorCode: "CAPTURE_JOB_NOT_FOUND" };
+  if (job.status === "failed") {
+    // Terminal. Telling the caller to "poll until terminal" here is what sent agents into an
+    // unbounded poll loop against a job that will never change again.
+    return {
+      ok: false as const,
+      statusCode: 409,
+      error:
+        `Capture job "${input.jobId}" failed and has no snapshot to read` +
+        (job.error ? `: ${String(job.error)}` : ".") +
+        " This is terminal — do not poll; start a new capture job once the cause is fixed.",
+      errorCode: "CAPTURE_JOB_FAILED",
+      status: job.status,
+      ...(job.errorCode ? { captureErrorCode: job.errorCode } : {}),
+    };
+  }
   if (job.status !== "complete") {
     return {
       ok: false as const,
       statusCode: 409,
-      error: `Capture job is "${job.status}", not complete; poll get_capture_job_status until it is terminal before reading the snapshot.`,
+      error: `Capture job is "${job.status}", not complete yet; poll get_capture_job_status until it reaches a terminal status (complete or failed) before reading the snapshot.`,
       errorCode: "CAPTURE_SNAPSHOT_NOT_READY",
       status: job.status,
     };

@@ -40,6 +40,7 @@
  */
 import { Liquid } from "liquidjs";
 import { resolvePdfRenderer } from "./default-renderer.js";
+import { validateDocTree } from "./doc-tree/validate.js";
 import type { JSONSchema } from "./render-data-schema.js";
 import type { PdfRendererId } from "./types.js";
 
@@ -47,7 +48,7 @@ import type { PdfRendererId } from "./types.js";
 // Public shape
 // ---------------------------------------------------------------------------
 
-export type DerivedSlotKind = "string" | "imageRef" | "array" | "object" | "unknown";
+export type DerivedSlotKind = "string" | "boolean" | "imageRef" | "array" | "object" | "unknown";
 
 export interface DerivedSlot {
   /** Dotted path into the render `data` object; `[]` marks an array element. */
@@ -68,8 +69,18 @@ export interface DeriveRenderDataSchemaResult {
   /** Always satisfies `renderDataSchema` (assertSampleDataMatchesSchema is run on it). */
   sampleData?: Record<string, unknown>;
   slots: DerivedSlot[];
-  /** Paths typed as image references — the ids `sampleAssets.images` must supply. */
+  /** Paths typed as image references. Each is bound by a `sampleAssets` entry below. */
   imageSlots: string[];
+  /**
+   * Placeholder job assets that make `sampleData` renderable as-is. Every chromium image
+   * slot's sample value is the virtual URL of one of these assetIds, so a preview or
+   * publish-thumbnail render of the derived sampleData resolves its images instead of
+   * tripping the quality gate's "unresolved image" finding. Pass these straight through as
+   * a render job's `assets` — same `{ images: [...] }` shape create_pdf_template's own
+   * `sampleAssets` takes. Absent for renderers with no job-asset channel (pdfme inlines a
+   * data URI into the slot itself; react-pdf image srcs are not data-bound).
+   */
+  sampleAssets?: { images: Array<{ assetId: string; dataUri: string }> };
   /** Non-fatal observations for a human: ambiguity, skipped constructs, asset advice. */
   notes: string[];
 }
@@ -84,6 +95,12 @@ interface SlotNode {
   usedAsScalar: boolean;
   usedAsImage: boolean;
   usedAsArray: boolean;
+  /** The slot was read in a truthiness test (`{% if %}` / `{% unless %}`) rather than printed. */
+  usedAsCondition: boolean;
+  /** For a condition-only slot: true when the guarded body renders while the slot is TRUTHY
+   * (`{% if %}`), false when it renders while FALSY (`{% unless %}`). Drives which boolean
+   * the sample picks so a preview shows the guarded content rather than hiding it. */
+  conditionWantsTruthy?: boolean;
   /** At least one use of this node was NOT inside a conditional branch/condition. */
   requiredHere: boolean;
   /** Set once the node cannot be typed honestly; the string says why. */
@@ -91,7 +108,7 @@ interface SlotNode {
 }
 
 function newNode(): SlotNode {
-  return { children: new Map(), usedAsScalar: false, usedAsImage: false, usedAsArray: false, requiredHere: false };
+  return { children: new Map(), usedAsScalar: false, usedAsImage: false, usedAsArray: false, usedAsCondition: false, requiredHere: false };
 }
 
 function childOf(node: SlotNode, name: string): SlotNode {
@@ -259,13 +276,26 @@ function recordScalarUse(node: SlotNode, scope: WalkScope, image: boolean): void
 }
 
 /** Records every variable an expression READS, without claiming any of them is a scalar —
- * used for conditions, filter arguments and other non-output positions. */
-function recordReferences(value: unknown, scope: WalkScope, state: DeriveState): void {
+ * used for conditions, filter arguments and other non-output positions.
+ *
+ * `guard` is set only for a truthiness test: "truthy" for `{% if %}`, "falsy" for
+ * `{% unless %}`. A slot read ONLY there is a boolean flag, not prose — see emit(). */
+function recordReferences(value: unknown, scope: WalkScope, state: DeriveState, guard?: "truthy" | "falsy"): void {
   const tokens: LiquidNode[] = [];
   collectPathTokens(value, tokens);
+  let first = true;
   for (const token of tokens) {
     const node = resolveToken(token, scope, state);
-    if (node) markUse(node, scope);
+    if (node) {
+      // Only the FIRST path in the condition is the thing being tested; the rest are
+      // comparison operands and filter arguments, which say nothing about truthiness.
+      if (guard && first) {
+        node.usedAsCondition = true;
+        if (node.conditionWantsTruthy === undefined) node.conditionWantsTruthy = guard === "truthy";
+      }
+      markUse(node, scope);
+    }
+    first = false;
   }
 }
 
@@ -329,8 +359,9 @@ function walkNode(node: LiquidNode, scope: WalkScope, state: DeriveState): void 
     case "unless": {
       // A variable tested for truthiness is by definition allowed to be absent.
       const conditional = childScope(scope, { conditional: true });
+      const guard = node.name === "unless" ? ("falsy" as const) : ("truthy" as const);
       for (const branch of templatesOf(node, "branches")) {
-        recordReferences(branch.value, conditional, state);
+        recordReferences(branch.value, conditional, state, guard);
         walkTemplates(templatesOf(branch, "templates"), conditional, state);
       }
       walkTemplates(templatesOf(node, "elseTemplates"), conditional, state);
@@ -468,8 +499,9 @@ function walkPartial(node: LiquidNode, scope: WalkScope, state: DeriveState): vo
 const IMAGE_DESCRIPTIONS: Record<string, string> = {
   chromium:
     "Image reference (not prose): the template interpolates this slot inside an `src=` attribute or a CSS `url()`. " +
-    "Supply the assetId of an entry in the render job's `assets.images`, which the template resolves as " +
-    "https://render.assets.invalid/<assetId>. A site-relative path or an http(s) URL cannot be fetched by the renderer and renders as a broken image.",
+    "Supply the full virtual URL \"https://render.assets.invalid/<assetId>\" of an entry declared in the render job's " +
+    "`assets.images` — that exact URL is what the referenced-asset precheck matches and what the renderer serves off its " +
+    "virtual host. A bare assetId, a site-relative path, or an http(s) URL cannot be fetched and renders as a broken image.",
   pdfme:
     "Image reference (not prose): this is a pdfme `image` field. Supply a `data:<mime>;base64,...` data URI — pdfme templates do not support the job's assets.images.",
 };
@@ -478,7 +510,11 @@ function imageDescriptionFor(renderer: PdfRendererId): string {
   return IMAGE_DESCRIPTIONS[renderer] ?? IMAGE_DESCRIPTIONS.chromium!;
 }
 
-/** 1x1 transparent PNG — a real, decodable image so a derived pdfme sample renders. */
+/** Virtual host the render service serves job assets from; the exact prefix the chromium
+ * referenced-asset precheck matches in a data value. */
+const RENDER_ASSET_ORIGIN = "https://render.assets.invalid";
+
+/** 1x1 transparent PNG — a real, decodable image so a derived sample renders. */
 const SAMPLE_PNG_DATA_URI =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
@@ -511,7 +547,15 @@ interface EmitContext {
   renderer: PdfRendererId;
   slots: DerivedSlot[];
   imageSlots: string[];
+  sampleAssets: Array<{ assetId: string; dataUri: string }>;
   notes: string[];
+}
+
+/** Stable, collision-free assetId for one image slot, derived from its full path so that
+ * `hero.image` and `sections[].figure.image` never claim the same id. */
+function sampleAssetIdFor(path: string, name: string): string {
+  const flattened = path.replace(/\[\]/g, "").replace(/\./g, "-");
+  return kebab(flattened) || kebab(name) || "image";
 }
 
 function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { schema: JSONSchema; sample: unknown } {
@@ -520,9 +564,15 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
     const note = node.ambiguous
       ?? "the template uses this slot in more than one shape (e.g. both as text and as a list), so no type was claimed";
     ctx.slots.push({ path, kind: "unknown", required: isRequired(node), note });
+    ctx.notes.push(
+      `\`${path}\` has no derived sample value: ${note}. Supply it by hand before using this sampleData for a preview render.`,
+    );
     return {
       schema: { description: `Not inferred: ${note}. Any JSON value is accepted here; tighten this by hand if you know the real shape.` },
-      sample: sampleString(name),
+      // A schema that declined to claim a shape must not hand back a sample that invents
+      // one: a fabricated string here renders as nothing through a `{% for %}` and cannot be
+      // indexed by a computed path, which is worse than an obvious null.
+      sample: null,
     };
   }
 
@@ -564,6 +614,20 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
   if (node.usedAsImage) {
     ctx.slots.push({ path, kind: "imageRef", required: isRequired(node) });
     ctx.imageSlots.push(path);
+    let sample: string;
+    if (ctx.renderer === "pdfme") {
+      // pdfme has no job-asset channel: the data URI goes straight into the slot.
+      sample = SAMPLE_PNG_DATA_URI;
+    } else {
+      // Everything else binds through assets.images. The sample must be the SAME virtual
+      // URL the renderer resolves and the precheck matches, and the placeholder asset it
+      // names must be handed back so the caller can actually supply it.
+      const assetId = sampleAssetIdFor(path, name);
+      if (!ctx.sampleAssets.some((asset) => asset.assetId === assetId)) {
+        ctx.sampleAssets.push({ assetId, dataUri: SAMPLE_PNG_DATA_URI });
+      }
+      sample = `${RENDER_ASSET_ORIGIN}/${assetId}`;
+    }
     return {
       schema: {
         type: "string",
@@ -571,7 +635,23 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
         description: imageDescriptionFor(ctx.renderer),
         "x-slotKind": "imageRef",
       },
-      sample: ctx.renderer === "pdfme" ? SAMPLE_PNG_DATA_URI : `sample-${kebab(name)}`,
+      sample,
+    };
+  }
+
+  // A slot only ever tested for truthiness is a flag, not prose. Typing it `string` and
+  // sampling "Sample hide toc" makes every non-empty sample truthy, which INVERTS what an
+  // `{% unless %}`-guarded preview shows.
+  if (node.usedAsCondition && !node.usedAsScalar) {
+    ctx.slots.push({ path, kind: "boolean", required: isRequired(node) });
+    return {
+      schema: {
+        type: "boolean",
+        description: "Flag: the template only tests this slot for truthiness, never prints it.",
+      },
+      // Pick the value that RENDERS the guarded body, so a sample preview shows the
+      // conditional content rather than silently omitting it.
+      sample: node.conditionWantsTruthy !== false,
     };
   }
 
@@ -591,7 +671,7 @@ const SCHEMA_2020_12 = "https://json-schema.org/draft/2020-12/schema";
 
 function buildResult(root: SlotNode, renderer: PdfRendererId, rawNotes: string[]): DeriveRenderDataSchemaResult {
   const notes = [...new Set(rawNotes)];
-  const ctx: EmitContext = { renderer, slots: [], imageSlots: [], notes };
+  const ctx: EmitContext = { renderer, slots: [], imageSlots: [], sampleAssets: [], notes };
   if (root.children.size === 0) {
     return {
       renderer,
@@ -615,6 +695,7 @@ function buildResult(root: SlotNode, renderer: PdfRendererId, rawNotes: string[]
     sampleData: emitted.sample as Record<string, unknown>,
     slots,
     imageSlots: ctx.imageSlots,
+    ...(ctx.sampleAssets.length ? { sampleAssets: { images: ctx.sampleAssets } } : {}),
     notes,
   };
 }
@@ -751,6 +832,25 @@ function deriveReactPdf(templateJson: Record<string, unknown>): DeriveRenderData
   // The slot tree, resolveToken and emit() are renderer-agnostic; only the WALK differs. The
   // Liquid-specific members of DeriveState are unused on this path (a docTree carries no
   // partials and is never parsed as Liquid) and are filled in with empties.
+  // A docTree whose SHAPE is wrong ($for/$if spelled differently, a capitalized node type,
+  // a missing docTreeVersion) would otherwise walk as an anonymous object tree: the walker
+  // would miss the loop entirely, hoist the loop ALIAS to a top-level required slot, and
+  // hand back a confident schema that cannot render. Refusing is the honest answer, and the
+  // canonical schema is already in this repo.
+  const validation = validateDocTree(templateJson);
+  if (!validation.valid) {
+    return {
+      renderer: "react-pdf",
+      supported: false,
+      reason:
+        "templateJson is not a valid docTree template, so any contract derived from it would be guesswork: " +
+        validation.issues.slice(0, 5).join("; ") +
+        (validation.issues.length > 5 ? ` (+${validation.issues.length - 5} more)` : ""),
+      slots: [],
+      imageSlots: [],
+      notes,
+    };
+  }
   const state: DeriveState = { root: newNode(), notes, partials: {}, liquid: new Liquid(), renderStack: [] };
 
   const usePath = (path: string, scope: WalkScope, scalar: boolean): SlotNode | null => {

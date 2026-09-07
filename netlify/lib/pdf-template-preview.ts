@@ -56,6 +56,7 @@ import {
   type PdfTemplatePreviewReport,
 } from "./pdf-template-store.js";
 import { THUMBNAIL_RENDERER } from "./pdf-template-thumbnail.js";
+import { storeAccessFailure } from "./store-access-error.js";
 
 export const PREVIEW_WORKER_FUNCTION = "pdf-template-preview-worker-background";
 
@@ -170,7 +171,7 @@ export async function previewPdfTemplate(
   try {
     await writePdfTemplatePreview(input.projectId, report);
   } catch (error) {
-    return { ok: false as const, statusCode: 503, error: `Template store unavailable: ${safeError(error)}` };
+    return { ...storeAccessFailure("Template store", error, safeError(error)), ok: false as const };
   }
 
   try {

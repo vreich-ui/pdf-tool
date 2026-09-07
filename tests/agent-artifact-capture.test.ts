@@ -313,13 +313,34 @@ test("bound-widening refused worker-side: a job record that bypassed create is s
   assert.equal(oversized.effectiveMaxPages, HARD_MAX_CAPTURE_PAGES_PER_JOB);
 });
 
-test("robots gate: an unavailable robots.txt refuses the crawl with a typed error", async () => {
+test("robots gate: an ABSENT robots.txt (4xx) means allow-all and the crawl proceeds, recorded as evidence", async () => {
+  // RFC 9309 s2.3.1.3: unavailable (4xx) means the origin publishes no rules, so a crawler
+  // may access any resource. Refusing here used to block every site without a robots.txt.
   setFixtures({ robotsStatus: 404, pages: { [SEED]: pageFixture(SEED) } });
   const job = await createCaptureJobRecord(jobRequest({ requestId: "req-robots-404" }));
   const { response, body } = await invokeWorker(job.projectId, job.jobId);
-  assert.equal(response.statusCode, 500);
-  assert.equal(body.errorCode, "CAPTURE_ROBOTS_UNAVAILABLE");
-  assert.match(body.error, /HTTP 404/);
+  assert.equal(response.statusCode, 200, "a missing robots.txt must not fail the crawl");
+  assert.equal(body.status, "complete");
+
+  const record = await readCaptureJob(job.projectId, job.jobId);
+  const robots = (record as { evidence?: { robots?: Record<string, unknown> } }).evidence?.robots ?? {};
+  assert.equal(robots.status, 404);
+  assert.equal(robots.basis, "absent_allow_all", "the evidence trail must say WHY the crawl was permitted");
+  // The recorded digest describes the rule set actually applied — an empty one.
+  assert.equal(robots.sha256, createHash("sha256").update("").digest("hex"));
+});
+
+test("robots gate: a 5xx or a rate-limited robots.txt still refuses the crawl with a typed error", async () => {
+  // 5xx means "unknown", not "open", and 429 is rate limiting rather than absence. Neither
+  // may be read as permission.
+  for (const status of [500, 429]) {
+    setFixtures({ robotsStatus: status, pages: { [SEED]: pageFixture(SEED) } });
+    const job = await createCaptureJobRecord(jobRequest({ requestId: `req-robots-${status}` }));
+    const { response, body } = await invokeWorker(job.projectId, job.jobId);
+    assert.equal(response.statusCode, 500, `HTTP ${status} must refuse`);
+    assert.equal(body.errorCode, "CAPTURE_ROBOTS_UNAVAILABLE");
+    assert.match(body.error, new RegExp(`HTTP ${status}`));
+  }
 });
 
 // ── Deadline + resume ──
@@ -803,4 +824,19 @@ test("T15.23: the per-job asset byte cap is enforced cumulatively across assets 
   assert.equal(first.downloaded, true);
   assert.equal(second.downloaded, false);
   assert.equal(second.notCapturableReason, "job_asset_byte_cap_reached");
+});
+
+test("get_capture_snapshot on a FAILED job is terminal and never tells the caller to keep polling", async () => {
+  setFixtures({ robotsStatus: 500, pages: { [SEED]: pageFixture(SEED) } });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-snapshot-of-failed" }));
+  await invokeWorker(job.projectId, job.jobId);
+
+  const result = (await getCaptureSnapshot({ projectId: job.projectId, jobId: job.jobId })) as Record<string, unknown>;
+  assert.equal(result.ok, false);
+  // The old CAPTURE_SNAPSHOT_NOT_READY told agents to "poll until it is terminal" on a job
+  // that WAS terminal, which is an unbounded poll loop.
+  assert.equal(result.errorCode, "CAPTURE_JOB_FAILED");
+  assert.equal(result.captureErrorCode, "CAPTURE_ROBOTS_UNAVAILABLE");
+  assert.match(String(result.error), /terminal/i);
+  assert.doesNotMatch(String(result.error), /until it is terminal/i);
 });

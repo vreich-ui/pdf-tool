@@ -677,3 +677,108 @@ test("a derived-schema finding names the offending slot in a form that survives 
   // not the redactor.
   assert.doesNotMatch(sanitizeDiagnosticText("blocked request: /img/req_plugin_x/d913a7c8.webp"), /req_plugin_x/);
 });
+
+// ---------------------------------------------------------------------------
+// 4. Regressions: a derived contract must be RENDERABLE, not merely plausible
+// ---------------------------------------------------------------------------
+
+test("chromium image slots sample the virtual asset URL and ship the placeholder assets that resolve it", () => {
+  const derived = deriveRenderDataSchema({
+    html: "<img src=\"{{ heroImage }}\"><style>.b{background:url('{{ brand.band }}')}</style>",
+  });
+  assert.equal(derived.supported, true);
+  const sample = derived.sampleData as Record<string, Record<string, string> | string>;
+
+  // The renderer resolves job assets off a virtual host, and the referenced-asset precheck
+  // matches that exact URL in a data value. A bare "sample-hero-image" matched neither, so
+  // every auto-derived chromium template previewed with broken images and tripped the
+  // quality gate's unresolved-image finding on its own publish thumbnail.
+  assert.match(sample.heroImage as string, /^https:\/\/render\.assets\.invalid\//);
+  assert.match((sample.brand as Record<string, string>).band, /^https:\/\/render\.assets\.invalid\//);
+
+  const images = derived.sampleAssets?.images ?? [];
+  assert.equal(images.length, 2, "one placeholder asset per image slot");
+  for (const value of [sample.heroImage as string, (sample.brand as Record<string, string>).band]) {
+    const assetId = value.split("/").pop();
+    const asset = images.find((entry) => entry.assetId === assetId);
+    assert.ok(asset, `sampleAssets must declare "${assetId}" that sampleData binds`);
+    assert.match(asset.dataUri, /^data:image\/png;base64,/);
+  }
+});
+
+test("a slot only ever tested for truthiness is a boolean, sampled so the guarded body RENDERS", () => {
+  // Typing these `string` and sampling "Sample hide toc" made every sample truthy, which
+  // INVERTS an {% unless %} guard: the preview hid the very block it was meant to show.
+  const derived = deriveRenderDataSchema({
+    html: "{% unless hideToc %}<nav>toc</nav>{% endunless %}{% if showBanner %}<b>hi</b>{% endif %}<p>{{ body }}</p>",
+  });
+  const properties = props(derived.renderDataSchema);
+  assert.equal(properties.hideToc?.type, "boolean");
+  assert.equal(properties.showBanner?.type, "boolean");
+  assert.equal(properties.body?.type, "string", "a printed slot stays prose");
+
+  const sample = derived.sampleData as Record<string, unknown>;
+  assert.equal(sample.hideToc, false, "{% unless %} renders when FALSY");
+  assert.equal(sample.showBanner, true, "{% if %} renders when TRUTHY");
+  assert.doesNotThrow(() => assertSampleDataMatchesSchema(derived.renderDataSchema, derived.sampleData));
+
+  const kinds = new Map(derived.slots.map((slot) => [slot.path, slot.kind]));
+  assert.equal(kinds.get("hideToc"), "boolean");
+});
+
+test("a slot the schema refuses to type gets no invented sample either", () => {
+  const derived = deriveRenderDataSchema({
+    html: "<p>{{ items }}</p>{% for i in items %}<li>{{ i }}</li>{% endfor %}<span>{{ contact[key] }}</span>",
+  });
+  const sample = derived.sampleData as Record<string, unknown>;
+  // Both slots are declared "not inferred"; handing back a plausible STRING for them
+  // contradicted the schema and rendered as nothing through the loop / computed path.
+  assert.equal(sample.items, null);
+  assert.equal(sample.contact, null);
+  assert.ok(derived.notes.some((note) => /no derived sample value/i.test(note)));
+  assert.doesNotThrow(() => assertSampleDataMatchesSchema(derived.renderDataSchema, derived.sampleData));
+});
+
+test("react-pdf: a structurally invalid docTree is refused, never walked into a confident wrong schema", () => {
+  // A template using the wrong spelling for $for would otherwise walk as an anonymous object
+  // tree: the loop SOURCE vanishes from the contract and the loop ALIAS is hoisted to a
+  // required top-level object, so a caller following the schema sends data that cannot bind.
+  const bogus = deriveRenderDataSchema(
+    {
+      docTreeVersion: 1,
+      document: {
+        type: "document",
+        children: [{ type: "page", children: [{ $for: { in: "rows", as: "row" }, children: [{ type: "text", text: "{{row.label}}" }] }] }],
+      },
+    },
+    "react-pdf",
+  );
+  assert.equal(bogus.supported, false);
+  assert.match(bogus.reason ?? "", /not a valid docTree/i);
+  // Refusing means refusing: no schema, no sampleData, and above all no slot named after the
+  // loop alias for a caller to build a payload around.
+  assert.equal(bogus.renderDataSchema, undefined);
+  assert.equal(bogus.sampleData, undefined);
+  assert.deepEqual(bogus.slots, []);
+
+  // The real shape still derives, and names the loop SOURCE as the array.
+  const valid = deriveRenderDataSchema(
+    {
+      docTreeVersion: 1,
+      document: {
+        type: "document",
+        children: [
+          {
+            type: "page",
+            children: [{ type: "$for", items: "rows", as: "row", children: [{ type: "text", content: "{{row.label}}" }] }],
+          },
+        ],
+      },
+    },
+    "react-pdf",
+  );
+  assert.equal(valid.supported, true);
+  const properties = props(valid.renderDataSchema);
+  assert.equal(properties.rows?.type, "array", "the loop SOURCE is the contract, not its alias");
+  assert.ok(!("row" in properties));
+});
