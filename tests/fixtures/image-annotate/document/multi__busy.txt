@@ -1,0 +1,66 @@
+=== html ===
+<div class="ann-canvas"><img class="ann-base" src="https://render.assets.invalid/annotate-base" alt=""><div class="ann-outline"></div><div class="ann-footer-scrim"></div><div class="ann-caption"><div class="ann-line">Component overview</div></div><div class="ann-step">2</div></div>
+
+=== css ===
+.ann-canvas {
+  position: relative;
+  width: 640.00px;
+  height: 480.00px;
+  font-family: sans-serif;
+}
+
+.ann-base {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640.00px;
+  height: 480.00px;
+  object-fit: cover;
+  object-position: center;
+}
+.ann-arrows { position: absolute; left: 0; top: 0; }
+.ann-line { display: block; }
+
+.ann-outline {
+  position: absolute; left: 106.67px; top: 80.00px; width: 192.00px; height: 120.00px;
+  box-sizing: border-box;
+  border: 3.00px solid #ff0000;
+  border-radius: 6.00px;
+}
+
+.ann-footer-scrim {
+  position: absolute; left: 0.00px; top: 320.00px; width: 640.00px; height: 72.00px;
+  background-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.00) 0%, rgba(0, 0, 0, 0.70) 100%);
+}
+
+.ann-caption {
+  position: absolute;
+  left: 12.80px;
+  top: 426.00px;
+  width: 250.56px;
+  margin: 0;
+  font-family: sans-serif;
+  font-size: 24.00px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #111111;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow: visible;
+}
+
+.ann-step {
+  position: absolute; left: 574.67px; top: 28.00px; width: 24.00px; height: 24.00px;
+  box-sizing: border-box;
+  border-radius: 24.00px;
+  background: #e5484d;
+  color: #111111;
+  font-family: sans-serif;
+  font-size: 12.48px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

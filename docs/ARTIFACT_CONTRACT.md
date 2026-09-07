@@ -32,10 +32,25 @@ Definition: `netlify/lib/artifact-core/artifacts.ts:6-28`. Producer: `netlify/li
 | `filename` | string | always | the stored display name after collision handling (`-2`, `-3`… when the same name already points at different bytes). |
 | `label` | string | optional | caller label. |
 | `tags` | string[] | always (may be `[]`) | caller tags; capture uses `capture` + `snapshot|screenshot|asset`. |
-| `metadata` | object | always (may be `{}`) | renderer/template/version/requirements/`renderDataRef` for PDFs; `imageRole`/`usageContext`/edit provenance for images; `sizeWarning`; license/provenance for imports. **Returned verbatim by status/by-slot/by-filename** (only `verify_agent_artifact` scrubs it). |
+| `metadata` | object | always (may be `{}`) | renderer/template/version/requirements/`renderDataRef` for PDFs; `imageRole`/`usageContext`/edit provenance for images; `sizeWarning`; license/provenance for imports; `annotate: {…}` for `annotate_image`/`preview_image_grid` output (see below). **Returned verbatim by status/by-slot/by-filename** (only `verify_agent_artifact` scrubs it). |
 | `projectId`, `requestId`, `artifactId`, `slot`, `size`, `createdAt`, `deletedAtISO`, `deletedBy` | various | **never set by the producer** | declared as backward-compatible aliases (`:17-27`). `projectId`/`requestId` are deliberately not persisted in the reference (they are bound by the key and the proof). `deletedAtISO`/`deletedBy` have no writer anywhere. |
 
 Invariants a client may rely on: `blobKey` parses with `parseArtifactBlobKey` (`artifact-layout.ts:43-51`); `sha256` in the key equals the `sha256` field; bytes at `blobKey` hash to `sha256` (true at write time; the only delete path removes bytes and sidecar but leaves index records — `KNOWN_ISSUES.md` KI-16). Invariants a client may **not** rely on: `requestId` recoverability from `blobKey` (lossy); uniqueness of `filename` across requests; `metadata` being free of URLs/paths.
+
+## A.1 `image.annotate`'s four tools, and what each writes
+
+None of `annotate_image` / `analyze_image_layout` / `preview_image_grid` / `check_image_text` creates a job record — they are synchronous, like `rasterize_pdf_artifact`, and each returns its own flat `{ok, statusCode, artifactReference, …}` shape directly from `agent-artifact-image-annotate.ts` / `agent-artifact-image-text-check.ts`, not the job-status wrapper in §B.
+
+| Tool | Writes a new layer-A artifact? | `artifactKind` | `metadata.annotate` | Notes |
+|---|---|---|---|---|
+| `annotate_image` | yes — the rendered PNG/JPEG/WebP | `image` | `{sourceSha256, canvas:{w,h}, deviceScaleFactor, elementCount, warningCount, assetId}` | `sourceSha256` binds back to the base image. `filename` defaults to `{stem}-annotated.{ext}` (stem derived from the base artifact's own filename); `tags` gets `"annotate"` appended. `slot` (optional) **replaces** the `by-slot` pointer exactly as §E documents for `create_agent_artifact_job`/`import_image_from_url`. |
+| `analyze_image_layout` | no | — | — | Read-only: verifies + decodes the source image's bytes, returns `LayoutHints` (`docs/IMAGE_PIPELINE.md` §2.3) — no artifact, no index entry, no by-slot pointer. |
+| `preview_image_grid` | yes — the grid-overlay PNG | `image` | `{gridPreview: true, sourceSha256, assetId}` | Always PNG regardless of the source format. `filename` defaults to `{stem}-grid.png`; `tags` gets `"annotate", "grid-preview"` appended. No `slot` parameter. |
+| `check_image_text` | no | — | — | Read-only, like `analyze_image_layout`: OCRs bytes via the render service (`POST /ocr/image`) and returns a `textCheck` verdict — writes nothing. |
+
+Both writing tools go through the SAME `saveArtifactBytes` → `writeArtifactReferenceIndexes` path every other artifact write in this repo uses (§A's producer, §E's indexes) — nothing bespoke.
+
+A `logo` element inside `annotate_image`'s `spec` names its OWN `artifactRef`, verified through the identical access path (`resolveSourceImage`, the same one all four tools share) as the base image — but re-scoped to the ANNOTATE CALL's own `projectId`/`requestId`, not any requestId the logo artifact itself was originally saved under. A logo artifact saved under a different `requestId` fails verification and the whole `annotate_image` call is refused, not just the logo skipped — see `docs/KNOWN_ISSUES.md` KI-31. Logo bytes are read and composited into the output; they are never separately stored as their own artifact.
 
 ## B. Response wrapper
 

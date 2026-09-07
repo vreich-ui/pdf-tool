@@ -22,7 +22,7 @@ Start with `docs/AI_CONTEXT.md` if you are an agent about to change this reposit
 | [`docs/STORAGE_ARCHITECTURE.md`](docs/STORAGE_ARCHITECTURE.md) | storage grants, the two Netlify sites, every blob key, the authority table |
 | [`docs/JOB_LIFECYCLE.md`](docs/JOB_LIFECYCLE.md) | job states, retries, double execution, the execution-approval gate, artifact verification |
 | [`docs/PDF_RENDERING.md`](docs/PDF_RENDERING.md) | the four renderers, selection rules, template versioning, publish gates |
-| [`docs/IMAGE_PIPELINE.md`](docs/IMAGE_PIPELINE.md) | generation/editing, least-cost sourcing, imports, licensing responsibilities |
+| [`docs/IMAGE_PIPELINE.md`](docs/IMAGE_PIPELINE.md) | generation/editing, deterministic annotation (`annotate_image` and siblings), least-cost sourcing, imports, licensing responsibilities |
 | [`docs/CAPTURE_ARCHITECTURE.md`](docs/CAPTURE_ARCHITECTURE.md) | the site-capture plane: policy, snapshot.v1, resume, storage, integration boundary |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | identities, secrets, per-area security verdicts, tenant boundary |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | every environment variable, Cloud Run deploy, client onboarding, local dev |

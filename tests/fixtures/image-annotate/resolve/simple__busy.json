@@ -1,0 +1,38 @@
+{
+  "warnings": [],
+  "placements": [
+    {
+      "id": "label",
+      "type": "text",
+      "box": {
+        "x": 221.7386666666667,
+        "y": 191,
+        "w": 89.856,
+        "h": 18
+      },
+      "fontFamily": "sans-serif",
+      "fontSizePx": 14.399999999999999,
+      "weight": "normal",
+      "lines": [
+        "Intake valve"
+      ],
+      "align": "left",
+      "style": "label",
+      "color": "#101010"
+    },
+    {
+      "id": "pointer",
+      "type": "arrow",
+      "from": {
+        "x": 53.333333333333336,
+        "y": 40
+      },
+      "to": {
+        "x": 221.7386666666667,
+        "y": 191
+      },
+      "curve": 0.2,
+      "style": "bold"
+    }
+  ]
+}

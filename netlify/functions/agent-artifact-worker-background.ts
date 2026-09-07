@@ -1,4 +1,5 @@
 import { executeAgentArtifactWorkflow, type AgentArtifactWorkflowResult } from "../lib/agent-artifact-workflow.js";
+import { createOcrImageTextLeakChecker } from "../lib/agent-artifact-image-text-leak-check.js";
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
 import { saveArtifactBytes } from "../lib/artifact-layout.js";
@@ -109,7 +110,12 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
         // Route resolution already threw for templateRef-only / missing-template jobs, so
         // templateId is guaranteed here; the orchestrator dispatches on the stored renderer.
         : renderPdfArtifact({ projectId: runningJob.projectId, templateId: runningJob.templateId!, data: runningJob.data, assets: runningJob.assets, requirements: runningJob.requirements, mode: "final", lenient: runningJob.lenient, failOnQualityGate: runningJob.failOnQualityGate }))
-      : executeAgentArtifactWorkflow(runningJob, { apiKey, deadline });
+      // T4/T5 wiring: an OCR-backed checker so `requirements.image.annotate: true` generate
+      // jobs actually get their bytes checked (never over MCP — the checker talks to the
+      // render service directly) instead of silently falling back to the noop default. The
+      // checker is only ever CONSULTED for annotate:true generate jobs (the workflow's own
+      // gate); constructing it here for every image job is cheap and makes no call by itself.
+      : executeAgentArtifactWorkflow(runningJob, { apiKey, deadline, checkImageTextLeak: createOcrImageTextLeakChecker({ deadline }) });
     const generated = await withWorkerDeadlineTimeout(workUnit, deadline, "artifact render/generation");
     const renderDataRef = runningJob.artifactKind === "pdf" && runningJob.operation !== "edit" && "template" in generated
       ? await writePdfRenderData(runningJob.projectId, runningJob.jobId, { templateId: generated.template.templateId, templateRef: runningJob.templateRef, templateVersion: generated.template.version, renderer: generated.template.renderer, requirements: generated.requirements, data: runningJob.data ?? {}, validation: generated.validation })
@@ -156,10 +162,25 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     const engineWarnings = "diagnostics" in generated ? generated.diagnostics?.engineWarnings ?? [] : [];
     const qualityGate: QualityGateReport | undefined = "qualityGate" in generated ? generated.qualityGate : undefined;
     const qualityGateSummary = qualityGate ? summarizeQualityGate(qualityGate) : undefined;
+    // T5: the annotate-mode text-leak regenerate's outcome (ran, or skipped, and whether the
+    // second attempt still leaked) — same warn-only channel as sizeWarning above, never used
+    // to fail the job.
+    //
+    // Sanitized like engineWarnings below, and for the same reason: two of these strings
+    // interpolate an arbitrary thrown error's `message` (safeCheckImageTextLeak catches
+    // ANYTHING the OCR checker throws, and the regenerate's catch takes whatever the provider
+    // SDK or the budget guard raised). Those messages can carry a URL or a filesystem path,
+    // and this list is persisted onto the job record, which get_agent_artifact_job_status
+    // hands straight back to an agent — the exact channel sanitizeDiagnosticText exists to
+    // keep infrastructure detail out of.
+    const annotateGuardWarnings = ("annotateGuardWarnings" in generated ? generated.annotateGuardWarnings ?? [] : [])
+      .map((warning) => sanitizeDiagnosticText(warning))
+      .filter((warning) => warning.length > 0);
     const warnings = [
       ...(sizeWarning ? [`Generated artifact exceeds requested maxBytes of ${sizeWarning.maxBytes} (actual ${sizeWarning.actualBytes}); stored anyway per the warn-only over-budget policy`] : []),
       ...engineWarnings.map((warning) => sanitizeDiagnosticText(warning)).filter((warning) => warning.length > 0),
       ...(qualityGateSummary ? [qualityGateSummary] : []),
+      ...annotateGuardWarnings,
     ];
     const artifact = await saveArtifactBytes({
       projectId: runningJob.projectId,

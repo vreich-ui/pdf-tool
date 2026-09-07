@@ -5,6 +5,11 @@ import { REGISTERED_RENDERERS } from "./pdf-render/registry.js";
 // B2: the rasterize caps are declared once, in the client that talks to the render service,
 // and reused here so the advertised schema can never drift from what is enforced.
 import { DEFAULT_RASTERIZE_DPI, MAX_RASTERIZE_DPI, MAX_RASTERIZE_PAGES, MAX_RASTERIZE_PAGE_PIXELS, MIN_RASTERIZE_DPI } from "./pdf-render/rasterize-client.js";
+// T4: same reuse discipline — the OCR caps are declared once in the client, reused here.
+import { SUPPORTED_OCR_LANGUAGES } from "./pdf-render/ocr-client.js";
+// T8: same reuse discipline again — the AnnotationSpec's own list caps are declared once, in
+// the schema that enforces them, and reused here so the advertised limit cannot drift.
+import { MAX_ANNOTATION_ELEMENTS, MAX_AVOID_ZONES } from "./image-annotate/spec.js";
 
 /**
  * S4 (surface): single zod-sourced validator for the MCP transport layer.
@@ -86,6 +91,86 @@ export const MCP_TOOL_SCHEMAS = {
       .describe(`1-based page numbers to rasterize; sorted and de-duplicated server-side so the response is always in document order. Omit for EVERY page. At most ${MAX_RASTERIZE_PAGES} pages per call — a larger request (or a document larger than that when pages is omitted) is REFUSED with errorCode RASTERIZE_TOO_MANY_PAGES, never silently truncated. A page beyond the document is refused with RASTERIZE_PAGE_OUT_OF_RANGE. This call is synchronous: a page count that cannot finish inside the function's remaining clock at the requested dpi is refused with RASTERIZE_BUDGET_EXCEEDED, which names how many pages would fit.`),
     dpi: z.number().int().optional()
       .describe(`Rasterization resolution, ${MIN_RASTERIZE_DPI}-${MAX_RASTERIZE_DPI} dpi (default ${DEFAULT_RASTERIZE_DPI}). Validated, NOT clamped: an out-of-range value is refused with errorCode RASTERIZE_DPI_OUT_OF_RANGE rather than silently answered at a different resolution. dpi is also what the per-page pixel cap is measured at: a page over ${Math.round(MAX_RASTERIZE_PAGE_PIXELS / 1_000_000)} megapixels at the dpi you asked for is refused with RASTERIZE_PAGE_TOO_LARGE, and the message names the highest dpi that page fits at.`)
+  }).strict(),
+
+  // ── T3: deterministic image annotation (tenant plane, all three synchronous) ──
+  //
+  // NOTE, the same one rasterize_pdf_artifact's schema carries: the AnnotationSpec is NOT
+  // re-expressed as zod here. It already has exactly one schema — annotationSpecSchema in
+  // netlify/lib/image-annotate/spec.ts — and a second, hand-maintained copy in this file
+  // would be precisely the F6 drift this module exists to prevent. It is also a
+  // discriminated union of six element types, which the tool-schema converter
+  // (zod-json-schema.ts) deliberately does not support: transporting it would emit either a
+  // wrong advertised schema or a module-load throw. So `spec` is advertised as an object and
+  // validated by its own schema inside annotateImageArtifact, which refuses a bad one with
+  // the named TEMPLATE_INVALID and the offending field paths — not with the transport
+  // layer's generic "Invalid input".
+  "annotate_image": z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference of the stored BASE image to annotate (must contain at least blobKey and sha256) — same shape verify_agent_artifact / inspect_pdf_artifact / rasterize_pdf_artifact take. It must name the same artifact as spec.base.artifactRef, or the call is refused with ANNOTATE_BASE_MISMATCH."),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact"),
+    spec: z.object({}).passthrough().describe(
+      "The AnnotationSpec v1 document: { version: 1, canvas: {w,h}, base: {artifactRef}, theme?, elements: [], avoid: [] }. " +
+        "POSITIONS are a 6x6 grid cell (\"A1\"..\"F6\", the same ids analyze_image_layout reports) or a normalized {x,y} point (0..1 fractions of the canvas, NEVER pixels). " +
+        "ELEMENTS (every one needs a unique `id`): " +
+        "text {content, at, anchor?: tl|tc|tr|cl|c|cr|bl|bc|br (default tl), maxWidth?: 0..1 (default 0.9), style?: label|title|caption|badge (default label), align?: left|center|right}; " +
+        "arrow {from, to, curve?: -1..1 (default 0, straight), style?: thin|bold|dashed} — an endpoint may also be \"#<id>\", which terminates on that element's box edge; " +
+        "badge {n: a non-negative integer OR a short string label of at most 4 characters, at}; " +
+        "box {rect: {at, w, h} in 0..1 fractions with `at` as its top-left corner, style?: {fill, stroke, strokeWidthPx, radiusPx}}; " +
+        "scrim {rect, direction?: top|bottom|left|right (default bottom), strength?: 0..1 (default 0.6)} — a gradient for making text legible over a photo; " +
+        "logo {at, size: 0..1 of the canvas's SHORTER edge, artifactRef} — its artifactRef is access-checked exactly like the base image's. " +
+        "`avoid: [{at, w, h}]` are zones to keep clear; text and badges are pushed out of them (and out of each other) and the move is reported as a warning. " +
+        "`theme` is {fontFamily?, textColor?, textColors?: {label,title,caption,badge}, accentColor?, scrimColor?} — textColors is per text style, and it is what the per-element WCAG contrast check measures. " +
+        `COLORS are #rgb / #rrggbb / #rrggbbaa. At most ${MAX_ANNOTATION_ELEMENTS} elements and ${MAX_AVOID_ZONES} avoid zones per spec — an over-long list is REFUSED, never truncated, so nothing you sent is silently dropped. ` +
+        "Unknown fields are REJECTED (the schema is strict) and an invalid spec is refused with errorCode TEMPLATE_INVALID naming the field paths that failed."
+    ),
+    format: z.string().optional().describe("Output image format: \"png\" (default, lossless, and the renderer's exact bytes), \"jpeg\" or \"webp\"."),
+    quality: z.number().int().optional().describe("Encoder quality 1-100 (default 90) for jpeg/webp. Rejected for png, which is lossless — asking for a PNG \"quality\" would describe something the output does not have."),
+    deviceScaleFactor: z.number().int().optional().describe("Render the canvas at this pixel density (1-3, default 1). The stored image is canvas.w*factor x canvas.h*factor pixels, so 2 costs 4x the pixels and is what the up-front budget refusal is most often about."),
+    filename: z.string().optional().describe("Target filename for the annotated artifact; derived from the base artifact's own filename (\"<stem>-annotated.<ext>\") when omitted"),
+    slot: z.string().optional().describe("Optional safe slot so the annotated artifact is retrievable via get_agent_artifact_by_slot. Setting it REPLACES the `by-slot` lookup pointer for that slot (the previous artifact's bytes stay stored)."),
+    tags: z.array(z.string()).optional(),
+    label: z.string().optional()
+  }).strict(),
+
+  "analyze_image_layout": z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference of the stored image to analyze (must contain at least blobKey and sha256)"),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact")
+  }).strict(),
+
+  "preview_image_grid": z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference of the stored image to draw the grid over (must contain at least blobKey and sha256)"),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact"),
+    filename: z.string().optional().describe("Target filename for the preview artifact; derived from the source artifact's own filename (\"<stem>-grid.png\") when omitted"),
+    tags: z.array(z.string()).optional(),
+    label: z.string().optional()
+  }).strict(),
+
+  // ── T4: the OCR text gate (warn-only, tenant plane, synchronous) ──
+  "check_image_text": z.object({
+    projectId: z.string().min(1),
+    requestId: z.string().min(1),
+    artifactReference: z.object({}).passthrough().optional().describe("The claimed ArtifactReference of the stored image to OCR (must contain at least blobKey and sha256) — same shape verify_agent_artifact / annotate_image / analyze_image_layout take"),
+    blobKey: z.string().optional().describe("The claimed blobKey (alternative to artifactReference)"),
+    sha256: z.string().optional().describe("The claimed sha256 (alternative to artifactReference)"),
+    materializationProof: z.string().optional().describe("The signed proof pdf-tool returned with the artifact; optional, strengthens verification exactly as it does for verify_agent_artifact"),
+    mode: z.enum(["expect_none", "expect"]).describe(
+      '"expect_none": flags ANY significant text OCR finds in the image — use this on a generated base image BEFORE annotating it, to catch a model that baked its own (usually garbled) text into the pixels. ' +
+        '"expect": verifies that every string in `expect` actually appears in the image\'s text — use this AFTER annotate_image, passing the same strings the AnnotationSpec\'s text/badge elements were supposed to render, to confirm the render service actually drew them (rather than, say, a font substitution silently dropping glyphs).'
+    ),
+    expect: z.array(z.string().min(1)).optional().describe('Required (non-empty) when mode is "expect"; must be OMITTED when mode is "expect_none". Each string is matched case-insensitively, with whitespace collapsed, and with the 0/O and 1/l/I character pairs folded together — NOT fuzzy: a genuinely different word (a misspelling, a wrong number) still fails to match.'),
+    languages: z.array(z.string()).optional().describe(`OCR language codes; omit for the default (${SUPPORTED_OCR_LANGUAGES.join(", ")}). Only languages with traineddata installed in the render-service image are supported — anything else is refused with errorCode OCR_LANGUAGE_UNAVAILABLE, naming what IS supported, rather than silently mis-recognizing text in the wrong script.`)
   }).strict(),
 
   preview_pdf_template: z.object({

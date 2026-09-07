@@ -74,7 +74,11 @@ Removed and no longer read: `CLIENT_SITE_ID`, `CLIENT_BLOBS_TOKEN`. (`PDF_TOOL_S
 | `CAPTURE_TEST_ALLOW_HTTP` | tests only | relaxes the https rule for loopback fixtures — never in production |
 | `NODE_ENV=production` | image | enables the Fastify logger |
 
-Image (`render-service/Dockerfile`): typst 0.15.0 downloaded and verified against `render-service/typst.sha256` (pinned 2026-07-21 by Cloud Build); Playwright Chromium; poppler-utils; bundled Noto fonts; vendored typst packages directory made read-only. No container `HEALTHCHECK`; Cloud Run's own probe plus the deploy-time smoke test are the health gates.
+Image (`render-service/Dockerfile`): typst 0.15.0 downloaded and verified against `render-service/typst.sha256` (pinned 2026-07-21 by Cloud Build); Playwright Chromium; poppler-utils; **tesseract-ocr + tesseract-ocr-eng** (the OCR engine behind `POST /ocr/image`, added on the `image-annotate` branch — see below); bundled Noto fonts; vendored typst packages directory made read-only. No container `HEALTHCHECK`; Cloud Run's own probe plus the deploy-time smoke test are the health gates.
+
+### 3.1 `image-annotate` branch deploy consequence
+
+This branch adds two render-service routes — `POST /render/image` (Chromium screenshot at an exact pixel canvas, behind `annotate_image`) and `POST /ocr/image` (tesseract OCR, behind `check_image_text` and the generate-stage text-leak guard) — plus the `tesseract-ocr`/`tesseract-ocr-eng` Debian packages in the Dockerfile. Both routes, and the tools that call them, ship the moment this branch merges to `main` (Netlify auto-deploys from `main`; §1), but **the manual `Deploy render-service` workflow must run separately** before either route exists in the deployed Cloud Run container — until it does, `annotate_image` and `check_image_text` fail closed (`RENDER_SERVICE_UNAVAILABLE`/`RENDER_ENGINE_ERROR` for the render route, `OCR_UNAVAILABLE` once the container is reachable but predates this branch's Dockerfile). See `docs/KNOWN_ISSUES.md` KI-35. Confirm the deploy actually picked up both additions via `GET /health` → `engines.tesseract.available` (and `engines.chromium.available`, already required by the print path).
 
 ## 4. GitHub Actions secrets / variables for the render-service deploy
 

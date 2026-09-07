@@ -18,6 +18,79 @@ export interface ImageGenerationClient {
   };
 }
 
+/**
+ * T5 (image.annotate prompt guard): image models reliably garble rendered text — misspelled
+ * words, arrows pointing at nothing — so a job opting into `requirements.image.annotate`
+ * gets this hard suffix appended to its prompt instead of ever asking the model to draw
+ * text. Text belongs entirely to the deterministic annotation layer (annotate_image, T3),
+ * never to the generative model.
+ *
+ * Split into two independently-idempotent clauses (see buildAnnotatedGenerationPrompt below)
+ * rather than one opaque blob, so each can be checked for prior presence on its own — the
+ * no-text prohibition and the composition hint are genuinely separate instructions and a
+ * caller's own prompt may already cover one without the other.
+ */
+export const IMAGE_ANNOTATION_NO_TEXT_CLAUSE =
+  "Do not render any text, letters, numbers, or words anywhere in the image, and do not " +
+  "render labels, captions, arrows, callouts, speech-bubble shapes, signage, watermarks, " +
+  "or logos — this artwork gets its text added afterward by a separate deterministic " +
+  "annotation layer, and any text or lettering the model attempts here will come out " +
+  "misspelled or pointing at nothing.";
+
+/**
+ * Used INSTEAD of IMAGE_ANNOTATION_NO_TEXT_CLAUSE when the caller's own prompt already
+ * asks for no text (see NO_TEXT_ALREADY_REQUESTED_PATTERN) — repeating "no text" back at
+ * the model a second time is a doubled instruction, not a stronger one, so this variant
+ * covers only the ground the caller's own wording does not: labels, arrows, captions,
+ * watermarks, logos.
+ */
+export const IMAGE_ANNOTATION_NO_TEXT_CLAUSE_MINIMAL =
+  "Also render no labels, captions, arrows, callouts, speech-bubble shapes, signage, " +
+  "watermarks, or logos anywhere in the image — this artwork gets its text added " +
+  "afterward by a separate deterministic annotation layer.";
+
+export const IMAGE_ANNOTATION_COMPOSITION_CLAUSE =
+  "Compose with clear negative space reserved for that later annotation layer: place the " +
+  "main subject to one side (or otherwise off-center) and leave the opposite side of the " +
+  "frame plain, uncluttered, and low-detail.";
+
+/** The full suffix a fresh (never-before-annotated) prompt receives. */
+export const IMAGE_ANNOTATION_PROMPT_SUFFIX = `${IMAGE_ANNOTATION_NO_TEXT_CLAUSE} ${IMAGE_ANNOTATION_COMPOSITION_CLAUSE}`;
+
+/** Loose match on a caller's OWN prompt already asking for no text, in some form, before
+ * this builder ever touches it — "no text", "without lettering", "text-free", etc. Scoped
+ * to the caller's original wording only (checked before either of our clauses could already
+ * be present), never to text this function itself appended. */
+const NO_TEXT_ALREADY_REQUESTED_PATTERN =
+  /\b(?:no|without|zero)\s+(?:text|words|letters|typography|lettering|writing)\b|text[- ]?free|\btextless\b/i;
+
+/**
+ * Pure, idempotent builder for the annotate-mode prompt suffix (T5). Appending twice never
+ * duplicates either clause — each is checked for prior presence in `prompt` independently —
+ * and a caller who already wrote their own "no text" instruction gets the reduced no-text
+ * clause instead of a second, redundant one. Returns `prompt` completely unchanged (same
+ * string instance behavior aside — byte-identical content) when nothing needs adding.
+ */
+export function buildAnnotatedGenerationPrompt(prompt: string): string {
+  const base = typeof prompt === "string" ? prompt : "";
+  const hasFullNoTextClause = base.includes(IMAGE_ANNOTATION_NO_TEXT_CLAUSE);
+  const hasMinimalNoTextClause = base.includes(IMAGE_ANNOTATION_NO_TEXT_CLAUSE_MINIMAL);
+  const hasCompositionClause = base.includes(IMAGE_ANNOTATION_COMPOSITION_CLAUSE);
+
+  const additions: string[] = [];
+  if (!hasFullNoTextClause && !hasMinimalNoTextClause) {
+    const callerAlreadyRequestedNoText = NO_TEXT_ALREADY_REQUESTED_PATTERN.test(base);
+    additions.push(callerAlreadyRequestedNoText ? IMAGE_ANNOTATION_NO_TEXT_CLAUSE_MINIMAL : IMAGE_ANNOTATION_NO_TEXT_CLAUSE);
+  }
+  if (!hasCompositionClause) {
+    additions.push(IMAGE_ANNOTATION_COMPOSITION_CLAUSE);
+  }
+
+  if (additions.length === 0) return base;
+  const trimmed = base.trim();
+  return trimmed.length > 0 ? `${trimmed}\n\n${additions.join(" ")}` : additions.join(" ");
+}
+
 function contentTypeFromFormat(format: string): GeneratedImageBytes["contentType"] {
   if (format === "jpeg" || format === "jpg") return "image/jpeg";
   if (format === "webp") return "image/webp";

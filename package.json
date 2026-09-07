@@ -8,6 +8,8 @@
     "test": "npm run test:netlify && npm run test:service",
     "test:netlify": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/agent-artifact*.test.js",
     "test:service": "npm --prefix render-service run test",
+    "goldens:image-annotate:update": "rm -rf .tmp-tests && tsc -p tsconfig.test.json && UPDATE_IMAGE_ANNOTATE_GOLDENS=1 node --test .tmp-tests/tests/agent-artifact-image-annotate-goldens.test.js",
+    "goldens:image-annotate:png:update": "UPDATE_IMAGE_ANNOTATE_PNG_GOLDEN=1 npm --prefix render-service run test",
     "docs:generate": "tsx scripts/generate-reference.mts",
     "docs:check": "rm -rf .tmp-docs && tsx scripts/generate-reference.mts --out .tmp-docs && diff -u docs/MCP_REFERENCE.md .tmp-docs/MCP_REFERENCE.md && diff -u docs/HTTP_REFERENCE.md .tmp-docs/HTTP_REFERENCE.md && rm -rf .tmp-docs"
   },

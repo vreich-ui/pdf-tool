@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 #
 # pdf-tool-render: fastify + native typst 0.15.0 binary + Playwright/Chromium + poppler-utils
-# (pdftoppm, the PDF page rasterizer behind /rasterize/pdf).
+# (pdftoppm, the PDF page rasterizer behind /rasterize/pdf) + tesseract-ocr (the OCR engine
+# behind /ocr/image, T4's check_image_text — see src/ocr.ts for why it lives here rather
+# than as tesseract.js inside a Netlify function: BRIEF §3 item 4, decided in T4).
 # NOT built in this session (no docker daemon available) — built by deploy/cloud-run.sh via
 # `gcloud builds submit`. TYPST_SHA256 has no default: the build fails loudly rather than
 # trusting an unpinned download.
@@ -65,8 +67,17 @@ WORKDIR /app
 # renderers (pdfme / typst / react-pdf), none of which own a browser page to screenshot.
 # poppler-utils is the only Debian/Ubuntu package that ships pdftoppm; without it the route
 # answers RASTERIZE_UNAVAILABLE rather than failing opaquely.
+#
+# T4: tesseract-ocr is the OCR engine behind POST /ocr/image (check_image_text — the warn-only
+# gate that flags model-generated text leaking into a base image, or verifies an annotation's
+# own text actually rendered). --no-install-recommends means the English traineddata is NOT
+# pulled in automatically (it is only a Recommends of tesseract-ocr, not a Depends), so
+# tesseract-ocr-eng is listed explicitly — without it the binary exists but every OCR call
+# fails "Failed loading language 'eng'" instead of finding text. Only "eng" is installed
+# (see SUPPORTED_OCR_LANGUAGES in src/ocr.ts); a call for any other language is refused with
+# OCR_LANGUAGE_UNAVAILABLE rather than silently mis-recognizing text in the wrong script.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends poppler-utils \
+  && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-eng \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=typst-fetch /usr/local/bin/typst /usr/local/bin/typst

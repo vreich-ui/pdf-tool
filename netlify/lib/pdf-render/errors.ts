@@ -120,7 +120,70 @@ export type RenderErrorCode =
    * render-service/Dockerfile) — a deploy fault, distinct from a bad request. */
   | "RASTERIZE_UNAVAILABLE"
   /** poppler ran and failed. The only non-input rasterize failure. */
-  | "RASTERIZE_FAILED";
+  | "RASTERIZE_FAILED"
+  /** T3 — `annotate_image` and the render-service route it stands on
+   * (`POST /render/image`). Each of the first two maps 1:1 onto a code the service produces;
+   * the rest are raised on this side before or after the service is called. */
+  /** The requested canvas is outside the render service's edge / device-pixel caps. Raised
+   * on BOTH sides: a fast local refusal in image-render-client.ts, authoritatively in
+   * render-service/src/contract.ts before a browser context is created. */
+  | "IMAGE_CANVAS_TOO_LARGE"
+  /** The rendered PNG exceeds `maxOutputBytes`. The PNG sibling of PDF_REQ_MAX_BYTES — a
+   * separate code rather than a reuse, because a code is never repurposed and
+   * "PDF_REQ_MAX_BYTES on an image render" would misname what happened. */
+  | "IMAGE_REQ_MAX_BYTES"
+  /** The verified reference names no readable blob in the project's artifacts store. */
+  | "ANNOTATE_ARTIFACT_NOT_FOUND"
+  /** The base artifact is not an image — either its reference says so
+   * (artifactKind/contentType) or its bytes carry no PNG/JPEG/WebP/GIF signature. */
+  | "ANNOTATE_ARTIFACT_NOT_IMAGE"
+  /** The AnnotationSpec's `base.artifactRef` names a different blob than the artifact the
+   * call verified. Refused rather than silently preferring one of the two: the spec and the
+   * access-scoped reference must describe the same image or the render is not the one the
+   * caller's scope was checked for. */
+  | "ANNOTATE_BASE_MISMATCH"
+  /** This annotation cannot plausibly finish inside the remaining synchronous-function
+   * budget. Refused BEFORE the render service is called, exactly like
+   * RASTERIZE_BUDGET_EXCEEDED — a mid-flight platform kill answers with a gateway 5xx that
+   * carries no code at all. */
+  | "ANNOTATE_BUDGET_EXCEEDED"
+  /** The annotation rendered, but writing it into the project's artifacts store failed.
+   * Distinct from the render codes: chromium did its job, the store did not. */
+  | "ANNOTATE_STORE_FAILED"
+  /** sharp could not re-encode the rendered PNG into the requested output format. */
+  | "ANNOTATE_ENCODE_FAILED"
+  /** T4 — `check_image_text` (the OCR text gate) and the render-service route it stands on
+   * (`POST /ocr/image`). Each of the first five maps 1:1 onto a code the service produces;
+   * the rest are raised on this side before or after the service is called. Same warn-not-
+   * block discipline as the PDF quality gate (BRIEF §1): a failing gate answers `ok: true`
+   * with `textCheck.ok: false` — NONE of these codes is raised for a gate that ran and found
+   * text it did not expect, or missed text it did expect. They are raised only when the gate
+   * itself could not run at all. */
+  /** The verified reference names no readable blob in the project's artifacts store. */
+  | "OCR_ARTIFACT_NOT_FOUND"
+  /** The image bytes could not be decoded by the render service's OCR engine (bad base64,
+   * over the decoded-byte cap, or bytes carrying none of the four recognized image
+   * signatures — PNG/JPEG/WebP/GIF). */
+  | "OCR_IMAGE_INVALID"
+  /** The image's decoded bytes exceed the render service's per-call OCR cap. */
+  | "OCR_IMAGE_TOO_LARGE"
+  /** A requested OCR language has no traineddata installed in the render-service image
+   * (only "eng" ships — see render-service/Dockerfile). */
+  | "OCR_LANGUAGE_UNAVAILABLE"
+  /** tesseract's binary is missing from the render-service image — a deploy fault, distinct
+   * from a bad request. */
+  | "OCR_UNAVAILABLE"
+  | "OCR_TIMEOUT"
+  /** tesseract ran and failed. The only non-input OCR failure. */
+  | "OCR_ENGINE_ERROR"
+  /** `mode: "expect"` was given with no non-empty `expect` array, or `mode` itself is
+   * neither "expect_none" nor "expect". */
+  | "TEXT_CHECK_INVALID_MODE"
+  /** This OCR call cannot plausibly finish inside the remaining synchronous-function budget.
+   * Refused BEFORE the render service is called, exactly like ANNOTATE_BUDGET_EXCEEDED /
+   * RASTERIZE_BUDGET_EXCEEDED — a mid-flight platform kill answers with a gateway 5xx that
+   * carries no code at all. */
+  | "OCR_BUDGET_EXCEEDED";
 
 export class RenderError extends Error {
   readonly code: RenderErrorCode;

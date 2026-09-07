@@ -1,0 +1,4 @@
+{
+  "input": "Save {{ price }} & <b>\"quoted\"</b> — 50% {% off %} it's on!",
+  "escaped": "Save &#123;&#123; price &#125;&#125; &amp; &lt;b&gt;&quot;quoted&quot;&lt;/b&gt; — 50% &#123;% off %&#125; it&#39;s on!"
+}
