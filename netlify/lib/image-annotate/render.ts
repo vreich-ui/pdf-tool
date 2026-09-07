@@ -51,9 +51,11 @@
  * ordinary sentence-case Latin text, materially worse for all-caps, all-narrow-glyph,
  * condensed/monospace or non-Latin text. The CSS below is written so EITHER kind of error is
  * absorbed rather than amplified:
- *   - each text block gets an explicit `width` equal to the resolver's own measured box —
- *     the same number the anchor math and the collision push-out used — so the block's
- *     horizontal position is exactly what was computed, and the browser re-wraps INSIDE it;
+ *   - each text block gets an explicit `width` equal to the resolver's own measured box, plus
+ *     a small documented slack (KI-39 — TEXT_WIDTH_SLACK_FRACTION/_MIN_PX, applied align-aware
+ *     so the anchored edge does not move) so a real-Chromium measurement landing a hair over
+ *     the predicted float does not itself wrap an otherwise-correct line — the anchor math and
+ *     collision push-out still reason about the UNWIDENED predicted box; only the CSS is wider;
  *   - `overflow-wrap: break-word` means even a single unbreakable word stays inside that
  *     width instead of spilling across the canvas;
  *   - nothing sets `overflow: hidden` on a text block, so an under-measured string grows
@@ -176,6 +178,39 @@ export const BASE_ASPECT_TOLERANCE = 0.01;
  */
 export const MEASURED_BOX_DRIFT_FRACTION = 0.1;
 export const MEASURED_BOX_DRIFT_MIN_PX = 2;
+
+/**
+ * CSS width slack added on top of the resolver's own predicted `box.w` when a text block's
+ * width is emitted (see `textRules`) — KI-39.
+ *
+ * A box sized to EXACTLY the predicted float has zero margin: even the bundled-face EXACT
+ * metrics table (KI-30) is a sum of per-glyph advance widths with no kerning/shaping and no
+ * device-pixel snapping, and real Chromium's own text layout can legitimately need a hair more
+ * than that sum — confirmed against real Chromium (this fix's T-report has the sweep): a
+ * single-line title ("TTJVOMQH" bold, 51.2px, predicted 277.76px) needed 278.22px and wrapped
+ * to two lines at the exact predicted width; a long ALL-CAPS run at a large font size needed
+ * ~5px (~0.35%) more than predicted. Two things follow from that sweep:
+ *   - CEILING TO THE NEXT WHOLE CSS PIXEL IS NOT ENOUGH. 278px (ceil(277.76)) is still short of
+ *     the 278.22px Chromium actually needed in the case above — the residual is not bounded by
+ *     "less than one device pixel" the way a pure display/LayoutUnit snapping error would be.
+ *   - The residual scales with the predicted width (the sweep's worst case was ~0.35% of a
+ *     long/large run, not a fixed few hundredths of a px), so a flat sub-pixel epsilon that
+ *     covers the small cases is not guaranteed to cover the large ones, and a flat epsilon
+ *     generous enough for the large ones would be needlessly wide on a short caption.
+ * Hence a slack that is the LARGER of a small fraction of the predicted width and a fixed px
+ * floor — the same shape as MEASURED_BOX_DRIFT's own tolerance, deliberately smaller:
+ * TEXT_WIDTH_SLACK_FRACTION (1%) sits a full order of magnitude below MEASURED_BOX_DRIFT_
+ * FRACTION (10%) so this slack can never itself mask a real MEASURED_BOX_DRIFT — the largest
+ * residual the sweep found (~0.35%) still leaves ~3x headroom under it — and TEXT_WIDTH_SLACK_
+ * MIN_PX (1px) is the floor for small boxes where a percentage alone rounds away to nothing.
+ * `widenedTextBox` (below) applies this WITHOUT changing `placement.box` itself, i.e. without
+ * touching resolve.ts's anchor placement, collision push-out or canvas clamping — those still
+ * reason about the exact predicted box; only the CSS this module emits is widened, and
+ * `align`-aware (see `widenedTextBox`) so a centered or right-anchored block's visible edge
+ * does not move.
+ */
+export const TEXT_WIDTH_SLACK_FRACTION = 0.01;
+export const TEXT_WIDTH_SLACK_MIN_PX = 1;
 
 export const DEFAULT_OUTPUT_FORMAT = "png" as const;
 export const DEFAULT_OUTPUT_QUALITY = 90;
@@ -364,18 +399,44 @@ function absoluteRectCss(box: PixelRect): string {
   return `position: absolute; left: ${px(box.x)}; top: ${px(box.y)}; width: ${px(box.w)}; height: ${px(box.h)};`;
 }
 
+/**
+ * The CSS `left`/`width` a text block actually gets, once TEXT_WIDTH_SLACK_FRACTION/_MIN_PX's
+ * slack is added to the resolver's predicted `box.w` — WITHOUT moving the box's own anchored
+ * edge for the alignment that's actually in effect:
+ *   - `left`: the extra width goes entirely to the right; the left edge (where the text
+ *     starts) is exactly where the resolver anchored it.
+ *   - `right`: the extra width goes entirely to the left, so the right edge (where the text
+ *     ends) is unmoved.
+ *   - `center`: split evenly, so the box's center (where the text is centered) is unmoved.
+ * This is what makes the slack safe for every anchor/align combination: resolve.ts's
+ * placement.box (used for anchor placement, collision push-out and canvas clamping) is never
+ * touched, and the EDGE that alignment actually renders text against is preserved exactly —
+ * only the invisible container the browser wraps against gets wider.
+ */
+function widenedTextBox(placement: TextPlacement): { left: number; width: number } {
+  const { box, align } = placement;
+  const slack = Math.max(TEXT_WIDTH_SLACK_MIN_PX, box.w * TEXT_WIDTH_SLACK_FRACTION);
+  const width = box.w + slack;
+  if (align === "right") return { left: box.x - slack, width };
+  if (align === "center") return { left: box.x - slack / 2, width };
+  return { left: box.x, width };
+}
+
 function textRules(placement: TextPlacement): string {
-  // `width` is the resolver's own measured box — the same number the anchor math and the
-  // collision push-out used — so the block's horizontal placement is exactly what was
-  // computed and any measurement error is absorbed by re-wrapping inside it (see the
-  // module header's "Text fitting"). Height is deliberately NOT set: an under-measured
-  // string must grow downward, never be clipped.
+  // `width` is the resolver's own measured box, WIDENED by a small documented slack (see
+  // TEXT_WIDTH_SLACK_FRACTION/_MIN_PX and widenedTextBox) so a real-Chromium measurement that
+  // lands a hair over the predicted float — sub-pixel layout rounding, not a wrong prediction
+  // — re-wraps INSIDE the box instead of wrapping an otherwise-correct single line. `left` is
+  // adjusted the same align-aware way so the anchor/collision math's idea of the box (and the
+  // edge alignment actually renders against) does not move. Height is deliberately NOT set: an
+  // under-measured string must grow downward, never be clipped.
+  const { left, width } = widenedTextBox(placement);
   return [
     `.${classFor(placement.id)} {`,
     `  position: absolute;`,
-    `  left: ${px(placement.box.x)};`,
+    `  left: ${px(left)};`,
     `  top: ${px(placement.box.y)};`,
-    `  width: ${px(placement.box.w)};`,
+    `  width: ${px(width)};`,
     `  margin: 0;`,
     `  font-family: ${sanitizeFontFamily(placement.fontFamily)};`,
     `  font-size: ${px(placement.fontSizePx)};`,
@@ -509,13 +570,15 @@ export function measurablePlacements(placements: Placement[], availableLogoIds: 
  * MEASUREMENT_UNAVAILABLE — otherwise a measurement pass that silently failed would be
  * indistinguishable from a layout that fit perfectly.
  *
- * WHICH AXIS ACTUALLY CARRIES THE SIGNAL. Height. A text block's CSS `width` IS the
- * resolver's predicted `box.w` (see textRules), so measured width equals predicted width by
- * construction and can never reveal a measurement error — it is checked anyway, purely as a
- * canary for a CSS regression that stops the width being applied. What an under-measurement
- * does instead is make the browser WRAP inside that too-narrow box, and height is quantized
- * to whole lines: a one-line box that mispredicts becomes two lines, i.e. +100% height, not
- * +15%.
+ * WHICH AXIS ACTUALLY CARRIES THE SIGNAL. Height. A text block's CSS `width` is the resolver's
+ * predicted `box.w` PLUS `textRules`'s small documented slack (see TEXT_WIDTH_SLACK_FRACTION/
+ * _MIN_PX, KI-39), so measured width equals predicted width plus that slack by construction —
+ * comfortably inside this function's own tolerance (the slack is capped at 1% / MEASURED_BOX_
+ * DRIFT_FRACTION is 10%), so the width axis still can't reveal a measurement error on its own;
+ * it is checked anyway, purely as a canary for a CSS regression that stops the width being
+ * applied. What an under-measurement does instead is make the browser WRAP inside that
+ * (now-slightly-wider-but-still-too-narrow) box, and height is quantized to whole lines: a
+ * one-line box that mispredicts becomes two lines, i.e. +100% height, not +15%.
  *
  * PRE-KI-30 BASELINE (kept for context — this is what motivated the fix, not current
  * behavior for bundled-face text): measured on a mixed fixture against real Chromium at 15px
