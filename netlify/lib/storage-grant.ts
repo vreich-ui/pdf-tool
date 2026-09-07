@@ -27,6 +27,16 @@ export interface StorageGrantStores {
 export interface StorageGrantLimits {
   maxImageBytes?: number;
   preferredImageFormat?: "png" | "webp" | "jpeg";
+  /**
+   * S-15: platform-minted policy for what happens when a generated/edited image is still
+   * over its byte budget after best-effort optimization. "warn" stores it anyway with a
+   * sizeWarning (pdf-tool's long-standing default, still the only behaviour for a grant
+   * that predates this field). "block" refuses the job instead — see
+   * agent-artifact-worker-background.ts's IMAGE_OVER_BUDGET refusal. Absent or any value
+   * other than exactly "warn"/"block" normalizes to "warn": a tenant that never configured
+   * this must see no change in behaviour.
+   */
+  overBudget?: "warn" | "block";
 }
 
 export interface StorageGrant {
@@ -156,10 +166,14 @@ export function parseStorageGrant(input: unknown): ParseStorageGrantResult {
   if (limitsInput) {
     const rawMax = limitsInput.maxImageBytes ?? limitsInput.max_image_bytes;
     const rawFormat = asString(limitsInput.preferredImageFormat) ?? asString(limitsInput.preferred_image_format);
+    const rawOverBudget = asString(limitsInput.overBudget) ?? asString(limitsInput.over_budget);
     const maxImageBytes = typeof rawMax === "number" && Number.isInteger(rawMax) && rawMax > 0 ? rawMax : undefined;
     const preferredImageFormat = rawFormat === "png" || rawFormat === "webp" || rawFormat === "jpeg" ? rawFormat : undefined;
-    if (maxImageBytes !== undefined || preferredImageFormat !== undefined) {
-      limits = { ...(maxImageBytes !== undefined ? { maxImageBytes } : {}), ...(preferredImageFormat ? { preferredImageFormat } : {}) };
+    // S-15: exactly "block" opts in; everything else (absent, "warn", or unrecognised) is
+    // "warn" — the pre-existing behaviour for every grant that predates this field.
+    const overBudget: "warn" | "block" = rawOverBudget === "block" ? "block" : "warn";
+    if (maxImageBytes !== undefined || preferredImageFormat !== undefined || rawOverBudget !== undefined) {
+      limits = { ...(maxImageBytes !== undefined ? { maxImageBytes } : {}), ...(preferredImageFormat ? { preferredImageFormat } : {}), overBudget };
     }
   }
 

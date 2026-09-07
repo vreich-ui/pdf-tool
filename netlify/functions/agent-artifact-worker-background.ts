@@ -2,7 +2,7 @@ import { executeAgentArtifactWorkflow, type AgentArtifactWorkflowResult } from "
 import { getHeader, isAuthorized, readArtifactJob, updateArtifactJob, jsonResponse, parseJsonBody, safeError } from "../lib/agent-artifact-jobs.js";
 import { sha256Hex } from "../lib/artifact-core/index.js";
 import { saveArtifactBytes } from "../lib/artifact-layout.js";
-import { extractRequestContext, runWithRequestContext } from "../lib/project-descriptor.js";
+import { extractRequestContext, projectGrantLimits, runWithRequestContext } from "../lib/project-descriptor.js";
 import { executePdfEditJob, writePdfRenderData, type PdfEditOutput } from "../lib/agent-pdf-editing.js";
 import { rendererForExecutor, resolveOperationRoute } from "../lib/agent-artifact-operations.js";
 import { renderPdfArtifact, type RenderPdfArtifactOutput } from "../lib/pdf-render/render.js";
@@ -127,11 +127,25 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
     // sha256 is computed here over the FINAL bytes (post-render, post-optimization) and
     // handed to saveArtifactBytes, which re-verifies it against the bytes it actually stores.
     const sha256 = sha256Hex(generated.bytes);
-    // F4: media policy is warn, not block — a generated image that is still over maxBytes
-    // after best-effort optimization was materialized (not discarded); fold that into the
-    // stored metadata and the job record instead of silently dropping the information now
-    // that generation actually succeeded.
+    // F4: media policy defaults to warn, not block — a generated image that is still over
+    // maxBytes after best-effort optimization was materialized (not discarded); fold that
+    // into the stored metadata and the job record instead of silently dropping the
+    // information now that generation actually succeeded.
     const sizeWarning = "sizeWarning" in generated ? generated.sizeWarning : undefined;
+    // S-15: the grant is the one place that gets to override F4's default. limits.overBudget
+    // is validated and normalized by parseStorageGrant (absent/unrecognised -> "warn"), so
+    // this is the only branch that can turn "block" on — every pre-existing grant keeps
+    // exactly today's warn-only behaviour. Refuse BEFORE saveArtifactBytes, following the
+    // same RenderError-then-failed-job convention every other requirements refusal in this
+    // worker uses (e.g. the PDF_REQ_MAX_BYTES ceiling in pdf-render/inspect.ts) — no
+    // over-budget bytes are ever written to the store.
+    if (sizeWarning && projectGrantLimits().overBudget === "block") {
+      throw new RenderError(
+        "IMAGE_OVER_BUDGET",
+        `Generated artifact exceeds maxBytes of ${sizeWarning.maxBytes} (actual ${sizeWarning.actualBytes}); refused per the storage grant's limits.overBudget: "block" policy`,
+        { maxBytes: sizeWarning.maxBytes, actualBytes: sizeWarning.actualBytes }
+      );
+    }
     // T1.4: the render engine's own diagnostics used to die here — only renderMetadata and
     // validationResults were persisted, so every aborted asset fetch and every overflow
     // finding the chromium engine had already computed was dropped on the floor (BRIEF root
