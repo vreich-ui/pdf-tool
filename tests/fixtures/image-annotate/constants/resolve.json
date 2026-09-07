@@ -1,0 +1,28 @@
+{
+  "STYLE_FONT_FRACTION": {
+    "title": 0.05,
+    "label": 0.03,
+    "caption": 0.022,
+    "badge": 0.026
+  },
+  "STYLE_WEIGHT": {
+    "title": "bold",
+    "label": "normal",
+    "caption": "normal",
+    "badge": "bold"
+  },
+  "ADVANCE_RATIO": {
+    "normal": 0.52,
+    "bold": 0.58
+  },
+  "DEFAULT_LINE_HEIGHT_MULTIPLIER": 1.25,
+  "MIN_FONT_PX": 10,
+  "FONT_SHRINK_STEP": 0.9,
+  "MAX_WRAP_LINES": 4,
+  "MAX_OVERFLOW_LINES": 8,
+  "BADGE_SIZE_FRACTION": 0.05,
+  "BADGE_LABEL_PADDING_FRACTION": 0.5,
+  "DEFAULT_CONTRAST_THRESHOLD": 4.5,
+  "DEFAULT_TEXT_COLOR": "#111111",
+  "PUSH_ITERATIONS": 6
+}

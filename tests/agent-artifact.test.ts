@@ -301,7 +301,9 @@ test("structured image requirements are validated, persisted, and passed to gene
     });
     assert.equal(response.statusCode, 202);
     const body = JSON.parse(response.body);
-    assert.deepEqual(body.requirements, { maxBytes: 50000, image: { size: "1024x1024", outputFormat: "png", role: "featured", usageContext: "article_header" } });
+    // T5: normalizeArtifactJobRequirements now always sets image.annotate explicitly
+    // (default false) alongside size/outputFormat/role.
+    assert.deepEqual(body.requirements, { maxBytes: 50000, image: { size: "1024x1024", outputFormat: "png", role: "featured", annotate: false, usageContext: "article_header" } });
     const stored = await readArtifactJob("dr-lurie", body.jobId);
     assert.deepEqual(stored?.requirements, body.requirements);
   } finally {
@@ -745,7 +747,10 @@ test("MCP JSON-RPC tools/list includes all artifact tools", async () => {
   // T1.8 adds inspect_pdf_artifact (verify_agent_artifact-scoped PDF inspection) and
   // preview_pdf_template (on-demand, first-page-only template preview).
   // B2/RULING R2 adds rasterize_pdf_artifact (poppler page images for a stored PDF).
-  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "inspect_pdf_artifact", "rasterize_pdf_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "delete_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "preview_pdf_template", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "get_image_model_policy", "set_image_model_policy", "import_image_from_url", "import_images_from_url", "create_capture_job", "get_capture_job_status", "get_capture_snapshot", "set_storage_grant", "health", "derive_render_data_schema"].sort());
+  // T3 adds the three synchronous image-annotation tools (annotate_image, and the two
+  // layout-analysis calls that precede it).
+  // T4 adds check_image_text (the warn-only OCR text gate over a stored image).
+  assert.deepEqual(names, ["create_agent_artifact_job", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot", "get_agent_artifact_job_status", "verify_agent_artifact", "inspect_pdf_artifact", "rasterize_pdf_artifact", "resume_agent_artifact_job", "create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template", "delete_pdf_template", "validate_pdf_template", "get_pdf_template_validation", "preview_pdf_template", "search_images", "get_image_search_job_status", "get_image_search_bank", "update_image_search_candidate", "get_image_search_policy", "set_image_search_policy", "get_image_model_policy", "set_image_model_policy", "import_image_from_url", "import_images_from_url", "create_capture_job", "get_capture_job_status", "get_capture_snapshot", "set_storage_grant", "health", "derive_render_data_schema", "annotate_image", "analyze_image_layout", "preview_image_grid", "check_image_text"].sort());
 });
 
 

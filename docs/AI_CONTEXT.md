@@ -4,7 +4,7 @@ Compact orientation for a coding agent. Verified against commit `60bdb98762e5c10
 
 ## What pdf-tool owns
 
-- Turning agent intent into **bytes**: image generation/editing, PDF rendering from stored templates, PDF inspection/rasterization, image search/import, site capture.
+- Turning agent intent into **bytes**: image generation/editing, deterministic image annotation (`annotate_image`/`analyze_image_layout`/`preview_image_grid`/`check_image_text` — text/arrow/badge/box/scrim/logo overlays drawn over an already-stored image, never by the generative model; `docs/IMAGE_PIPELINE.md` §2), PDF rendering from stored templates, PDF inspection/rasterization, image search/import, site capture.
 - **Two storage planes.** Tenant artifact plane: the **canonical artifact layout** `{kind}/{safeRequestId}/{sha256}{ext}` + sidecar + index records, written into the **tenant's** Netlify Blob stores under a per-request storage grant (`netlify/lib/artifact-layout.ts`, `artifact-core/`). pdf-tool-owned capture plane: the same layout and code, but on **pdf-tool's own site** under an internal own-storage grant (`capture/storage.ts`) — the tenant's grant is never used and the tenant cannot read those bytes.
 - **Job records** for artifact / image-search jobs (in the tenant `pdf-tool-jobs` store) and capture jobs (in pdf-tool's own `agent-artifact-jobs` store).
 - A **local artifact-job execution gate** (`requireApproval`, `AGENT_ARTIFACT_APPROVAL_REQUIRED`, `blocked` jobs, `resume_agent_artifact_job` + operator secret).
@@ -57,7 +57,7 @@ A = canonical `ArtifactReference` (what `saveArtifactBytes` returns); B = the jo
 ## Current deployments
 
 - Netlify site `pdf-x` (`https://pdf-x.netlify.app`): all functions; auto-deploys from `main`; **no CI test gate**.
-- Cloud Run `pdf-tool-render` in `pdf-tool-gc` / `europe-west1`: typst 0.15.0, Chromium, poppler; deployed only by the manual GitHub workflow, which asserts `/health.build.gitSha`.
+- Cloud Run `pdf-tool-render` in `pdf-tool-gc` / `europe-west1`: typst 0.15.0, Chromium, poppler, tesseract; deployed only by the manual GitHub workflow, which asserts `/health.build.gitSha`. `annotate_image`/`check_image_text` fail closed until that workflow ships `/render/image`/`/ocr/image` — `docs/DEPLOYMENT.md` §3.1, `docs/KNOWN_ISSUES.md` KI-35.
 - Required env: `AGENT_RUN_TOKEN`, `OPENAI_API_KEY`, `RENDER_SERVICE_URL` + `RENDER_SERVICE_SECRET`; recommended: `PDF_TOOL_SITE_ID`/`PDF_TOOL_BLOBS_TOKEN`, `ARTIFACT_ATTESTATION_SECRET`, `MCP_OAUTH_SIGNING_SECRET`, `MCP_OAUTH_PASSWORD`, `ARTIFACT_APPROVAL_SECRET`, `FAL_KEY`. Full table: `DEPLOYMENT.md`.
 
 ## Legacy / experimental paths

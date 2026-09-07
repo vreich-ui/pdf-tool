@@ -78,6 +78,10 @@ export interface ArtifactJobRequirements {
     outputFormat?: ImageRequirementOutputFormat;
     role?: ImageRequirementRole;
     usageContext?: ImageRequirementUsageContext;
+    /** T5: opt this image generate job into the deterministic-annotation prompt guard —
+     * see the zod `.describe()` on `requirements.image.annotate` below for the full
+     * contract. Default false. Generate jobs only; ignored on edit jobs. */
+    annotate?: boolean;
   };
 }
 
@@ -94,6 +98,12 @@ export interface NormalizedArtifactJobRequirements {
     outputFormat: ImageRequirementOutputFormat;
     role: ImageRequirementRole;
     usageContext?: ImageRequirementUsageContext;
+    /** T5: the normalizer always sets this explicitly (defaults to false — see
+     * normalizeArtifactJobRequirements). Typed optional, matching usageContext, so the many
+     * NormalizedArtifactJobRequirements literals built by hand elsewhere (tests, fixtures)
+     * that predate this field are not forced to name it; every consumer already reads it as
+     * `?.annotate === true`. */
+    annotate?: boolean;
   };
 }
 
@@ -403,7 +413,7 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
   const grantOutputFormat = grantLimits.preferredImageFormat;
   if (input === undefined) {
     return artifactKind === "image"
-      ? { requirements: { ...(grantMaxBytes === undefined ? {} : { maxBytes: grantMaxBytes }), image: { size: "1024x1024", outputFormat: grantOutputFormat ?? "png", role: "featured" } }, issues }
+      ? { requirements: { ...(grantMaxBytes === undefined ? {} : { maxBytes: grantMaxBytes }), image: { size: "1024x1024", outputFormat: grantOutputFormat ?? "png", role: "featured", annotate: false } }, issues }
       : { issues };
   }
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -498,6 +508,10 @@ function normalizeArtifactJobRequirements(input: unknown, artifactKind: Artifact
         size: (imageValue.size as string) || "1024x1024",
         outputFormat: (imageValue.outputFormat as ImageRequirementOutputFormat) || grantOutputFormat || "png",
         role: (imageValue.role as string) || "featured",
+        // T5: zod already constrains this to boolean|undefined before normalization ever
+        // sees it — defaults to false, never left undefined, so every downstream reader
+        // (agent-artifact-workflow.ts) can branch on it without an extra `?? false`.
+        annotate: imageValue.annotate === true,
         ...(typeof usageContext === "string" ? { usageContext } : {})
       }
     },
@@ -588,7 +602,9 @@ export function buildArtifactJobRequestSchema() {
         // already treats any value outside its known IMAGE_USAGE_CONTEXTS list as "no
         // routing opinion" rather than an error, so constraining it here would be a new,
         // unrequested restriction rather than closing real drift.
-        usageContext: z.string().optional().describe("Known values used for model routing: article_header, article_body, category_page, newsletter, open_graph, search_preview, instagram_story, ad_platform. Other values are accepted and simply skip routing.")
+        usageContext: z.string().optional().describe("Known values used for model routing: article_header, article_body, category_page, newsletter, open_graph, search_preview, instagram_story, ad_platform. Other values are accepted and simply skip routing."),
+        annotate: z.boolean().optional()
+          .describe("When true, this image generate job gets a hard suffix appended to its prompt instructing the model to render NO text, letters, numbers, labels, captions, arrows, callouts, watermarks, or logos anywhere in the image, and to compose with clear negative space reserved for a later deterministic annotation pass (see annotate_image). Image models reliably garble rendered text — misspelled words, arrows pointing at nothing — so text belongs entirely to that deterministic layer, never to the generative model. Appending is idempotent (a prompt that already carries the suffix, or that already asks for no text in its own words, is not doubled up) so this is safe to set on a prompt an agent may have already hardened itself. If the generated image still appears to contain rendered text, the job automatically regenerates ONCE before giving up; a second leak is not a failure — it is reported in `warnings[]` on get_agent_artifact_job_status and the artifact is kept anyway (BRIEF §1: gates warn, they do not block; there is never a third attempt). Default false — set this for any image you plan to caption, label, or annotate afterward. Applies to image generate jobs only; ignored on edit jobs (deterministic_transform, masked_edit, image_variation all already start from real pixels, not a fresh model prompt).")
       }).optional()
     }).optional()
   }).superRefine((value, ctx: z.RefinementCtx) => {

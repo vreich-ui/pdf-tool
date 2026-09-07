@@ -1,0 +1,67 @@
+{
+  "warnings": [],
+  "placements": [
+    {
+      "id": "outline",
+      "type": "box",
+      "box": {
+        "x": 106.66666666666667,
+        "y": 80,
+        "w": 192,
+        "h": 120
+      },
+      "style": {
+        "stroke": "#ff0000",
+        "strokeWidthPx": 3,
+        "radiusPx": 6
+      }
+    },
+    {
+      "id": "footer-scrim",
+      "type": "scrim",
+      "box": {
+        "x": 0,
+        "y": 320,
+        "w": 640,
+        "h": 72
+      },
+      "direction": "bottom",
+      "strength": 0.7
+    },
+    {
+      "id": "caption",
+      "type": "text",
+      "box": {
+        "x": 12.8,
+        "y": 426,
+        "w": 250.55999999999997,
+        "h": 30
+      },
+      "fontFamily": "sans-serif",
+      "fontSizePx": 24,
+      "weight": "bold",
+      "lines": [
+        "Component overview"
+      ],
+      "align": "left",
+      "style": "title",
+      "color": "#111111"
+    },
+    {
+      "id": "step",
+      "type": "badge",
+      "box": {
+        "x": 574.6666666666667,
+        "y": 28,
+        "w": 24,
+        "h": 24
+      },
+      "n": 2,
+      "label": "2",
+      "fontFamily": "sans-serif",
+      "fontSizePx": 12.479999999999999,
+      "weight": "bold",
+      "color": "#111111"
+    }
+  ]
+}

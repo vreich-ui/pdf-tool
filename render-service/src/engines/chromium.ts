@@ -24,7 +24,7 @@
  */
 import { chromium as launchChromium, type Browser, type BrowserContext, type Route } from "playwright";
 import { Liquid } from "liquidjs";
-import type { NormalizedChromiumRenderRequest, NormalizedFont, RenderRequirementsInput } from "../contract.js";
+import type { NormalizedChromiumRenderRequest, NormalizedFont, NormalizedImageRenderRequest, RenderRequirementsInput } from "../contract.js";
 import { bundledFallbackFamily, classifyFontFamily, classifyFontFamilyStack, isCssWideKeyword, normalizeFontFamilyStack, resolveFontDir } from "../fonts.js";
 import { inspectPdf } from "../inspect.js";
 import { readFile } from "node:fs/promises";
@@ -711,6 +711,294 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
       await context.close().catch(() => {});
     } else if (pendingContext) {
       // Deadline fired mid-newContext(): close it whenever it settles.
+      pendingContext.then((late) => late.close().catch(() => {})).catch(() => {});
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /render/image — exact-pixel PNG, same browser, same lockdown
+// ---------------------------------------------------------------------------
+
+/** Upper bound on the post-screenshot wait for images, mirroring IMAGE_DECODE_TIMEOUT_MS's
+ * role on the print path. Declared separately so tuning one never silently moves the other. */
+const IMAGE_ROUTE_SCREENSHOT_TIMEOUT_MS = 30000;
+
+/** One selector's rendered geometry, as `getBoundingClientRect()` reported it. Coordinates
+ * are viewport-relative, which on this route IS canvas-relative: the assembled document pins
+ * the body to (0,0) with no margin and the page never scrolls. */
+export interface ImageMeasurement {
+  selector: string;
+  /** false when the selector matched nothing — reported rather than omitted, so a caller can
+   * tell "this element rendered at 0x0" apart from "this element is not in the document". */
+  found: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Scroll-vs-client extents of the same element: non-zero overflow means the element's
+   * content is larger than the box it was given. */
+  scrollW: number;
+  scrollH: number;
+  clientW: number;
+  clientH: number;
+}
+
+// Executed inside the page via page.evaluate — must be entirely self-contained (no closure
+// captures, no generics, no inner named arrow functions). That style is not fussiness: the
+// test harness runs this file through tsx/esbuild, whose `keepNames` helper injects a
+// `__name` reference that is undefined inside the browser and makes a fancier callback throw
+// there. collectOverflows below is written the same way for the same reason.
+function collectMeasurements(selectors: string[]): ImageMeasurement[] {
+  const results: ImageMeasurement[] = [];
+  for (let i = 0; i < selectors.length; i++) {
+    const selector = selectors[i];
+    let el: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any
+    try {
+      el = document.querySelector(selector);
+    } catch {
+      el = null;
+    }
+    if (!el) {
+      results.push({ selector, found: false, x: 0, y: 0, w: 0, h: 0, scrollW: 0, scrollH: 0, clientW: 0, clientH: 0 });
+      continue;
+    }
+    const rect = el.getBoundingClientRect();
+    results.push({
+      selector,
+      found: true,
+      x: rect.left,
+      y: rect.top,
+      w: rect.width,
+      h: rect.height,
+      scrollW: el.scrollWidth,
+      scrollH: el.scrollHeight,
+      clientW: el.clientWidth,
+      clientH: el.clientHeight,
+    });
+  }
+  return results;
+}
+
+export interface ImageRenderDiagnostics {
+  /** Size of the returned PNG in DEVICE pixels — canvas * deviceScaleFactor, i.e. exactly
+   * what the PNG's IHDR reports. */
+  widthPx: number;
+  heightPx: number;
+  /** The factor actually applied, after clamping (see MAX_IMAGE_DEVICE_SCALE_FACTOR). */
+  deviceScaleFactor: number;
+  sizeBytes: number;
+  engineWarnings?: string[];
+  overflows?: OverflowEntry[];
+  /** Present only when the request asked for it via `options.measure`. One entry per
+   * requested selector, in the order they were requested. */
+  measurements?: ImageMeasurement[];
+}
+
+export type ImageRenderResult =
+  | { ok: true; pngBytes: Buffer; diagnostics: ImageRenderDiagnostics }
+  | { ok: false; code: "RENDER_ENGINE_ERROR" | "RENDER_TIMEOUT" | "IMAGE_REQ_MAX_BYTES" | "DATA_BINDING_ERROR"; message: string };
+
+/**
+ * Document assembly for the image route. Identical to assembleDocument (same @font-face
+ * block, same font-family rewrite over the caller's CSS) plus ONE extra rule the print path
+ * does not need and must not have: a zero-margin body pinned to exactly the canvas box.
+ *
+ * Without it the render is silently wrong rather than failed — Chromium's default 8px body
+ * margin would shift every absolutely-positioned annotation 8px right and down relative to
+ * the coordinates the resolver computed, and the screenshot clip (anchored at 0,0) would cut
+ * the last 8px off the right and bottom edges.
+ *
+ * `overflow: hidden` is on the body only, to stop content that exceeds the canvas from
+ * introducing scrollbars — which would shrink the LAYOUT viewport and move everything. It is
+ * deliberately not applied to any element inside the body: an annotation that overflows its
+ * own box must stay visible (and land in the overflow diagnostics), not be quietly clipped.
+ */
+function assembleImageDocument(
+  renderedHtml: string,
+  templateCss: string,
+  fontFaceCss: string,
+  requestFonts: NormalizedFont[],
+  canvasWidthPx: number,
+  canvasHeightPx: number
+): string {
+  const normalizedTemplateCss = rewriteFontFamilyCss(templateCss, (rawFontFamily) => resolveFontFamilyForRequest(rawFontFamily, requestFonts));
+  return [
+    "<!doctype html>",
+    "<html>",
+    "<head>",
+    '<meta charset="utf-8">',
+    "<style>",
+    fontFaceCss,
+    "html, body { margin: 0; padding: 0; border: 0; }",
+    `body { width: ${canvasWidthPx}px; height: ${canvasHeightPx}px; overflow: hidden; font-family: "NotoSans", sans-serif; }`,
+    normalizedTemplateCss,
+    "</style>",
+    "</head>",
+    "<body>",
+    renderedHtml,
+    "</body>",
+    "</html>",
+  ].join("\n");
+}
+
+/**
+ * Renders one HTML/CSS document to a PNG at an EXACT pixel canvas.
+ *
+ * Everything that makes renderChromium safe is reused unchanged and deliberately not
+ * re-implemented: the same warm lazily-launched browser process, a fresh incognito
+ * BrowserContext per render with `javaScriptEnabled: false`, the same closed-network route
+ * handler (only `render.assets.invalid` assets and fonts are ever fulfilled), the same
+ * LiquidJS engine with strict variable binding and in-memory partials, the same bundled +
+ * request font pipeline including the font-family normalization in src/fonts.ts, and the
+ * same `waitForImagesDecoded` gate before capture — which matters MORE here than on the
+ * print path, since an annotation's entire backdrop is one large inline base image.
+ *
+ * The differences from renderChromium are exactly three:
+ *   1. the context is created with `viewport: { width: canvas.w, height: canvas.h }` and the
+ *      requested `deviceScaleFactor`, instead of the default 1280px screen viewport;
+ *   2. there is no `page.pdf()` — no paper box, no margins, no pagination;
+ *   3. the output is one `page.screenshot({ type: "png", clip: { 0, 0, w, h } })`.
+ * `emulateMedia` is NOT called: this route renders for `screen`, which is what an annotated
+ * image is. (captureFirstPagePng switches to `print` precisely because it is photographing a
+ * page.pdf() layout; there is no such layout here.)
+ */
+export async function renderImage(request: NormalizedImageRenderRequest): Promise<ImageRenderResult> {
+  let browser: Browser;
+  try {
+    browser = await getBrowser();
+  } catch (error) {
+    return { ok: false, code: "RENDER_ENGINE_ERROR", message: `Failed to launch chromium: ${errMsg(error)}` };
+  }
+
+  let renderedHtml: string;
+  try {
+    const scope = (request.data && typeof request.data === "object" ? request.data : { data: request.data ?? null }) as object;
+    const liquidEngine = buildLiquidEngine(request.lenient, request.partials, scope);
+    renderedHtml = await liquidEngine.parseAndRender(request.templateHtml, scope);
+  } catch (error) {
+    return { ok: false, code: "DATA_BINDING_ERROR", message: dataBindingErrorMessage(error) };
+  }
+
+  let bundledFonts: Map<string, Buffer>;
+  try {
+    bundledFonts = await loadBundledFonts();
+  } catch (error) {
+    return { ok: false, code: "RENDER_ENGINE_ERROR", message: `Failed to load bundled fonts: ${errMsg(error)}` };
+  }
+
+  const fontFaceCss = buildFontFaceCss(request.fonts);
+  const assembledHtml = assembleImageDocument(
+    renderedHtml,
+    request.templateCss,
+    fontFaceCss,
+    request.fonts,
+    request.canvasWidthPx,
+    request.canvasHeightPx
+  );
+  const assetMap = new Map(request.assets.map((asset) => [asset.name, asset]));
+  const warnings: string[] = [];
+
+  let context: BrowserContext | undefined;
+  let pendingContext: Promise<BrowserContext> | undefined;
+  try {
+    const { pngBytes, overflows, measurements } = await withDeadline(
+      request.timeoutMs,
+      async () => {
+        // Same "capture the promise BEFORE awaiting" discipline as renderChromium: a deadline
+        // that fires mid-newContext() must not leak a context onto the shared warm browser.
+        pendingContext = browser.newContext({
+          javaScriptEnabled: false,
+          offline: false,
+          viewport: { width: request.canvasWidthPx, height: request.canvasHeightPx },
+          deviceScaleFactor: request.deviceScaleFactor,
+        });
+        context = await pendingContext;
+        await context.route("**/*", createRouteHandler(assetMap, bundledFonts, request.fonts, warnings));
+        const page = await context.newPage();
+        await page.setContent(assembledHtml, {
+          waitUntil: "networkidle",
+          timeout: Math.min(request.timeoutMs, SET_CONTENT_TIMEOUT_MS),
+        });
+
+        let overflowEntries: OverflowEntry[] | undefined;
+        if (request.mode === "validation") {
+          try {
+            overflowEntries = await page.evaluate(collectOverflows, MAX_OVERFLOW_ENTRIES);
+          } catch (error) {
+            warnings.push(`overflow diagnostics unavailable: ${errMsg(error)}`);
+          }
+        }
+
+        // Must run BEFORE the screenshot. On this route the base image IS the render: a
+        // half-decoded backdrop produces a plausible-looking PNG with the bottom of the photo
+        // missing, and nothing downstream can tell.
+        try {
+          const imageState = await waitForImagesDecoded(page as never, Math.min(request.timeoutMs, IMAGE_DECODE_TIMEOUT_MS));
+          for (const src of imageState.undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
+            warnings.push(`image did not finish decoding before capture and may be incomplete in the output: ${src}`);
+          }
+        } catch (error) {
+          warnings.push(`image readiness check unavailable: ${errMsg(error)}`);
+        }
+
+        // Measurement runs AFTER the image-decode gate (so the layout is final) and BEFORE
+        // the screenshot. It reads geometry in Playwright's isolated world and mutates
+        // nothing, so the PNG is byte-identical to the same render without it — the one
+        // property that makes it safe to ask for on every render.
+        let measurements: ImageMeasurement[] | undefined;
+        if (request.measureSelectors.length > 0) {
+          try {
+            measurements = await page.evaluate(collectMeasurements, request.measureSelectors);
+          } catch (error) {
+            // Named, never silent: a caller comparing predicted geometry against measured
+            // must be able to tell "nothing drifted" from "nothing was measured".
+            warnings.push(`element measurement unavailable: ${errMsg(error)}`);
+          }
+        }
+
+        const pngBytes = await page.screenshot({
+          type: "png",
+          clip: { x: 0, y: 0, width: request.canvasWidthPx, height: request.canvasHeightPx },
+          timeout: Math.min(request.timeoutMs, IMAGE_ROUTE_SCREENSHOT_TIMEOUT_MS),
+        });
+        return { pngBytes, overflows: overflowEntries, measurements };
+      },
+      () => {
+        context?.close().catch(() => {});
+      }
+    );
+
+    if (pngBytes.byteLength > request.maxOutputBytes) {
+      return {
+        ok: false,
+        code: "IMAGE_REQ_MAX_BYTES",
+        message: `Rendered PNG (${pngBytes.byteLength} bytes) exceeds maxOutputBytes (${request.maxOutputBytes} bytes)`,
+      };
+    }
+
+    return {
+      ok: true,
+      pngBytes,
+      diagnostics: {
+        widthPx: Math.round(request.canvasWidthPx * request.deviceScaleFactor),
+        heightPx: Math.round(request.canvasHeightPx * request.deviceScaleFactor),
+        deviceScaleFactor: request.deviceScaleFactor,
+        sizeBytes: pngBytes.byteLength,
+        ...(warnings.length > 0 ? { engineWarnings: warnings } : {}),
+        ...(overflows !== undefined ? { overflows } : {}),
+        ...(measurements !== undefined ? { measurements } : {}),
+      },
+    };
+  } catch (error) {
+    if (error instanceof RenderTimeoutError) {
+      return { ok: false, code: "RENDER_TIMEOUT", message: error.message };
+    }
+    return { ok: false, code: "RENDER_ENGINE_ERROR", message: `chromium image render failed: ${errMsg(error)}` };
+  } finally {
+    if (context) {
+      await context.close().catch(() => {});
+    } else if (pendingContext) {
       pendingContext.then((late) => late.close().catch(() => {})).catch(() => {});
     }
   }

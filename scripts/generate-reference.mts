@@ -116,6 +116,42 @@ const TOOL_SEMANTICS: Record<string, ToolSemantics> = {
     projectState: "Adds artifacts.", autonomy: "additive",
     plane: "tenant (grant)",
   },
+  "annotate_image": {
+    http: null,
+    sideEffects:
+      "Synchronous call to render-service `POST /render/image` (chromium screenshot at an exact pixel canvas); saves ONE new image artifact (+ index entries) into the tenant `artifacts`/`artifactIndex` stores. With `slot` set it also REPLACES the `by-slot`/`latest-by-slot` pointer for that slot. Never modifies the base image.",
+    idempotency:
+      "Content-addressed: the same spec over the same base image produces the same bytes and therefore the same blobKey (given a pinned render-service container — Chromium build + bundled fonts are what make the raster reproducible). Index pointers are rewritten.",
+    polling: "n/a (synchronous, bounded by the remaining function budget; refused up front with ANNOTATE_BUDGET_EXCEEDED when it would not fit).",
+    approval: "None.",
+    projectState: "Adds artifacts; moves the by-slot pointer when `slot` is set.",
+    autonomy: "additive+pointer",
+    plane: "tenant (grant)",
+  },
+  "analyze_image_layout": {
+    http: null,
+    sideEffects: "None (decodes the image bytes in-function with sharp).",
+    idempotency: "Idempotent and deterministic: the same bytes always produce deep-equal hints.",
+    polling: "n/a", approval: "None.", projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
+  },
+  "preview_image_grid": {
+    http: null,
+    sideEffects: "Composites the grid overlay with sharp (no browser, no render service) and saves ONE new image artifact (+ index entries) into the tenant `artifacts`/`artifactIndex` stores.",
+    idempotency: "Content-addressed: the same source image produces the same preview bytes and therefore the same blobKey.",
+    polling: "n/a", approval: "None.",
+    projectState: "Adds artifacts.", autonomy: "additive",
+    plane: "tenant (grant)",
+  },
+  "check_image_text": {
+    http: null,
+    sideEffects: "None (reads the source image's bytes in-function; synchronous call to render-service `POST /ocr/image` which reads no store and writes nothing). Never creates, replaces or removes artifacts.",
+    idempotency: "Idempotent and (given a pinned render-service container — tesseract build + traineddata) deterministic: the same bytes/mode/expect always produce the same verdict.",
+    polling: "n/a (synchronous, bounded by the remaining function budget; refused up front with OCR_BUDGET_EXCEEDED when it would not fit).",
+    approval: "None.",
+    projectState: "None.", autonomy: "read-only",
+    plane: "tenant (grant)",
+  },
   resume_agent_artifact_job: {
     http: { file: "resume-agent-artifact-job.ts", symbol: "resumeAgentArtifactJob" },
     sideEffects: "Flips a `blocked` job to `pending` and triggers the worker; reverts to `blocked` if the trigger fails.",
@@ -530,7 +566,9 @@ function buildHttpReference(): string {
     "GET /healthz": "Alias of `/health` (Cloud Run's front end intercepts the literal `/healthz` path on `*.run.app`).",
     "POST /render/typst": "Compile a typst template with `--input data=<json>`; sandboxed (`--root`, scrubbed env, vendored packages only). Auth `x-render-secret`.",
     "POST /render/chromium": "Liquid → HTML → Playwright print (JS disabled, network closed except `render.assets.invalid` virtual host and `RENDER_CHROMIUM_ALLOWED_HOSTS`). Auth `x-render-secret`.",
+    "POST /render/image": "T3 (`annotate_image`): Liquid → HTML → Playwright **screenshot** at an exact `canvas.w × canvas.h` viewport (× `deviceScaleFactor`, 1–3, clamped) → one PNG. Same warm browser, JS-disabled incognito context, closed network and font pipeline as `/render/chromium`; no `page.pdf()`, no paper box (`requirements` and `options.wantThumbnail` are refused, not ignored). Edges ≤ 4096px, ≤ 16.8 Mpx after scale. `options.measure` (≤ 256 CSS selectors) additionally reports each one's real `getBoundingClientRect()` in `diagnostics.measurements` — how a caller that laid its document out offline learns what the browser actually did — without changing the PNG bytes. Auth `x-render-secret`.",
     "POST /rasterize/pdf": "poppler `pdftoppm` page rasterization, dpi 72–150, ≤ 40 pages, ≤ 80 Mpx/page. Auth `x-render-secret`.",
+    "POST /ocr/image": "T4 (`check_image_text`): tesseract OCR over ONE image (PNG/JPEG/WebP/GIF, ≤ 20 MB decoded), `--psm 11` (sparse text — the images this route reads are photos/illustrations with a few scattered labels, not pages of prose). Returns recognized text plus a per-word `{text, conf}` list; a blank/text-free image is a SUCCESSFUL empty result, not an error. Only `eng` traineddata is installed — another language is refused with `OCR_LANGUAGE_UNAVAILABLE`. Auth `x-render-secret`.",
     "POST /capture/page": "Site-capture of ONE page in a JS-enabled context routed to a caller-supplied https origin allowlist; returns snapshot.v1 page + screenshots. Auth `x-render-secret`.",
   };
   lines.push("## render-service routes (Cloud Run)");

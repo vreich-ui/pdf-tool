@@ -1,0 +1,140 @@
+{
+  "chromiumVersion": "141.0.7390.37",
+  "widthPx": 640,
+  "heightPx": 480,
+  "pngSha256": "adc236d785eb0fdf6a07513158ae07f93354c1771d73c14e667231bfb86c8d96",
+  "elementMeasurements": [
+    {
+      "selector": ".ann-canvas",
+      "found": true,
+      "x": 0,
+      "y": 0,
+      "w": 640,
+      "h": 480,
+      "scrollW": 640,
+      "scrollH": 480,
+      "clientW": 640,
+      "clientH": 480
+    },
+    {
+      "selector": ".ann-base",
+      "found": true,
+      "x": 0,
+      "y": 0,
+      "w": 640,
+      "h": 480,
+      "scrollW": 640,
+      "scrollH": 485,
+      "clientW": 640,
+      "clientH": 480
+    },
+    {
+      "selector": ".ann-arrows",
+      "found": false,
+      "x": 0,
+      "y": 0,
+      "w": 0,
+      "h": 0,
+      "scrollW": 0,
+      "scrollH": 0,
+      "clientW": 0,
+      "clientH": 0
+    },
+    {
+      "selector": ".ann-line",
+      "found": true,
+      "x": 0,
+      "y": 0,
+      "w": 172.21875,
+      "h": 36,
+      "scrollW": 172,
+      "scrollH": 36,
+      "clientW": 172,
+      "clientH": 36
+    },
+    {
+      "selector": ".ann-shout",
+      "found": true,
+      "x": 0,
+      "y": 0,
+      "w": 172.21875,
+      "h": 36,
+      "scrollW": 172,
+      "scrollH": 36,
+      "clientW": 172,
+      "clientH": 36
+    },
+    {
+      "selector": ".ann-para__auto-scrim",
+      "found": true,
+      "x": 320,
+      "y": 0,
+      "w": 219.640625,
+      "h": 52.796875,
+      "scrollW": 220,
+      "scrollH": 53,
+      "clientW": 220,
+      "clientH": 53
+    },
+    {
+      "selector": ".ann-para",
+      "found": true,
+      "x": 320,
+      "y": 0,
+      "w": 219.640625,
+      "h": 52.8125,
+      "scrollW": 220,
+      "scrollH": 53,
+      "clientW": 220,
+      "clientH": 53
+    },
+    {
+      "selector": ".ann-dup1",
+      "found": true,
+      "x": 145.015625,
+      "y": 262,
+      "w": 29.9375,
+      "h": 36,
+      "scrollW": 30,
+      "scrollH": 36,
+      "clientW": 30,
+      "clientH": 36
+    },
+    {
+      "selector": ".ann-dup2",
+      "found": true,
+      "x": 126.296875,
+      "y": 280,
+      "w": 67.375,
+      "h": 18,
+      "scrollW": 67,
+      "scrollH": 18,
+      "clientW": 67,
+      "clientH": 18
+    },
+    {
+      "selector": ".ann-lowcontrast__auto-scrim",
+      "found": true,
+      "x": 334.875,
+      "y": 353.390625,
+      "w": 76.875,
+      "h": 13.1875,
+      "scrollW": 77,
+      "scrollH": 13,
+      "clientW": 77,
+      "clientH": 13
+    },
+    {
+      "selector": ".ann-lowcontrast",
+      "found": true,
+      "x": 334.875,
+      "y": 353.390625,
+      "w": 76.875,
+      "h": 13.203125,
+      "scrollW": 77,
+      "scrollH": 13,
+      "clientW": 77,
+      "clientH": 13
+    }
+  ]
+}

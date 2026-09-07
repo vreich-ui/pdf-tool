@@ -41,6 +41,13 @@ export const MCP_CAPABILITIES: McpCapability[] = [
     optionalTools: ["verify_agent_artifact", "resume_agent_artifact_job", "get_agent_artifact_by_slot", "get_agent_artifact_by_filename", "inspect_pdf_artifact", "rasterize_pdf_artifact"]
   },
   {
+    id: "image_annotation",
+    description:
+      "T3/T4: deterministically draw text, badges, arrows, boxes and scrims over an image that is already stored, without a model. Analyze the image's 6x6 grid for a quiet place to put text, optionally show a human that grid, then annotate. All four are synchronous; the first three write to the tenant plane, check_image_text writes nothing (a warn-only OCR gate).",
+    requiredTools: ["analyze_image_layout", "annotate_image"],
+    optionalTools: ["preview_image_grid", "check_image_text", "verify_agent_artifact", "get_agent_artifact_by_filename", "get_agent_artifact_by_slot"]
+  },
+  {
     id: "template_lifecycle",
     description: "Author, validate, publish, and version PDF templates.",
     requiredTools: ["create_pdf_template", "get_pdf_template", "list_pdf_templates", "publish_pdf_template"],

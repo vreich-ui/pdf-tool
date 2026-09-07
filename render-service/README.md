@@ -215,6 +215,117 @@ Failure (always JSON, never bytes):
   default `body { font-family: "NotoSans", sans-serif; }` rule the template's own CSS can
   override).
 
+### `POST /render/image` (T3 — `image.annotate`)
+
+Header: `x-render-secret: <RENDER_SERVICE_SECRET>`.
+
+HTML + CSS (+ optional Liquid `data`, binary `assets`, per-request `fonts`) -> **one PNG at an
+exact pixel canvas**. It exists because `/render/chromium` always returns a PDF, and its
+`options.wantThumbnail` PNG is clipped to the **paper** box — which cannot express a 1024x1024
+annotation canvas without a round trip through page geometry and dpi arithmetic.
+
+This is the SAME engine as `/render/chromium` (`src/engines/chromium.ts` `renderImage`): the
+same warm lazily-launched browser process, a fresh incognito `BrowserContext` per render with
+`javaScriptEnabled: false`, the same `context.route("**/*")` closed network (only
+`render.assets.invalid` assets and `__fonts/` are fulfilled), the same LiquidJS sandbox with
+strict variable binding and in-memory partials, the same bundled+request font pipeline and CSS
+`font-family` normalization, and the same `waitForImagesDecoded` gate before capture. Three
+things differ: the context's **viewport is the requested canvas** at the requested
+`deviceScaleFactor`, there is no `page.pdf()`, and the output is one
+`page.screenshot({ type: "png", clip: { x: 0, y: 0, width: canvas.w, height: canvas.h } })`.
+The assembled document also carries `html, body { margin: 0 }` and a body sized to the canvas,
+so a CSS pixel coordinate IS a canvas coordinate (Chromium's default 8px body margin would
+otherwise shift every absolutely-positioned element and clip the right/bottom edges).
+
+Request:
+
+```jsonc
+{
+  "template": {                      // identical shape and caps to /render/chromium
+    "html": "<div class=\"scrim\"></div><div class=\"title\">…</div>",
+    "css": ".title { position:absolute; left:64px; top:820px; … }",
+    "assets": { "partials": { "row": "<b>{{ x }}</b>" } }
+  },
+  "canvas": { "w": 1024, "h": 1024, "deviceScaleFactor": 1 },   // REQUIRED
+  "data": { },                       // optional, bound with Liquid (strict by default)
+  "assets": [                        // optional; served at https://render.assets.invalid/<name>
+    { "name": "base.png", "contentType": "image/png", "bytesBase64": "…" }
+  ],
+  "fonts": [ { "family": "Brand Sans", "weight": "normal", "bytesBase64": "…" } ],
+  "options": {
+    "mode": "final" | "validation",
+    "timeoutMs": 60000,
+    "lenient": false,
+    "measure": [".ann-title", ".ann-caption"]   // optional: report these selectors' real geometry
+  },
+  "maxOutputBytes": 12000000
+}
+```
+
+Success (HTTP 200):
+
+```jsonc
+{
+  "ok": true,
+  "pngBase64": "iVBORw0KGgo…",
+  "diagnostics": {
+    "widthPx": 1024,                 // DEVICE px: canvas.w * deviceScaleFactor
+    "heightPx": 1024,
+    "deviceScaleFactor": 1,          // the factor actually applied, after clamping
+    "sizeBytes": 148213,
+    "engineWarnings": ["blocked network request: …"],   // present only when non-empty
+    "overflows": [ … ],              // present only in options.mode:"validation"
+    "measurements": [                // present only when options.measure was supplied
+      { "selector": ".ann-title", "found": true,
+        "x": 64, "y": 820, "w": 512, "h": 62.5,
+        "scrollW": 512, "scrollH": 62.5, "clientW": 512, "clientH": 62.5 }
+    ],
+    "engine": { "id": "chromium-image", "executedIn": "render-service" }
+  }
+}
+```
+
+#### `options.measure` — reporting what the browser actually laid out
+
+A caller that computed its layout OFFLINE — no browser, no font metrics, as `image.annotate`
+does — has no other way to learn what Chromium did with it. `options.measure` is a list of CSS
+selectors; each one's `getBoundingClientRect()` plus its scroll/client extents comes back in
+`diagnostics.measurements`, in the order requested, with `found: false` for a selector that
+matched nothing (reported rather than omitted, so "rendered at 0x0" and "not in the document"
+stay distinguishable). Only the FIRST match of each selector is measured.
+
+Three properties worth relying on:
+
+- **It does not change the PNG.** The pass reads geometry in Playwright's isolated world and
+  mutates nothing, so a render with `measure` is byte-identical to the same render without it.
+  That is asserted directly in `tests/image-render.test.ts` against a two-render control.
+- **It works with JavaScript disabled.** Page-authored `<script>` stays inert; the isolated
+  world is a separate execution context that the engine already relies on for its image-decode
+  gate. There is no relaxation of the sandbox here.
+- **A failure is a warning, never an error.** If the pass throws, `measurements` is absent and
+  `engineWarnings` carries `element measurement unavailable: …` — a render that produced a
+  valid image is never failed because a diagnostic could not be collected.
+
+Bounded at 256 selectors of at most 200 characters each; both are `TEMPLATE_INVALID`.
+
+Caps (all in `src/contract.ts`, `validateImageRenderRequest`):
+
+| Cap | Value | Notes |
+|---|---|---|
+| `canvas.w` / `canvas.h` | 1 .. 4096 CSS px, integers | `IMAGE_CANVAS_TOO_LARGE` above the edge cap |
+| `canvas.w * canvas.h * dsf²` | ≤ 16.8 Mpx (`MAX_IMAGE_CANVAS_DEVICE_PIXELS`) | the cap that actually bounds the work — an edge cap alone does not |
+| `canvas.deviceScaleFactor` | 1 .. 3, default 1 | **clamped**, not refused (the response reports the factor used) |
+| `maxOutputBytes` | default 12 MB | `IMAGE_REQ_MAX_BYTES` (HTTP 507) when the PNG exceeds it |
+| template / assets / fonts / data | the chromium caps, unchanged | 2 MB html, 1 MB css, 32 partials × 256 KB, 5 MB per asset / 20 MB total, 10 MB fonts, 2 MB data |
+
+`requirements` and `options.wantThumbnail` are **refused** (`TEMPLATE_INVALID`), not
+accepted-and-ignored: this route has no paper box and its PNG *is* the render, so silently
+swallowing either would mean a caller's page size vanished without a word.
+
+Failure codes: `TEMPLATE_INVALID` (400), `IMAGE_CANVAS_TOO_LARGE` (400), `ASSET_TOO_LARGE`
+(400), `DATA_BINDING_ERROR` (400), `RENDER_TIMEOUT` (504), `IMAGE_REQ_MAX_BYTES` (507),
+`RENDER_ENGINE_ERROR` (500), `RENDER_SERVICE_AUTH` (401).
+
 ### `POST /rasterize/pdf` (B2 / RULING R2 — poppler)
 
 Header: `x-render-secret: <RENDER_SERVICE_SECRET>`.

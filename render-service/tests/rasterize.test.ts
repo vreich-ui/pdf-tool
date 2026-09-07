@@ -11,13 +11,14 @@
  *     it in deploy.
  */
 import assert from "node:assert/strict";
-import { before, test } from "node:test";
+import { after, before, test } from "node:test";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
+import { closeChromiumForTests } from "../src/engines/chromium.js";
 import {
   MAX_RASTERIZE_DPI,
   MAX_RASTERIZE_PAGES,
@@ -28,6 +29,16 @@ import {
 } from "../src/rasterize.js";
 
 const SECRET = "rasterize-secret";
+
+// PRE-EXISTING (reproduced on origin/main, not introduced by image.annotate): the `/health`
+// test below reaches chromiumAvailable(), which lazily launches the engine's warm,
+// process-lifetime browser singleton. Nothing here closes it, so this file's node:test
+// process never exits — `npm --prefix render-service run test` hangs forever after the last
+// assertion passes. Same `after()` hook every other file that touches the engine already has
+// (see chromium-integration / chromium-thumbnail / image-render).
+after(async () => {
+  await closeChromiumForTests();
+});
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 let POPPLER_AVAILABLE = false;

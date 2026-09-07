@@ -4,11 +4,12 @@
  */
 import Fastify, { type FastifyInstance } from "fastify";
 import { checkAuth } from "./auth.js";
-import { validateRenderRequest } from "./contract.js";
+import { validateImageRenderRequest, validateRenderRequest } from "./contract.js";
 import { capturePage, validateCaptureRequest } from "./capture.js";
-import { chromiumAvailable, renderChromium } from "./engines/chromium.js";
+import { chromiumAvailable, renderChromium, renderImage } from "./engines/chromium.js";
 import { renderTypst, typstVersion } from "./engines/typst.js";
 import { popplerVersion, rasterizePdf, validateRasterizeRequest } from "./rasterize.js";
+import { runOcr, tesseractVersion, validateOcrRequest } from "./ocr.js";
 
 const BODY_LIMIT_BYTES = 32 * 1024 * 1024; // 32 MB
 
@@ -33,7 +34,7 @@ export function buildServer(): FastifyInstance {
   };
 
   const healthHandler = async () => {
-    const [typstVer, chromiumInfo, popplerVer] = await Promise.all([typstVersion(), chromiumAvailable(), popplerVersion()]);
+    const [typstVer, chromiumInfo, popplerVer, tesseractVer] = await Promise.all([typstVersion(), chromiumAvailable(), popplerVersion(), tesseractVersion()]);
     return {
       ok: true,
       service: "pdf-tool-render",
@@ -46,6 +47,10 @@ export function buildServer(): FastifyInstance {
         // reported here because "why did every thumbnail stop appearing" must be
         // answerable from outside the container, exactly like the two engines above.
         poppler: { available: popplerVer !== null, ...(popplerVer ? { version: popplerVer } : {}) },
+        // T4: same reasoning as poppler above — tesseract is not a template engine, it is
+        // the OCR backend behind /ocr/image (check_image_text), and "why did the text gate
+        // stop reporting anything" must be answerable from outside the container.
+        tesseract: { available: tesseractVer !== null, ...(tesseractVer ? { version: tesseractVer } : {}) },
       },
     };
   };
@@ -138,6 +143,55 @@ export function buildServer(): FastifyInstance {
     };
   });
 
+  // image.annotate / T3: HTML + CSS (+ Liquid data, assets, fonts) -> ONE PNG at an exact
+  // pixel canvas. Same warm browser, same fresh incognito context, same JS-disabled +
+  // closed-network lockdown and same font pipeline as /render/chromium (see
+  // engines/chromium.ts renderImage) — the ONLY differences are that the viewport IS the
+  // requested canvas and that the output is one page.screenshot() instead of page.pdf().
+  // It exists because /render/chromium always returns a PDF and its wantThumbnail PNG is
+  // clipped to the PAPER box, which cannot express a 1024x1024 canvas.
+  fastify.post("/render/image", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateImageRenderRequest(request.body);
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await renderImage(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "RENDER_ENGINE_ERROR",
+        message: `Unexpected chromium image engine failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      const status =
+        result.code === "RENDER_TIMEOUT" ? 504 : result.code === "IMAGE_REQ_MAX_BYTES" ? 507 : result.code === "DATA_BINDING_ERROR" ? 400 : 500;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      pngBase64: result.pngBytes.toString("base64"),
+      diagnostics: {
+        ...result.diagnostics,
+        engine: { id: "chromium-image", executedIn: "render-service" },
+      },
+    };
+  });
+
   // B2 / RULING R2: rasterize a FINISHED PDF into one PNG per page with poppler's pdftoppm.
   // Unlike /render/*, this route renders no template and binds no data — it takes bytes that
   // already exist and photographs them, which is what makes it usable for BOTH a stored PDF
@@ -189,6 +243,57 @@ export function buildServer(): FastifyInstance {
       ok: true,
       pages: result.pages,
       diagnostics: { ...result.diagnostics, engine: { id: "poppler-pdftoppm", executedIn: "render-service" } },
+    };
+  });
+
+  // T4 — check_image_text: OCR one image with tesseract's CLI binary and report the text it
+  // found. Renders nothing and binds no template — like /rasterize/pdf, it takes bytes that
+  // already exist and reads them. See src/ocr.ts for the exact invocation and every code.
+  fastify.post("/ocr/image", async (request, reply) => {
+    if (!checkAuth(request.headers["x-render-secret"] as string | undefined)) {
+      reply.code(401);
+      return { ok: false, code: "RENDER_SERVICE_AUTH", message: "Missing or invalid x-render-secret header" };
+    }
+
+    const validated = validateOcrRequest(request.body);
+    if (!validated.ok) {
+      reply.code(validated.status);
+      return { ok: false, code: validated.code, message: validated.message };
+    }
+
+    let result;
+    try {
+      result = await runOcr(validated.request);
+    } catch (error) {
+      reply.code(500);
+      return {
+        ok: false,
+        code: "OCR_ENGINE_ERROR",
+        message: `Unexpected OCR failure: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    if (!result.ok) {
+      // Every input-shaped refusal is a 400 (the caller can fix it), a missing binary is a
+      // 503 (the deploy can fix it), a timeout is a 504. Nothing here is a bare 500.
+      const status =
+        result.code === "OCR_TIMEOUT"
+          ? 504
+          : result.code === "OCR_UNAVAILABLE"
+            ? 503
+            : result.code === "OCR_ENGINE_ERROR"
+              ? 500
+              : 400;
+      reply.code(status);
+      return { ok: false, code: result.code, message: result.message };
+    }
+
+    reply.code(200);
+    return {
+      ok: true,
+      text: result.text,
+      words: result.words,
+      diagnostics: { ...result.diagnostics, engine: { id: "tesseract", executedIn: "render-service" } },
     };
   });
 
