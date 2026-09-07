@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            render-service/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install render-service dependencies
+        run: npm ci
+        working-directory: render-service
+
+      - name: Typecheck
+        run: npm run check:eslint
+
+      # `npm test` also runs test:service (render-service), which needs a real Chromium
+      # binary, a typst binary, and poppler-utils to exercise its render engines. Several of
+      # its capture-*/chromium-* specs (capture-embeds, capture-fonts, capture-structure,
+      # chromium-font-normalization) launch Chromium directly with no availability guard —
+      # unlike their sibling specs (chromium-integration, capture-integration,
+      # chromium-thumbnail, chromium-strict-binding), which probe chromiumAvailable() first
+      # and skip cleanly when no browser is found. Without a Chromium binary at exactly the
+      # path those specs hardcode, they fail outright instead of skipping. Separately,
+      # rasterize.test.ts's own poppler-availability assertion is flaky by construction: a
+      # stubbed pdftoppm used by an earlier test in the same file gets its successful probe
+      # cached (by design — see popplerVersion()'s doc comment), which then leaks into the
+      # later /health assertion regardless of whether real poppler is installed. Both are
+      # pre-existing gaps on main, not something this gate should paper over silently — see
+      # this workflow's introducing commit for detail. Run only the half that is green
+      # today; wire test:service back in once those are resolved.
+      - name: Test (netlify)
+        run: npm run test:netlify
+
+      - name: Docs check
+        run: npm run docs:check
