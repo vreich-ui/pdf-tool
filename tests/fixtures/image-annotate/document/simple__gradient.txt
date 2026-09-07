@@ -1,5 +1,5 @@
 === html ===
-<div class="ann-canvas"><img class="ann-base" src="https://render.assets.invalid/annotate-base" alt=""><div class="ann-label"><div class="ann-line">Intake valve</div></div><svg class="ann-arrows" xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480"><defs><marker id="ann-head-pointer" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="13.44" markerHeight="13.44" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb" /></marker></defs><path d="M 53.33 40.00 Q 122.44 132.34 221.74 191.00" fill="none" stroke="#2563eb" stroke-width="3.36" stroke-linecap="round" marker-end="url(#ann-head-pointer)" /></svg></div>
+<div class="ann-canvas"><img class="ann-base" src="https://render.assets.invalid/annotate-base" alt=""><div class="ann-label"><div class="ann-line">Intake valve</div></div><svg class="ann-arrows" xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480"><defs><marker id="ann-head-pointer" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="13.44" markerHeight="13.44" markerUnits="userSpaceOnUse" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2563eb" /></marker></defs><path d="M 53.33 40.00 Q 124.61 132.78 226.09 191.00" fill="none" stroke="#2563eb" stroke-width="3.36" stroke-linecap="round" marker-end="url(#ann-head-pointer)" /></svg></div>
 
 === css ===
 .ann-canvas {
@@ -23,9 +23,9 @@
 
 .ann-label {
   position: absolute;
-  left: 221.74px;
+  left: 226.09px;
   top: 191.00px;
-  width: 89.86px;
+  width: 81.16px;
   margin: 0;
   font-family: sans-serif;
   font-size: 14.40px;

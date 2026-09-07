@@ -34,7 +34,7 @@
       "box": {
         "x": 12.8,
         "y": 426,
-        "w": 250.55999999999997,
+        "w": 255.67200000000003,
         "h": 30
       },
       "fontFamily": "sans-serif",
@@ -45,7 +45,8 @@
       ],
       "align": "left",
       "style": "title",
-      "color": "#111111"
+      "color": "#111111",
+      "measurementSource": "metrics"
     },
     {
       "id": "step",
@@ -61,7 +62,8 @@
       "fontFamily": "sans-serif",
       "fontSizePx": 12.479999999999999,
       "weight": "bold",
-      "color": "#111111"
+      "color": "#111111",
+      "measurementSource": "metrics"
     }
   ]
 }
