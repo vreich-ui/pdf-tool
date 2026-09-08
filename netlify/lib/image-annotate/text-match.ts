@@ -68,6 +68,13 @@ export interface TextCheckReport {
    * the first occurrence, capped at MAX_REPORTED_ITEMS so a genuinely text-heavy image (the
    * base image model itself is not a diagram of a poem) reports a pattern, not a flood. */
   detected: string[];
+  /** How many distinct fragments were actually detected, before `detected` was capped at
+   * MAX_REPORTED_ITEMS. Matching always runs against ALL of them, so without this a string
+   * could appear in `matched` while being absent from the `detected` list shown — a report
+   * that contradicts itself, and reads as proof the text is missing when it is not. */
+  detectedTotal: number;
+  /** True when `detected` shows fewer fragments than were found. */
+  detectedTruncated: boolean;
   /** The gate's own verdict: for `expect_none`, true iff nothing significant was detected;
    * for `expect`, true iff every string in `expect` was found. */
   ok: boolean;
@@ -172,10 +179,11 @@ function evaluateExpectNone(words: TextCheckWord[]): TextCheckReport {
   const warnings = ok
     ? []
     : detected.map((text) => `Detected text "${text}" in a generated image expected to contain no text (expect_none)`);
-  if (significant.length > detected.length) {
-    warnings.push(`${significant.length - detected.length} additional detected fragment(s) omitted (capped at ${MAX_REPORTED_ITEMS})`);
+  const detectedTotal = new Set(significant.map((word) => word.normalized)).size;
+  if (detectedTotal > detected.length) {
+    warnings.push(`${detectedTotal - detected.length} additional detected fragment(s) omitted (capped at ${MAX_REPORTED_ITEMS})`);
   }
-  return { mode: "expect_none", detected, ok, warnings };
+  return { mode: "expect_none", detected, detectedTotal, detectedTruncated: detectedTotal > detected.length, ok, warnings };
 }
 
 function evaluateExpect(words: TextCheckWord[], expect: string[]): TextCheckReport {
@@ -197,7 +205,14 @@ function evaluateExpect(words: TextCheckWord[], expect: string[]): TextCheckRepo
 
   const ok = missing.length === 0;
   const warnings = missing.map((needle) => `Expected text "${needle}" was not found in the rendered output (expect)`);
-  return { mode: "expect", detected, ok, warnings, matched, missing };
+  // The haystack above is built from EVERY word; `detected` is capped for readability. Saying
+  // so is not cosmetic: without it a caller reads a short `detected` list as evidence that a
+  // matched string is not really in the image.
+  const detectedTotal = new Set(orderedRaw.map((raw) => normalizeForMatch(raw))).size;
+  if (detectedTotal > detected.length) {
+    warnings.push(`${detectedTotal - detected.length} additional detected fragment(s) omitted from \`detected\` (capped at ${MAX_REPORTED_ITEMS}); matching ran against all ${detectedTotal}`);
+  }
+  return { mode: "expect", detected, detectedTotal, detectedTruncated: detectedTotal > detected.length, ok, warnings, matched, missing };
 }
 
 /**

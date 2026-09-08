@@ -3,6 +3,7 @@ import { MAX_PDF_OUTPUT_BYTES, type NormalizedArtifactJobRequirements, type Norm
 import { RenderError } from "./errors.js";
 import { assertRenderDataMatchesSchema, checkRenderDataAgainstSchema } from "./render-data-schema.js";
 import { fillOptionalSlots } from "./optional-slots.js";
+import { normalizeImageSlotValues } from "./image-slots.js";
 import { precheckChromiumTemplateAssets } from "./asset-precheck.js";
 import { enforcePdfRequirements, inspectPdf, type RequirementFailure } from "./inspect.js";
 import { REGISTERED_RENDERERS } from "./registry.js";
@@ -184,7 +185,16 @@ export async function renderPdfArtifact(options: {
   // Runs AFTER schema validation (a filled null must not be judged against the schema) and
   // BEFORE the asset precheck, so the precheck sees the data the engine will actually get.
   if (record.renderer === "chromium") {
+    // Both passes below rewrite `data` in place, and `data` here can be the stored template's
+    // own sampleData object (thumbnail and preview renders pass it straight through). Clone
+    // once so a render can never mutate a persisted record or a caller's argument.
+    data = structuredClone(data);
     data = fillOptionalSlots(record.templateJson, record.renderer, data).data;
+    // Bare assetId is the canonical image-slot form: rewrite it to the virtual URL the render
+    // service actually serves, BEFORE the precheck below judges whether the slot is fetchable.
+    // Only values naming an asset this job declared are touched, so an unresolvable slot still
+    // fails with ASSET_MISSING rather than being quietly rewritten into a broken URL.
+    data = normalizeImageSlotValues(record.templateJson, record.renderer, data, assets).data;
     precheckChromiumTemplateAssets(record.templateJson, data, assets);
   }
 

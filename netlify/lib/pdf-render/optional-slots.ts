@@ -26,57 +26,7 @@
  * including an explicit `null` or `false` the caller sent on purpose.
  */
 import { deriveRenderDataSchema, type DerivedSlot } from "./derive-render-data-schema.js";
-
-/** One step of a slot path: a named key, or "iterate this array's elements". */
-type PathStep = { kind: "key"; name: string } | { kind: "each" };
-
-/** `sections[].figure.caption` -> [key sections, each, key figure, key caption] */
-function parseSlotPath(path: string): PathStep[] {
-  const steps: PathStep[] = [];
-  for (const segment of path.split(".")) {
-    if (!segment) continue;
-    let name = segment;
-    let arrays = 0;
-    while (name.endsWith("[]")) {
-      name = name.slice(0, -2);
-      arrays += 1;
-    }
-    if (name) steps.push({ kind: "key", name });
-    for (let index = 0; index < arrays; index += 1) steps.push({ kind: "each" });
-  }
-  return steps;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Walks `container` along `steps` and applies `apply` at every leaf position the path
- * reaches. Missing intermediate containers are SKIPPED, never created: an optional object
- * that is itself absent stays absent (its own slot entry is what fills it), and a required
- * one that is absent must still fail the render.
- */
-function atEachLeaf(container: unknown, steps: PathStep[], apply: (parent: Record<string, unknown>, key: string) => void): void {
-  if (steps.length === 0) return;
-  const [step, ...rest] = steps;
-
-  if (step!.kind === "each") {
-    if (!Array.isArray(container)) return;
-    for (const element of container) atEachLeaf(element, rest, apply);
-    return;
-  }
-
-  if (!isPlainObject(container)) return;
-  const key = step!.name;
-
-  if (rest.length === 0) {
-    apply(container, key);
-    return;
-  }
-  // Not the leaf yet: descend only into what already exists.
-  if (key in container) atEachLeaf(container[key], rest, apply);
-}
+import { atEachLeaf, isPlainObject, parseSlotPath } from "./slot-paths.js";
 
 function defaultForSlot(slot: DerivedSlot): unknown {
   // An array slot must be an ARRAY for `{% for %}` to iterate zero times rather than throw;

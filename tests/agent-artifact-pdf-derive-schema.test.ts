@@ -682,26 +682,23 @@ test("a derived-schema finding names the offending slot in a form that survives 
 // 4. Regressions: a derived contract must be RENDERABLE, not merely plausible
 // ---------------------------------------------------------------------------
 
-test("chromium image slots sample the virtual asset URL and ship the placeholder assets that resolve it", () => {
+test("chromium image slots sample a BARE assetId and ship the placeholder assets that resolve it", () => {
   const derived = deriveRenderDataSchema({
     html: "<img src=\"{{ heroImage }}\"><style>.b{background:url('{{ brand.band }}')}</style>",
   });
   assert.equal(derived.supported, true);
   const sample = derived.sampleData as Record<string, Record<string, string> | string>;
 
-  // The renderer resolves job assets off a virtual host, and the referenced-asset precheck
-  // matches that exact URL in a data value. A bare "sample-hero-image" matched neither, so
-  // every auto-derived chromium template previewed with broken images and tripped the
-  // quality gate's unresolved-image finding on its own publish thumbnail.
-  assert.match(sample.heroImage as string, /^https:\/\/render\.assets\.invalid\//);
-  assert.match((sample.brand as Record<string, string>).band, /^https:\/\/render\.assets\.invalid\//);
-
+  // Bare assetId is the canonical slot form; pdf-tool normalizes it to the virtual URL at
+  // render time. What matters is that the sample names an asset sampleAssets actually
+  // supplies — a sample naming nothing was why auto-derived templates previewed with broken
+  // images and tripped the quality gate on their own publish thumbnail.
   const images = derived.sampleAssets?.images ?? [];
   assert.equal(images.length, 2, "one placeholder asset per image slot");
   for (const value of [sample.heroImage as string, (sample.brand as Record<string, string>).band]) {
-    const assetId = value.split("/").pop();
-    const asset = images.find((entry) => entry.assetId === assetId);
-    assert.ok(asset, `sampleAssets must declare "${assetId}" that sampleData binds`);
+    assert.doesNotMatch(value, /^https:\/\//, "the sample is a bare assetId, not a URL");
+    const asset = images.find((entry) => entry.assetId === value);
+    assert.ok(asset, `sampleAssets must declare "${value}" that sampleData binds`);
     assert.match(asset.dataUri, /^data:image\/png;base64,/);
   }
 });
