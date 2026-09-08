@@ -499,9 +499,10 @@ function walkPartial(node: LiquidNode, scope: WalkScope, state: DeriveState): vo
 const IMAGE_DESCRIPTIONS: Record<string, string> = {
   chromium:
     "Image reference (not prose): the template interpolates this slot inside an `src=` attribute or a CSS `url()`. " +
-    "Supply the full virtual URL \"https://render.assets.invalid/<assetId>\" of an entry declared in the render job's " +
-    "`assets.images` — that exact URL is what the referenced-asset precheck matches and what the renderer serves off its " +
-    "virtual host. A bare assetId, a site-relative path, or an http(s) URL cannot be fetched and renders as a broken image.",
+    "Supply the BARE assetId of an entry declared in the render job's `assets.images` — pdf-tool normalizes it to the " +
+    "virtual URL \"https://render.assets.invalid/<assetId>\" that the renderer serves and the referenced-asset precheck " +
+    "matches. That full URL is also accepted verbatim, and a `data:` URI is inlined as-is. A site-relative path or an " +
+    "http(s) URL cannot be fetched by the renderer and renders as a broken image.",
   pdfme:
     "Image reference (not prose): this is a pdfme `image` field. Supply a `data:<mime>;base64,...` data URI — pdfme templates do not support the job's assets.images.",
 };
@@ -509,10 +510,6 @@ const IMAGE_DESCRIPTIONS: Record<string, string> = {
 function imageDescriptionFor(renderer: PdfRendererId): string {
   return IMAGE_DESCRIPTIONS[renderer] ?? IMAGE_DESCRIPTIONS.chromium!;
 }
-
-/** Virtual host the render service serves job assets from; the exact prefix the chromium
- * referenced-asset precheck matches in a data value. */
-const RENDER_ASSET_ORIGIN = "https://render.assets.invalid";
 
 /** 1x1 transparent PNG — a real, decodable image so a derived sample renders. */
 const SAMPLE_PNG_DATA_URI =
@@ -622,14 +619,14 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
       // pdfme has no job-asset channel: the data URI goes straight into the slot.
       sample = SAMPLE_PNG_DATA_URI;
     } else {
-      // Everything else binds through assets.images. The sample must be the SAME virtual
-      // URL the renderer resolves and the precheck matches, and the placeholder asset it
-      // names must be handed back so the caller can actually supply it.
+      // Everything else binds through assets.images. The sample is the BARE assetId — the
+      // canonical slot form, which pdf-tool normalizes to the virtual URL at render time —
+      // and the placeholder asset it names is handed back so the caller can supply it.
       const assetId = sampleAssetIdFor(path, name);
       if (!ctx.sampleAssets.some((asset) => asset.assetId === assetId)) {
         ctx.sampleAssets.push({ assetId, dataUri: SAMPLE_PNG_DATA_URI });
       }
-      sample = `${RENDER_ASSET_ORIGIN}/${assetId}`;
+      sample = assetId;
     }
     return {
       schema: {

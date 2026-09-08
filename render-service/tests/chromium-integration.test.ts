@@ -204,6 +204,13 @@ test("an <img> pointing at an asset the job never supplied is surfaced as an eng
       !warnings.some((w) => w.includes("unresolved job asset") && w.includes("/supplied")),
       `the supplied asset must not be reported as unresolved: ${JSON.stringify(warnings)}`
     );
+    // An asset that was never served never loads, so it never decodes. Reporting it a second
+    // time as "did not finish decoding" describes a race that did not happen and buries the
+    // one warning that names the real cause.
+    assert.ok(
+      !warnings.some((w) => w.includes("did not finish decoding") && w.includes("typo-id")),
+      `an unresolved asset must not ALSO be reported as undecoded: ${JSON.stringify(warnings)}`
+    );
   });
 });
 

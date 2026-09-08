@@ -295,7 +295,10 @@ function createRouteHandler(
   assetMap: Map<string, { contentType?: string; bytes: Buffer }>,
   bundledFonts: Map<string, Buffer>,
   requestFonts: NormalizedFont[],
-  warnings: string[]
+  warnings: string[],
+  /** Filled in by the handler with every asset URL it refused, so the image-decode gate can
+   * tell "never served" apart from "served but still decoding" and report each once. */
+  unresolvedAssetUrls: Set<string>
 ) {
   const allowed = allowedHosts();
   return async (route: Route): Promise<void> => {
@@ -338,6 +341,10 @@ function createRouteHandler(
       // broken image inside an otherwise successful PDF, with nothing anywhere saying why.
       // <img> misses are also caught by waitForImagesDecoded, but a CSS background/font-less
       // url() miss is not — only this warning names it.
+      // Remembered so the decode gate below does not report the SAME asset a second time as
+      // a timing problem: an asset that was never served never loads, so it never decodes.
+      // Two warnings for one cause sent readers chasing a race that does not exist.
+      unresolvedAssetUrls.add(url);
       if (warnings.length < MAX_BLOCKED_WARNINGS) {
         warnings.push(`unresolved job asset: no asset named "${pathname}" was supplied for ${url}`);
       }
@@ -616,6 +623,7 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
   const assembledHtml = assembleDocument(renderedHtml, request.templateCss, fontFaceCss, request.fonts);
   const assetMap = new Map(request.assets.map((asset) => [asset.name, asset]));
   const warnings: string[] = [];
+  const unresolvedAssetUrls = new Set<string>();
 
   let context: BrowserContext | undefined;
   let pendingContext: Promise<BrowserContext> | undefined;
@@ -628,7 +636,7 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
         // and leak it on the shared warm browser.
         pendingContext = browser.newContext({ javaScriptEnabled: false, offline: false });
         context = await pendingContext;
-        await context.route("**/*", createRouteHandler(assetMap, bundledFonts, request.fonts, warnings));
+        await context.route("**/*", createRouteHandler(assetMap, bundledFonts, request.fonts, warnings, unresolvedAssetUrls));
         const page = await context.newPage();
         await page.setContent(assembledHtml, {
           waitUntil: "networkidle",
@@ -648,7 +656,11 @@ export async function renderChromium(request: NormalizedChromiumRenderRequest): 
         // half-painted, in a PDF that is otherwise valid and reports success.
         try {
           const imageState = await waitForImagesDecoded(page as never, Math.min(request.timeoutMs, IMAGE_DECODE_TIMEOUT_MS));
-          for (const src of imageState.undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
+          // An asset the route handler already refused is reported there, by its real cause.
+          // Repeating it here as "did not finish decoding" describes a race that never
+          // happened and buries the one warning that names the actual problem.
+          const undecoded = imageState.undecoded.filter((src) => !unresolvedAssetUrls.has(src));
+          for (const src of undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
             warnings.push(`image did not finish decoding before capture and may be incomplete in the output: ${src}`);
           }
         } catch (error) {
@@ -898,6 +910,7 @@ export async function renderImage(request: NormalizedImageRenderRequest): Promis
   );
   const assetMap = new Map(request.assets.map((asset) => [asset.name, asset]));
   const warnings: string[] = [];
+  const unresolvedAssetUrls = new Set<string>();
 
   let context: BrowserContext | undefined;
   let pendingContext: Promise<BrowserContext> | undefined;
@@ -914,7 +927,7 @@ export async function renderImage(request: NormalizedImageRenderRequest): Promis
           deviceScaleFactor: request.deviceScaleFactor,
         });
         context = await pendingContext;
-        await context.route("**/*", createRouteHandler(assetMap, bundledFonts, request.fonts, warnings));
+        await context.route("**/*", createRouteHandler(assetMap, bundledFonts, request.fonts, warnings, unresolvedAssetUrls));
         const page = await context.newPage();
         await page.setContent(assembledHtml, {
           waitUntil: "networkidle",
@@ -935,7 +948,11 @@ export async function renderImage(request: NormalizedImageRenderRequest): Promis
         // missing, and nothing downstream can tell.
         try {
           const imageState = await waitForImagesDecoded(page as never, Math.min(request.timeoutMs, IMAGE_DECODE_TIMEOUT_MS));
-          for (const src of imageState.undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
+          // An asset the route handler already refused is reported there, by its real cause.
+          // Repeating it here as "did not finish decoding" describes a race that never
+          // happened and buries the one warning that names the actual problem.
+          const undecoded = imageState.undecoded.filter((src) => !unresolvedAssetUrls.has(src));
+          for (const src of undecoded.slice(0, MAX_BLOCKED_WARNINGS - warnings.length)) {
             warnings.push(`image did not finish decoding before capture and may be incomplete in the output: ${src}`);
           }
         } catch (error) {

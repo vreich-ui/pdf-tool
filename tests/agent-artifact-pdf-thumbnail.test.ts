@@ -334,7 +334,17 @@ test("publish => worker => thumbnailKey set, and the stored object is a readable
     const rendered = service.requests[0];
     assert.equal(rendered.path, "/render/chromium");
     assert.deepEqual((rendered.body.options as Record<string, unknown>).wantThumbnail, true);
-    assert.deepEqual(rendered.body.data, fixture.sampleData);
+    // The engine receives the sampleData with its image slots NORMALIZED: bare assetId is the
+    // canonical authoring form, and pdf-tool rewrites it to the virtual URL the render service
+    // serves. Everything else must arrive untouched, and the stored fixture must not be mutated.
+    const expectedData = structuredClone(fixture.sampleData) as Record<string, any>;
+    expectedData.coverImage = "https://render.assets.invalid/cover-photo";
+    expectedData.brand.logo = "https://render.assets.invalid/brand-logo";
+    expectedData.sections.forEach((section: Record<string, any>, index: number) => {
+      if (section.figure) section.figure.assetId = `https://render.assets.invalid/section-photo-${index + 1}`;
+    });
+    assert.deepEqual(rendered.body.data, expectedData);
+    assert.equal((fixture.sampleData as Record<string, any>).coverImage, "cover-photo", "the fixture itself must not have been mutated");
     // REVIEW: "validation" is how the worker targets an exact VERSION; it must not reach the
     // ENGINE, where the same word means Liquid strictVariables (see
     // render-service/tests/liquid.test.ts). A preview of a template whose sampleData does not
