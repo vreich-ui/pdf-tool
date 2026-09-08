@@ -265,7 +265,10 @@ test("routing: explicit model wins over policy; newsletter falls back to project
       { projectId: "dr-lurie", requestId: "req-route-3", artifactKind: "image", prompt: "x", filename: "x.png", requirements: { image: { usageContext: "newsletter" } } },
       CREATE_OPTS
     );
-    assert.equal((newsletter as { selectedModel?: string }).selectedModel, "gpt-image-1");
+    // newsletter is deliberately absent from the routing policy, so it falls through to the
+    // project default backend — which is FAL (Wolf's ruling), not OpenAI, whenever no
+    // descriptor.defaultModel and no AGENT_ARTIFACT_DEFAULT_MODEL narrow it further.
+    assert.equal((newsletter as { selectedModel?: string }).selectedModel, "fal-ai/flux-2/klein/9b");
 
     const alias = await createAgentArtifactJob(
       { projectId: "dr-lurie", requestId: "req-route-4", artifactKind: "image", prompt: "x", filename: "x.png", model: "flux-2" },

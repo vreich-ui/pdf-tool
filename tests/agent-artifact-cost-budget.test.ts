@@ -18,7 +18,12 @@ import {
   chargeGenerationBudget,
   readGenerationLedger,
   generationBudget,
+  evaluateGenerationBudget,
+  budgetExceededWarning,
+  overBudgetMode,
+  BUDGET_EXCEEDED_WARNING_CODE,
   DEFAULT_GENERATION_BUDGET_USD,
+  type GenerationLedger,
 } from "../netlify/lib/generation-budget.js";
 
 function env() {
@@ -41,10 +46,19 @@ const GRANT = {
 
 /** Every ledger read/write goes through the project's jobs store, which is only reachable
  * under an active per-request storage grant -- same posture as production. */
-function withGrant<T>(fn: () => Promise<T>): Promise<T> {
-  const parsed = parseStorageGrant(GRANT);
+function withGrant<T>(fn: () => Promise<T>, limits?: Record<string, unknown>): Promise<T> {
+  const parsed = parseStorageGrant(limits ? { ...GRANT, limits } : GRANT);
   assert.ok(parsed.ok, "test grant must parse");
   return runWithStorageGrant(parsed.ok ? parsed.grant : undefined, fn);
+}
+
+/** QA-W16-5: a grant that opts INTO the old hard-stop behaviour. */
+function withBlockingGrant<T>(fn: () => Promise<T>): Promise<T> {
+  return withGrant(fn, { overBudget: "block" });
+}
+
+function ledger(patch: Partial<GenerationLedger> = {}): GenerationLedger {
+  return { projectId: "dr-lurie", requestId: "req-x", spentUsd: 0, unpricedCount: 0, jobCount: 0, updatedAt: "2026-09-08T00:00:00.000Z", ...patch };
 }
 
 test.beforeEach(() => {
@@ -120,9 +134,9 @@ test("ledgers are isolated per requestId", async () => {
   });
 });
 
-test("the hard stop fires when a job would push the request past its ceiling", async () => {
+test("the hard stop fires when a job would push the request past its ceiling, under a blocking grant", async () => {
   process.env.GENERATION_BUDGET_USD_PER_REQUEST = "0.01";
-  await withGrant(async () => {
+  await withBlockingGrant(async () => {
     // ~$0.0063 each against the klein tier: the first fits, the second would exceed $0.01.
     const receipt = imageCostReceipt("fal", "fal-ai/flux-2/klein/9b", "1024x1024");
     await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-cap", receipt });
@@ -137,9 +151,9 @@ test("the hard stop fires when a job would push the request past its ceiling", a
   });
 });
 
-test("unpriced models are bounded by a count limit instead of slipping through as free", async () => {
+test("unpriced models are bounded by a count limit instead of slipping through as free, under a blocking grant", async () => {
   process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST = "2";
-  await withGrant(async () => {
+  await withBlockingGrant(async () => {
     const receipt = imageCostReceipt("openai", "gpt-image-1", "1024x1024");
     await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-unpriced", receipt });
     await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-unpriced", receipt });
@@ -177,4 +191,99 @@ test("setting the budget to 0 disables enforcement entirely", async () => {
     // Nothing throws, and nothing is recorded — the guard is off, not silently lenient.
     assert.equal((await readGenerationLedger("dr-lurie", "req-off")).jobCount, 0);
   });
+});
+
+// -- QA-W16-5: over_budget: "warn" is the default, and it is honoured ----------
+//
+// The defect: every site's media policy says over_budget: "warn", and the standing platform
+// ruling is that quality/spend gates warn rather than block -- but the spend ceiling refused
+// the job outright no matter what the policy said. These lock down both halves: the pure
+// decision (evaluateGenerationBudget) and what each mode does with it.
+
+test("evaluateGenerationBudget is a pure decision: it reports the breach and never acts on it", () => {
+  const budget = { budgetUsd: 0.01, unpricedLimit: 2 };
+  const priced = imageCostReceipt("fal", "fal-ai/flux-2/klein/9b", "1024x1024");
+
+  assert.equal(evaluateGenerationBudget(ledger(), priced, budget), undefined, "the first job fits");
+
+  const over = evaluateGenerationBudget(ledger({ spentUsd: 0.009, jobCount: 1 }), priced, budget);
+  assert.equal(over?.reason, "cost");
+  assert.match(over?.message ?? "", /would exceed its generation budget/);
+  assert.equal(over?.detail.budgetUsd, 0.01);
+
+  const unpriced = imageCostReceipt("openai", "gpt-image-1", "1024x1024");
+  assert.equal(evaluateGenerationBudget(ledger({ unpricedCount: 1 }), unpriced, budget), undefined);
+  const overUnpriced = evaluateGenerationBudget(ledger({ unpricedCount: 2 }), unpriced, budget);
+  assert.equal(overUnpriced?.reason, "unpriced");
+  assert.match(overUnpriced?.message ?? "", /cannot price/);
+
+  // The two cases that are never a breach, whatever the ledger says.
+  assert.equal(evaluateGenerationBudget(ledger({ spentUsd: 999 }), deterministicRenderCostReceipt("pdfme"), budget), undefined);
+  assert.equal(evaluateGenerationBudget(ledger({ spentUsd: 999 }), priced, { budgetUsd: 0, unpricedLimit: 2 }), undefined);
+});
+
+test('the over-budget mode defaults to "warn" and only an explicit grant value blocks', async () => {
+  await withGrant(async () => assert.equal(overBudgetMode(), "warn"));
+  await withGrant(async () => assert.equal(overBudgetMode(), "warn"), { maxImageBytes: 10 });
+  await withGrant(async () => assert.equal(overBudgetMode(), "warn"), { overBudget: "yolo" });
+  await withBlockingGrant(async () => assert.equal(overBudgetMode(), "block"));
+  // No grant at all (a caller that never configured any of this) still warns.
+  assert.equal(overBudgetMode(), "warn");
+});
+
+test('over budget under "warn": the job PROCEEDS, is still charged, and carries a budget_exceeded warning', async () => {
+  process.env.GENERATION_BUDGET_USD_PER_REQUEST = "0.01";
+  await withGrant(async () => {
+    const receipt = imageCostReceipt("fal", "fal-ai/flux-2/klein/9b", "1024x1024");
+    const first = await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-warn", receipt });
+    assert.equal(first.warning, undefined, "a job inside the ceiling must not be flagged");
+
+    const second = await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-warn", receipt });
+    assert.ok(second.warning, "the over-budget job must be flagged, not refused");
+    assert.match(second.warning ?? "", new RegExp(BUDGET_EXCEEDED_WARNING_CODE));
+    assert.match(second.warning ?? "", /would exceed its generation budget/);
+    assert.equal(second.breach?.reason, "cost");
+
+    // The spend is real, so it is recorded: a warned job is a charged job.
+    const led = await readGenerationLedger("dr-lurie", "req-warn");
+    assert.equal(led.jobCount, 2);
+    assert.ok(led.spentUsd > 0.01, `warned spend must still be on the ledger, got ${led.spentUsd}`);
+  });
+});
+
+test('the unpriced ceiling warns under "warn" too, rather than refusing', async () => {
+  process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST = "1";
+  await withGrant(async () => {
+    const receipt = imageCostReceipt("openai", "gpt-image-1", "1024x1024");
+    await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-warn-unpriced", receipt });
+    const over = await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-warn-unpriced", receipt });
+    assert.equal(over.breach?.reason, "unpriced");
+    assert.match(over.warning ?? "", /cannot price/);
+    assert.equal((await readGenerationLedger("dr-lurie", "req-warn-unpriced")).unpricedCount, 2);
+  });
+});
+
+test('over budget under "block": refused exactly as before, and nothing is charged', async () => {
+  process.env.GENERATION_BUDGET_USD_PER_REQUEST = "0.01";
+  await withBlockingGrant(async () => {
+    const receipt = imageCostReceipt("fal", "fal-ai/flux-2/klein/9b", "1024x1024");
+    await chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-block", receipt });
+    await assert.rejects(
+      () => chargeGenerationBudget({ projectId: "dr-lurie", requestId: "req-block", receipt }),
+      (error: unknown) => {
+        const typed = error as { code?: string; message?: string };
+        assert.equal(typed.code, "GENERATION_BUDGET_EXCEEDED");
+        assert.match(typed.message ?? "", /would exceed its generation budget/);
+        return true;
+      }
+    );
+    assert.equal((await readGenerationLedger("dr-lurie", "req-block")).jobCount, 1, "a refused job costs nothing");
+  });
+});
+
+test("the warning text names the policy that let the job through, so a reader can act on it", () => {
+  const warning = budgetExceededWarning({ reason: "cost", message: "Request \"r\" would exceed its generation budget.", detail: {} });
+  assert.match(warning, /^budget_exceeded: /);
+  assert.match(warning, /over_budget: "warn"/);
+  assert.match(warning, /limits\.overBudget/);
 });

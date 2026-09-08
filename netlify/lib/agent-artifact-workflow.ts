@@ -242,7 +242,8 @@ export async function executeAgentArtifactWorkflow(job: ArtifactJobRecord, optio
           let regenerated: GeneratedImageBytes | undefined;
           try {
             assertWorkerBudget(options.deadline, "image annotate text-leak regenerate");
-            await chargeGenerationBudget({ projectId: job.projectId, requestId: job.requestId, receipt: job.costReceipt });
+            const charge = await chargeGenerationBudget({ projectId: job.projectId, requestId: job.requestId, receipt: job.costReceipt });
+            if (charge.warning) annotateGuardWarnings.push(charge.warning);
             regenerated = await runGenerate();
           } catch (error) {
             annotateGuardWarnings.push(

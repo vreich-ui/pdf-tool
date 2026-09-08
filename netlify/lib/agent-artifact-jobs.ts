@@ -806,7 +806,7 @@ export async function jobRecordStore() {
   return projectBlobStore(storeName, { consistency: "strong" });
 }
 
-export async function createArtifactJob(input: ArtifactJobRequest, overrides: { status?: ArtifactJobStatus; blocked?: BlockedArtifactState; jobId?: string } = {}): Promise<ArtifactJobRecord> {
+export async function createArtifactJob(input: ArtifactJobRequest, overrides: { status?: ArtifactJobStatus; blocked?: BlockedArtifactState; jobId?: string; warnings?: string[] } = {}): Promise<ArtifactJobRecord> {
   const adapterVersion = PROJECT_DESCRIPTOR_VERSION;
   // F5 (cosmetic): template-driven PDF jobs (pdfme/react-pdf/typst/chromium) never route
   // through a model — resolveOperationRoute always resolves requiresModel: false for
@@ -824,7 +824,11 @@ export async function createArtifactJob(input: ArtifactJobRequest, overrides: { 
     updatedAt: now,
     adapterVersion,
     selectedModel,
-    ...(overrides.blocked ? { blocked: overrides.blocked } : {})
+    ...(overrides.blocked ? { blocked: overrides.blocked } : {}),
+    // QA-W16-5: a create-time warning (today: the warn-mode `budget_exceeded` breach) lands
+    // on the record here so it survives to get_agent_artifact_job_status; the worker appends
+    // its own warnings after these rather than replacing them.
+    ...(overrides.warnings?.length ? { warnings: overrides.warnings } : {})
   };
   await writeArtifactJob(job);
   return job;

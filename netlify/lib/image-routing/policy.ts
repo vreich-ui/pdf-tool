@@ -5,7 +5,9 @@
  *
  * Applied ONLY when a job omits `model`; an explicit model always wins. Text-in-image
  * usage contexts (newsletter, open_graph, search_preview, instagram_story, ad_platform)
- * are intentionally absent from the defaults → the project default backend (gpt-image-1).
+ * are intentionally absent from the defaults → the project default backend
+ * (DEFAULT_IMAGE_MODEL, i.e. fal-ai/flux-2/klein/9b unless a descriptor or
+ * AGENT_ARTIFACT_DEFAULT_MODEL says otherwise).
  */
 import { projectBlobStore } from "../blob-store.js";
 import { allowedProjectModels, projectStoreNames, validateProjectAccess } from "../project-descriptor.js";

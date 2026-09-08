@@ -44,7 +44,9 @@ export type RenderErrorCode =
   | "PROVIDER_RATE_LIMITED"
   | "IMAGE_DECODE_ERROR"
   | "JOB_EXECUTION_TIMEOUT"
-  /** D2: this job would push its requestId past the per-request generation budget. */
+  /** D2: this job would push its requestId past the per-request generation budget, AND the
+   * grant set limits.overBudget to "block". Under the default "warn" policy (QA-W16-5) the
+   * same breach is not an error at all — the job runs carrying a `budget_exceeded` warning. */
   | "GENERATION_BUDGET_EXCEEDED"
   /** T12.8: a capture job's stored policy fails worker-side re-validation (bounds are
    * ceilings enforced on BOTH sides — a record that bypassed create is still refused). */

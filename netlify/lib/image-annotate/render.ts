@@ -306,9 +306,12 @@ export interface LuminanceSampler {
  * function.
  *
  * Two honest limitations, both documented rather than hidden:
- *   - it samples the BASE IMAGE ONLY. A text element that sits on top of a spec-authored
- *     scrim or a filled box is measured against the photo underneath, not against the
- *     surface it will actually be painted on, so its reported ratio is pessimistic.
+ *   - it samples the BASE IMAGE ONLY — this function reads photo pixels and nothing else.
+ *     Since S4 the RESOLVER composites a spec-authored filled `box` (a "chip") on top of what
+ *     this returns, sampling it over the chip's real rendered bounds, so text on a chip is no
+ *     longer measured against the bare photo (see resolve.ts backgroundLuminanceBehindText).
+ *     A gradient `scrim` is still not credited: its alpha varies across its own box, so one
+ *     averaged sample cannot represent it, and text over one still reads pessimistic (KI-33).
  *   - it is a 32x32 average. A caption over a hard black/white boundary reads as mid-grey.
  */
 export async function buildLuminanceSampler(bytes: Buffer, canvas: { w: number; h: number }): Promise<LuminanceSampler> {
