@@ -28,13 +28,18 @@ export interface StorageGrantLimits {
   maxImageBytes?: number;
   preferredImageFormat?: "png" | "webp" | "jpeg";
   /**
-   * S-15: platform-minted policy for what happens when a generated/edited image is still
-   * over its byte budget after best-effort optimization. "warn" stores it anyway with a
-   * sizeWarning (pdf-tool's long-standing default, still the only behaviour for a grant
-   * that predates this field). "block" refuses the job instead — see
-   * agent-artifact-worker-background.ts's IMAGE_OVER_BUDGET refusal. Absent or any value
-   * other than exactly "warn"/"block" normalizes to "warn": a tenant that never configured
-   * this must see no change in behaviour.
+   * S-15 + QA-W16-5: the site media policy's single `over_budget` mode, and the ONE place a
+   * tenant gets to say "block". It governs both budgets pdf-tool enforces:
+   *
+   *   - the stored image's BYTE budget — "warn" stores it anyway with a sizeWarning,
+   *     "block" refuses (agent-artifact-worker-background.ts's IMAGE_OVER_BUDGET);
+   *   - the per-request generation SPEND ceiling — "warn" runs the job and attaches a
+   *     `budget_exceeded` warning, "block" refuses with GENERATION_BUDGET_EXCEEDED
+   *     (generation-budget.ts).
+   *
+   * Absent or any value other than exactly "warn"/"block" normalizes to "warn", which is
+   * both what every site's media policy says and the platform's standing ruling that
+   * quality/spend gates warn rather than block.
    */
   overBudget?: "warn" | "block";
 }

@@ -9,7 +9,13 @@ import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 import { handler as httpCreateHandler } from "../netlify/functions/create-agent-artifact-job.js";
 import { handler as importFromUrlHandler } from "../netlify/functions/import-image-from-url.js";
 import { parseStorageGrant, runWithStorageGrant } from "../netlify/lib/storage-grant.js";
-import { DEFAULT_ALLOWED_MODELS } from "../netlify/lib/project-descriptor.js";
+import {
+  DEFAULT_ALLOWED_MODELS,
+  DEFAULT_IMAGE_MODEL,
+  allowedProjectModels,
+  resolveProjectModel,
+  runWithProjectDescriptor
+} from "../netlify/lib/project-descriptor.js";
 
 /**
  * S2 stateless-refactor acceptance suite. The point of the session: pdf-tool is
@@ -38,6 +44,11 @@ function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
+  // This suite drives the OpenAI image path with a stubbed client/fetch. The built-in
+  // fallback model is FAL (Wolf's ruling: FAL is the default image provider), so the suite
+  // pins the deployment default the way a real OpenAI-backed deployment would —
+  // AGENT_ARTIFACT_DEFAULT_MODEL — rather than leaning on whatever the literal happens to be.
+  process.env.AGENT_ARTIFACT_DEFAULT_MODEL = "gpt-image-1";
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
@@ -553,4 +564,41 @@ test("verification proves a fernwell artifact under the fernwell grant", async (
   const verdict = await mcpToolCall("verify_agent_artifact", { storage: FERNWELL_STORAGE, projectId: "fernwell", requestId: "req-fw-verify", artifactReference: reference, materializationProof: proof });
   assert.equal(verdict.isError, undefined, JSON.stringify(verdict.structuredContent));
   assert.equal(verdict.structuredContent.verified, true, JSON.stringify(verdict.structuredContent));
+});
+
+// ── Default image provider: FAL, never OpenAI by omission ────────────────────
+//
+// Wolf's ruling: FAL is the platform's default image provider. The bridge passing a FAL
+// descriptor is one half; this is the other — a caller that sends NO descriptor at all
+// (a direct pdf-tool caller, or any call the bridge did not shape) must not land on OpenAI
+// just by leaving `model` out.
+
+test("no descriptor, no model: the fallback resolves to the FAL default, not gpt-image-1", () => {
+  delete process.env.AGENT_ARTIFACT_DEFAULT_MODEL;
+  runWithProjectDescriptor(undefined, () => {
+    assert.equal(resolveProjectModel("any-project", undefined), "fal-ai/flux-2/klein/9b");
+    assert.equal(resolveProjectModel("any-project", undefined), DEFAULT_IMAGE_MODEL);
+    assert.notEqual(resolveProjectModel("any-project", undefined), "gpt-image-1");
+    // The fallback has to be a model the default allowlist actually permits, or the very
+    // call it is meant to rescue would fail validation instead.
+    assert.ok(allowedProjectModels("any-project").has(DEFAULT_IMAGE_MODEL));
+  });
+});
+
+test("the fallback yields to anything more specific: explicit model, descriptor, deployment env", () => {
+  delete process.env.AGENT_ARTIFACT_DEFAULT_MODEL;
+  runWithProjectDescriptor(undefined, () => {
+    assert.equal(resolveProjectModel("any-project", "gpt-image-1"), "gpt-image-1", "an explicit model always wins");
+  });
+  runWithProjectDescriptor({ defaultModel: "gpt-image-1" }, () => {
+    assert.equal(resolveProjectModel("any-project", undefined), "gpt-image-1", "a caller's descriptor still decides");
+  });
+  process.env.AGENT_ARTIFACT_DEFAULT_MODEL = "fal-ai/qwen-image";
+  try {
+    runWithProjectDescriptor(undefined, () => {
+      assert.equal(resolveProjectModel("any-project", undefined), "fal-ai/qwen-image", "the deployment's configured default beats the built-in literal");
+    });
+  } finally {
+    delete process.env.AGENT_ARTIFACT_DEFAULT_MODEL;
+  }
 });

@@ -17,6 +17,11 @@ function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
+  // This suite drives the OpenAI image path with a stubbed client/fetch. The built-in
+  // fallback model is FAL (Wolf's ruling: FAL is the default image provider), so the suite
+  // pins the deployment default the way a real OpenAI-backed deployment would —
+  // AGENT_ARTIFACT_DEFAULT_MODEL — rather than leaning on whatever the literal happens to be.
+  process.env.AGENT_ARTIFACT_DEFAULT_MODEL = "gpt-image-1";
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";

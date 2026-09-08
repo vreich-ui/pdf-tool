@@ -127,6 +127,51 @@ function rectPx(canvas: CanvasPx, rect: SpecRect): PixelRect {
   return { x: tl.x, y: tl.y, w: rect.w * canvas.w, h: rect.h * canvas.h };
 }
 
+/**
+ * A `box` element's rect — the "chip" a caller paints behind a title or a caption — resolved
+ * with its HEIGHT taken off the canvas's SHORTER edge (`min(w, h)`) rather than off the full
+ * canvas height.
+ *
+ * WHY A BOX AND NOT EVERY RECT. A box is FURNITURE: it exists to back text, and every other
+ * sized piece of furniture in this module already scales off `min(canvas.w, canvas.h)` —
+ * STYLE_FONT_FRACTION (text), BADGE_SIZE_FRACTION (badges), `logo.size` (documented in
+ * spec.ts as "of the canvas's SHORTER edge") and ARROW_STROKE_FRACTION. `rectPx` was the one
+ * sizing path that did not, so a chip was the one piece of furniture whose height tracked the
+ * canvas's LONG edge on a non-square canvas. A `scrim` and an `avoid[]` zone are deliberately
+ * left on `rectPx`: both describe a region OF THE PICTURE (darken the bottom third; keep this
+ * part of the frame clear), so their height must stay frame-relative — re-basing them would,
+ * for instance, turn a full-bleed `h: 1` bottom scrim on a 1080x1920 canvas into a 1080px one.
+ *
+ * WHAT CHANGES, PRECISELY (and what does not):
+ *   - square-ish canvas (1024x1024): `min(w,h) === h`, so the ratio semantics are IDENTICAL.
+ *   - landscape canvas (2048x261, 1200x900, ...): `min(w,h) === h` as well — also identical.
+ *     A chip authored at 0.45 on a 2048x261 panorama is 117.45px BEFORE and AFTER this
+ *     change; on a landscape canvas nothing about chip height can be fixed here, because the
+ *     height already IS the shorter edge (see docs/KNOWN_ISSUES.md KI-40 for what actually
+ *     bites there: two 0.45 chips are 90% of ANY frame, and that is caller-authored).
+ *   - a canvas whose HEIGHT is the long edge (261x2048, 1080x1920, ...): a chip authored at
+ *     0.45 was 921.6px / 864px — 45% of a very tall frame, swallowing the picture — and is
+ *     now 117.45px / 486px, the same absolute size it would have had on a square canvas of
+ *     that shorter edge. This is the case the change exists for.
+ */
+function furnitureRectPx(canvas: CanvasPx, rect: SpecRect): PixelRect {
+  const tl = anchorPointOfRect(resolveReferenceRect(canvas, rect.at), "tl");
+  return { x: tl.x, y: tl.y, w: rect.w * canvas.w, h: rect.h * Math.min(canvas.w, canvas.h) };
+}
+
+/** The rectangle two rects share, or null when they do not overlap. Same predicate as
+ * rectsOverlap (strictly positive overlap on both axes), but it returns the shared REGION —
+ * which is what a sampler needs when it has to measure the surface actually painted behind a
+ * text box rather than the whole of either rect. */
+function intersectRects(a: PixelRect, b: PixelRect): PixelRect | null {
+  const x0 = Math.max(a.x, b.x);
+  const y0 = Math.max(a.y, b.y);
+  const x1 = Math.min(a.x + a.w, b.x + b.w);
+  const y1 = Math.min(a.y + a.h, b.y + b.h);
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 function rectsOverlap(a: PixelRect, b: PixelRect): { overlapW: number; overlapH: number } | null {
   const overlapW = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const overlapH = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
@@ -516,6 +561,82 @@ export function contrastRatio(l1: number, l2: number): number {
 
 export const DEFAULT_CONTRAST_THRESHOLD = 4.5;
 
+/** The alpha of a `#rgb` / `#rrggbb` / `#rrggbbaa` fill, as 0..1. Only the 8-digit form
+ * carries one; every other accepted form (see hexColorSchema) is fully opaque. */
+export function hexAlpha(hex: string): number {
+  const h = hex.replace("#", "");
+  if (h.length !== 8) return 1;
+  return parseInt(h.slice(6, 8), 16) / 255;
+}
+
+/**
+ * The relative luminance of the surface a text element is ACTUALLY painted on, and the
+ * regions that were sampled to get it.
+ *
+ * THE DEFECT THIS CLOSES. The contrast check used to sample exactly one region — the text
+ * placement's own box — and feed it a sampler that reads the BASE PHOTO only. Neither input
+ * changes when a caller resizes the filled `box` (the "chip") painted behind the text, so
+ * growing a chip from 0.06 to 0.15 of the canvas produced a byte-identical CONTRAST_LOW ratio
+ * (reproduced live against the deployed service: 1.5703843254844463 at BOTH chip heights).
+ * The chip's real, rendered footprint was invisible to the measurement.
+ *
+ * WHAT IS MEASURED NOW. The chip is the last filled `box` painted BEFORE this text (paint
+ * order is spec element order — see render.ts's paintOrder, which only ever moves auto-scrims)
+ * that overlaps the text box at all. The text box is then measured as two parts:
+ *   - the part the chip covers: the chip's own fill composited over the photo sampled under
+ *     the chip/text OVERLAP — i.e. the sampler now tracks the chip's real bounds;
+ *   - the part it does not: the photo behind the text, exactly as before.
+ * weighted by `coverage`, the fraction of the text box's area the chip covers. A chip too
+ * small to sit behind the whole string therefore gets partial credit and a bigger one gets
+ * more, which is precisely the responsiveness that was missing.
+ *
+ * DELIBERATE LIMITS (KI-33 is narrowed here, not closed): only `box` fills are credited. A
+ * gradient `scrim` still contributes nothing — its alpha varies across its own box by
+ * construction, so crediting it needs a per-pixel model rather than one average — and neither
+ * does a `logo` or a second box painted over the first one's overlap region.
+ */
+function backgroundLuminanceBehindText(
+  textBox: PixelRect,
+  chip: BoxPlacement | undefined,
+  sample: (rect: PixelRect) => number
+): { luminance: number; coverage: number; sampledRects: PixelRect[] } {
+  const photoBehindText = sample(textBox);
+  const textArea = textBox.w * textBox.h;
+  const overlap = chip && chip.style.fill ? intersectRects(chip.box, textBox) : null;
+  if (!chip || !chip.style.fill || !overlap || textArea <= 0) {
+    return { luminance: photoBehindText, coverage: 0, sampledRects: [textBox] };
+  }
+  const coverage = Math.min(1, (overlap.w * overlap.h) / textArea);
+  const alpha = hexAlpha(chip.style.fill);
+  const photoUnderChip = sample(overlap);
+  const chipSurface = alpha * relativeLuminance(hexToRgb(chip.style.fill)) + (1 - alpha) * photoUnderChip;
+  return {
+    luminance: coverage * chipSurface + (1 - coverage) * photoBehindText,
+    coverage,
+    sampledRects: [textBox, overlap]
+  };
+}
+
+/** The filled `box` painted behind `textBox`: the LAST one before `textIndex` in paint order
+ * that overlaps it. "Last" because a later box paints over an earlier one, so it is the
+ * surface the text actually sits on; "before" because a box declared after the text is
+ * painted ON TOP of it and is not a backing surface at all. */
+function backingChipFor(
+  textIndex: number,
+  placements: (Placement | undefined)[],
+  textBox: PixelRect
+): BoxPlacement | undefined {
+  let backing: BoxPlacement | undefined;
+  for (let index = 0; index < textIndex; index++) {
+    const placement = placements[index];
+    if (!placement || placement.type !== "box") continue;
+    if (!placement.style.fill) continue;
+    if (!intersectRects(placement.box, textBox)) continue;
+    backing = placement;
+  }
+  return backing;
+}
+
 /** Foreground color used when neither `theme.textColors[style]` nor `theme.textColor` names
  * one. Near-black rather than pure black so a spec that never sets a color still looks like
  * a designed caption rather than a debug overlay. */
@@ -557,7 +678,12 @@ export function resolveTextColor(theme: AnnotationTheme, style: TextStyle): stri
  * - AVOID_ZONE_OVERLAP   an element was pushed out of a declared `avoid[]` zone.
  * - CLAMPED_TO_CANVAS    an element would have left the canvas and was moved back inside.
  * - CONTRAST_LOW         this element's own text color fails the WCAG threshold against the
- *                        base image behind it; an auto-scrim was inserted.
+ *                        SURFACE behind it — the filled `box` painted under it composited
+ *                        over the base image where it covers the text, the base image alone
+ *                        where it does not (see backgroundLuminanceBehindText); an auto-scrim
+ *                        was inserted. `detail.backingCoverage` (present only when a filled
+ *                        box does sit behind the text) is the fraction of the text box that
+ *                        box covers.
  * - ARROW_TARGET_NO_BOX  an arrow's "#id" endpoint named an element with no box.
  * - MEASURED_BOX_DRIFT   RAISED BY THE RENDERER. The element's rendered box differs from the
  *                        box predicted here by more than the threshold — i.e. the offline
@@ -1010,7 +1136,9 @@ export function resolveAnnotationSpec(specInput: unknown, options: ResolveOption
     }
 
     if (el.type === "box") {
-      const box = rectPx(canvas, el.rect);
+      // furnitureRectPx, not rectPx: a chip's height is a fraction of the canvas's SHORTER
+      // edge (see furnitureRectPx's doc for why box differs from scrim/avoid here).
+      const box = furnitureRectPx(canvas, el.rect);
       const placement: BoxPlacement = { id: el.id, type: "box", box, style: el.style };
       placements[index] = placement;
       return;
@@ -1057,19 +1185,32 @@ export function resolveAnnotationSpec(specInput: unknown, options: ResolveOption
   // Contrast: only meaningful when the caller can tell us what's behind a text box.
   const autoScrims: ScrimPlacement[] = [];
   if (options.sampleLuminance) {
-    for (const placement of placements) {
+    const sampleLuminance = options.sampleLuminance;
+    for (let index = 0; index < placements.length; index++) {
+      const placement = placements[index];
       if (!placement || placement.type !== "text") continue;
       // Per ELEMENT, not per document: each text placement carries the color its own style
       // resolved to (resolveTextColor), so a white title and a near-black caption over the
       // same photo produce two different, individually-correct ratios.
       const textLuminance = relativeLuminance(hexToRgb(placement.color));
-      const backgroundLuminance = options.sampleLuminance(placement.box);
+      // ...and per SURFACE, not per photo: the region measured follows the filled box (the
+      // "chip") actually painted behind this text, so resizing that chip moves the ratio.
+      const chip = backingChipFor(index, placements, placement.box);
+      const { luminance: backgroundLuminance, coverage } = backgroundLuminanceBehindText(placement.box, chip, sampleLuminance);
       const ratio = contrastRatio(textLuminance, backgroundLuminance);
       if (ratio < contrastThreshold) {
         warnings.push({
           code: "CONTRAST_LOW",
           elementId: placement.id,
-          detail: { ratio, threshold: contrastThreshold, style: placement.style, color: placement.color }
+          detail: {
+            ratio,
+            threshold: contrastThreshold,
+            style: placement.style,
+            color: placement.color,
+            // What was measured, so a caller reading the warning can tell "the photo is too
+            // busy here" from "my chip does not cover this string" without guessing.
+            ...(chip ? { backingElementId: chip.id, backingCoverage: coverage } : {})
+          }
         });
         autoScrims.push({
           id: `${placement.id}__auto-scrim`,

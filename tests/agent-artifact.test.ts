@@ -39,6 +39,11 @@ function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
+  // This suite drives the OpenAI image path with a stubbed client/fetch. The built-in
+  // fallback model is FAL (Wolf's ruling: FAL is the default image provider), so the suite
+  // pins the deployment default the way a real OpenAI-backed deployment would —
+  // AGENT_ARTIFACT_DEFAULT_MODEL — rather than leaning on whatever the literal happens to be.
+  process.env.AGENT_ARTIFACT_DEFAULT_MODEL = "gpt-image-1";
   process.env.AGENT_ARTIFACT_TEST_IMAGE_B64 = pngBytes.toString("base64");
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
@@ -383,6 +388,9 @@ test("model resolution uses explicit input, descriptor default, and rejects unsu
   const explicit = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-explicit", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined, model: "alternate-test-image-model" });
   assert.equal(explicit.selectedModel, "alternate-test-image-model");
 
+  // No model on the job: the resolver falls through to the deployment default this suite
+  // pins (AGENT_ARTIFACT_DEFAULT_MODEL). With nothing pinned it would land on the built-in
+  // FAL fallback instead — covered in agent-artifact-stateless.test.ts.
   const fallback = await createArtifactJob({ projectId: "dr-lurie", requestId: "req-model-default", artifactKind: "image", prompt: "x", filename: "x.png", tags: [], label: undefined });
   assert.equal(fallback.selectedModel, "gpt-image-1");
 

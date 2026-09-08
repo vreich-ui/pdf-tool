@@ -146,14 +146,23 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
   // D2: charge the per-request ledger BEFORE any worker is triggered, so the ceiling actually
   // bounds spend rather than reporting it after the fact. Deterministic renders are free and
   // pass through untouched; the guard fails open on a storage error (see chargeGenerationBudget).
+  //
+  // QA-W16-5: the ceiling WARNS by default (every site's media policy says
+  // over_budget: "warn", and the standing ruling is that gates warn rather than block).
+  // A job that is over budget therefore still runs, carrying a `budget_exceeded` warning
+  // onto its job record so get_agent_artifact_job_status reports it; only a grant that
+  // explicitly says limits.overBudget: "block" still gets the 429 refusal.
+  let budgetWarnings: string[] = [];
   try {
-    await chargeGenerationBudget({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, receipt: parsed.data.costReceipt });
+    const charge = await chargeGenerationBudget({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, receipt: parsed.data.costReceipt });
+    if (charge.warning) budgetWarnings = [charge.warning];
   } catch (error) {
     if (error instanceof RenderError && error.code === "GENERATION_BUDGET_EXCEEDED") {
       return { ok: false as const, statusCode: 429, error: error.message, errorCode: error.code, errorDetail: error.detail };
     }
     throw error;
   }
+  const budgetWarningOverride = budgetWarnings.length ? { warnings: budgetWarnings } : {};
 
   // Operator-approval gate: when approval is required, persist the job in a resumable
   // `blocked` state and DO NOT trigger the worker. The caller gets everything needed to
@@ -165,18 +174,18 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const blocked = buildBlockedState({ projectId: parsed.data.projectId, requestId: parsed.data.requestId, jobId, slot: parsed.data.slot }, requirement);
     let blockedJob: Awaited<ReturnType<typeof createArtifactJob>>;
     try {
-      blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId });
+      blockedJob = await createArtifactJob(parsed.data, { status: "blocked", blocked, jobId, ...budgetWarningOverride });
     } catch (error) {
       return { ...storeAccessFailure("Artifact job store", error, safeError(error)), ok: false as const };
     }
-    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, ...styleResponseFields(blockedJob.style), blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
+    return { ok: true as const, statusCode: 202, jobId: blockedJob.jobId, status: blockedJob.status, projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, filename: blockedJob.filename, selectedModel: blockedJob.selectedModel, ...(blockedJob.costEstimate ? { costEstimate: blockedJob.costEstimate } : {}), ...(blockedJob.costReceipt ? { costReceipt: blockedJob.costReceipt } : {}), adapterVersion: blockedJob.adapterVersion, ...styleResponseFields(blockedJob.style), ...(blockedJob.warnings?.length ? { warnings: blockedJob.warnings } : {}), blocked, destination: { projectId: blockedJob.projectId, requestId: blockedJob.requestId, artifactKind: blockedJob.artifactKind, slot: blockedJob.slot, filename: blockedJob.filename, model: blockedJob.selectedModel, requirements: blockedJob.requirements }, polling: artifactJobPollingInstructions(blockedJob.projectId, blockedJob.jobId) };
   }
 
   let job: Awaited<ReturnType<typeof createArtifactJob>>;
   try {
     // Persisting the pending job record needs the pdf-tool job store; a Blobs failure here
     // must return a clean error, not throw out of the handler into a 5xx/gateway 502.
-    job = await createArtifactJob(parsed.data);
+    job = await createArtifactJob(parsed.data, budgetWarningOverride);
   } catch (error) {
     return { ...storeAccessFailure("Artifact job store", error, safeError(error)), ok: false as const };
   }
@@ -186,7 +195,7 @@ export async function createAgentArtifactJob(input: CreateAgentArtifactJobInput,
     const failed = await updateArtifactJob(job, { status: "failed", error: safeError(error) });
     return { ok: false as const, statusCode: 502, jobId: failed.jobId, status: failed.status, error: failed.error };
   }
-  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), adapterVersion: job.adapterVersion, ...styleResponseFields(job.style), destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
+  return { ok: true as const, statusCode: 202, jobId: job.jobId, status: job.status, projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, filename: job.filename, selectedModel: job.selectedModel, ...(job.costEstimate ? { costEstimate: job.costEstimate } : {}), ...(job.costReceipt ? { costReceipt: job.costReceipt } : {}), adapterVersion: job.adapterVersion, ...styleResponseFields(job.style), ...(job.warnings?.length ? { warnings: job.warnings } : {}), destination: { projectId: job.projectId, requestId: job.requestId, artifactKind: job.artifactKind, slot: job.slot, filename: job.filename, model: job.selectedModel, requirements: job.requirements }, polling: artifactJobPollingInstructions(job.projectId, job.jobId) };
 }
 
 export async function resumeAgentArtifactJob(input: ResumeArtifactJobInput, options: { baseUrl?: string; token?: string } = {}) {

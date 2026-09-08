@@ -41,7 +41,20 @@ export interface ProjectDescriptor {
 export const PROJECT_DESCRIPTOR_VERSION = "descriptor-v1";
 
 export const DEFAULT_ALLOWED_ARTIFACT_KINDS: ArtifactKind[] = ["image", "pdf"];
-export const DEFAULT_IMAGE_MODEL = "gpt-image-1";
+/**
+ * Last-resort image model when a job names none.
+ *
+ * Wolf's standing ruling: FAL is the platform's default image provider. This value is the
+ * final fallback in resolveProjectModel — reached only when the job named no `model`, no
+ * usageContext routing applied, the caller sent no descriptor.defaultModel, and the
+ * deployment set no AGENT_ARTIFACT_DEFAULT_MODEL — so a direct pdf-tool caller cannot land
+ * on OpenAI by omission. It is the same model the shipped routing policy names for every
+ * routed context (DEFAULT_IMAGE_MODEL_POLICY.byUsageContext), which is what makes "omit the
+ * model" and "let the policy route it" agree instead of quietly diverging by provider.
+ *
+ * Per-deployment override: AGENT_ARTIFACT_DEFAULT_MODEL (serviceDefaultModel()).
+ */
+export const DEFAULT_IMAGE_MODEL = "fal-ai/flux-2/klein/9b";
 
 /**
  * Default model allowlist — carried over VERBATIM from the deleted dr-lurie adapter so the
@@ -413,7 +426,13 @@ export function serviceDefaultModel(): string | undefined {
 export function allowedProjectModels(_projectId?: string): Set<string> {
   const descriptor = currentProjectDescriptor();
   const allowed = new Set<string>(descriptor?.allowedModels ?? DEFAULT_ALLOWED_MODELS);
-  allowed.add(descriptor?.defaultModel ?? DEFAULT_IMAGE_MODEL);
+  // A caller's OWN default is always usable — saying "default to X" is saying "X is allowed".
+  // The built-in fallback is not: adding it unconditionally would silently widen an allowlist
+  // the caller deliberately narrowed (invisible while the fallback happened to be a member of
+  // the default set, load-bearing now that it is a FAL model), so it is added only when the
+  // caller named no allowlist of its own.
+  if (descriptor?.defaultModel) allowed.add(descriptor.defaultModel);
+  else if (!descriptor?.allowedModels) allowed.add(DEFAULT_IMAGE_MODEL);
   const serviceModel = serviceDefaultModel();
   if (serviceModel) allowed.add(serviceModel);
   for (const model of (process.env.AGENT_ARTIFACT_ALLOWED_MODELS ?? "").split(",")) {
@@ -424,7 +443,10 @@ export function allowedProjectModels(_projectId?: string): Set<string> {
 }
 
 export function resolveProjectModel(_projectId?: string, requestedModel?: string): string | undefined {
-  return requestedModel || currentProjectDescriptor()?.defaultModel || DEFAULT_IMAGE_MODEL;
+  // The deployment's own AGENT_ARTIFACT_DEFAULT_MODEL sits between the caller's descriptor
+  // and the built-in FAL fallback: allowedProjectModels() already trusts it, so it was the
+  // one configured default the resolver was ignoring.
+  return requestedModel || currentProjectDescriptor()?.defaultModel || serviceDefaultModel() || DEFAULT_IMAGE_MODEL;
 }
 
 export function validateProjectModel(projectId: string, model: string | undefined): string | undefined {

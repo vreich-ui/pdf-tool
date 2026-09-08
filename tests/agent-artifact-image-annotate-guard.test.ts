@@ -26,6 +26,7 @@ import {
 } from "../netlify/lib/agent-image-generation.js";
 import { imageCostReceipt } from "../netlify/lib/cost-receipt.js";
 import { readGenerationLedger } from "../netlify/lib/generation-budget.js";
+import { parseStorageGrant, runWithStorageGrant } from "../netlify/lib/storage-grant.js";
 
 const pngBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAFklEQVQYlWP4z8DQQAxmGFX4n67BAwAg+JWdtW1ttQAAAABJRU5ErkJggg==",
@@ -36,6 +37,11 @@ function env() {
   process.env.AGENT_ARTIFACT_MEMORY_BLOBS = "1";
   process.env.AGENT_RUN_TOKEN = "test-token";
   process.env.NODE_ENV = "test";
+  // This suite drives the OpenAI image path with a stubbed client/fetch. The built-in
+  // fallback model is FAL (Wolf's ruling: FAL is the default image provider), so the suite
+  // pins the deployment default the way a real OpenAI-backed deployment would —
+  // AGENT_ARTIFACT_DEFAULT_MODEL — rather than leaning on whatever the literal happens to be.
+  process.env.AGENT_ARTIFACT_DEFAULT_MODEL = "gpt-image-1";
   process.env.AGENT_ARTIFACT_TEST_AGENT_SDK = "1";
   process.env.OPENAI_API_KEY = "test-openai-key";
   delete process.env.AGENT_ARTIFACT_TEST_IMAGE_B64;
@@ -227,15 +233,30 @@ test("annotate-mode job that leaks twice keeps the artifact and records both att
   assert.doesNotMatch(result.annotateGuardWarnings![0], /passed the text-leak check/i);
 });
 
-test("the text-leak regenerate is charged against the generation budget and skipped (warned, not failed) when the budget forbids it", async () => {
+/** QA-W16-5: the grant is the only place that says "block"; without one the standing warn
+ * ruling applies. Both budget modes are exercised below through the same regenerate path. */
+function withOverBudgetGrant<T>(mode: "warn" | "block", fn: () => Promise<T>): Promise<T> {
+  const parsed = parseStorageGrant({
+    grantType: "netlify-pat",
+    projectId: "dr-lurie",
+    siteId: "dr-site",
+    token: "dr-token",
+    stores: { jobs: "agent-artifact-jobs" },
+    limits: { overBudget: mode },
+  });
+  assert.ok(parsed.ok, "test grant must parse");
+  return runWithStorageGrant(parsed.ok ? parsed.grant : undefined, fn);
+}
+
+test('the text-leak regenerate is charged against the generation budget and skipped (warned, not failed) when a "block" grant forbids it', async () => {
   process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST = "0";
   try {
     const tracked = trackingImageClient();
     const job = await annotateJob({ annotate: true, requestId: "req-budget-exhausted" });
-    const result = await executeAgentArtifactWorkflow(job, {
+    const result = await withOverBudgetGrant("block", () => executeAgentArtifactWorkflow(job, {
       imageClient: tracked.client,
       checkImageTextLeak: alwaysLeaking(),
-    });
+    }));
 
     assert.equal(tracked.calls(), 1, "the regenerate must not run as a free extra call when the budget forbids it");
     assert.ok(result.bytes, "the job still succeeds — a budget-blocked retry warns, it never fails the job");
@@ -243,6 +264,26 @@ test("the text-leak regenerate is charged against the generation budget and skip
     assert.equal(result.annotateGuardWarnings!.length, 1);
     assert.match(result.annotateGuardWarnings![0], /could not run/i);
     assert.match(result.annotateGuardWarnings![0], /keeping the first attempt/i);
+  } finally {
+    delete process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST;
+  }
+});
+
+test('QA-W16-5: under the default "warn" policy the same exhausted budget lets the regenerate run, flagged rather than refused', async () => {
+  process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST = "0";
+  try {
+    const tracked = trackingImageClient();
+    const job = await annotateJob({ annotate: true, requestId: "req-budget-warn" });
+    const result = await withOverBudgetGrant("warn", () => executeAgentArtifactWorkflow(job, {
+      imageClient: tracked.client,
+      checkImageTextLeak: alwaysLeaking(),
+    }));
+
+    assert.equal(tracked.calls(), 2, "warn does not stop the retry — the ceiling reports, it does not gate");
+    assert.ok(result.bytes);
+    const warnings = result.annotateGuardWarnings ?? [];
+    assert.ok(warnings.some((warning) => warning.includes("budget_exceeded")), `expected a budget_exceeded warning, got ${JSON.stringify(warnings)}`);
+    assert.ok(!warnings.some((warning) => /could not run/i.test(warning)), "nothing was refused, so nothing should report a refusal");
   } finally {
     delete process.env.GENERATION_UNPRICED_LIMIT_PER_REQUEST;
   }

@@ -177,6 +177,10 @@ async function runWorker(projectId: string, jobId: string, deadline: WorkerDeadl
       .map((warning) => sanitizeDiagnosticText(warning))
       .filter((warning) => warning.length > 0);
     const warnings = [
+      // QA-W16-5: warnings recorded at job CREATION (the warn-mode `budget_exceeded`
+      // breach) must survive completion — this array replaces the record's, so it starts
+      // from what is already there.
+      ...(runningJob.warnings ?? []),
       ...(sizeWarning ? [`Generated artifact exceeds requested maxBytes of ${sizeWarning.maxBytes} (actual ${sizeWarning.actualBytes}); stored anyway per the warn-only over-budget policy`] : []),
       ...engineWarnings.map((warning) => sanitizeDiagnosticText(warning)).filter((warning) => warning.length > 0),
       ...(qualityGateSummary ? [qualityGateSummary] : []),
