@@ -3,7 +3,7 @@
  * render-service/src/fonts.ts is always one directory below render-service/ — this holds for
  * both the tsx (src) and compiled (dist) layouts.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,53 @@ export function resolveFontDir(): string {
   if (envDir) return envDir;
   if (existsSync("/srv/fonts")) return "/srv/fonts";
   return path.join(RENDER_SERVICE_ROOT, "fonts");
+}
+
+/** Font file extensions the render service bundles. */
+const FONT_FILE_EXTENSIONS = new Set([".ttf", ".otf", ".ttc", ".woff", ".woff2"]);
+
+let bundledFamiliesCache: readonly string[] | undefined;
+
+/**
+ * The font families actually present in the bundled font directory, derived from the
+ * filenames (`NotoSansHebrew-Bold.ttf` -> `NotoSansHebrew`).
+ *
+ * Read from disk rather than hard-coded so this can never drift from what is really shipped:
+ * a face added to or removed from render-service/fonts/ changes this list by doing so.
+ *
+ * It exists because `--ignore-system-fonts` is deliberate — a render must not silently pick up
+ * whatever the container happens to have — but the consequence is that a template naming any
+ * other family gets typst's bare `unknown font family: liberation sans`, which says what is
+ * missing and never what is available. Chromium templates do not hit this: their font-family
+ * declarations are normalized down to a bundled face before the page loads (see below). typst
+ * source cannot be rewritten that way, so the honest fix is to TELL the author.
+ */
+export function bundledFontFamilies(): readonly string[] {
+  if (bundledFamiliesCache) return bundledFamiliesCache;
+  let families: string[] = [];
+  try {
+    families = [
+      ...new Set(
+        readdirSync(resolveFontDir())
+          .filter((file) => FONT_FILE_EXTENSIONS.has(path.extname(file).toLowerCase()))
+          // "NotoSans-Regular.ttf" -> "NotoSans"; a face with no weight suffix keeps its stem.
+          .map((file) => path.basename(file, path.extname(file)).split("-")[0] ?? "")
+          .filter((family) => family.length > 0)
+      ),
+    ].sort();
+  } catch {
+    // An unreadable font dir is the deploy's problem, not this helper's: callers degrade to
+    // "no list to offer" rather than failing a render that would otherwise have succeeded.
+    families = [];
+  }
+  bundledFamiliesCache = families;
+  return families;
+}
+
+/** Test seam: the bundled set is cached per process, and a test that points FONT_DIR
+ * somewhere else needs that cache dropped. */
+export function resetBundledFontFamiliesCache(): void {
+  bundledFamiliesCache = undefined;
 }
 
 // ---------------------------------------------------------------------------
