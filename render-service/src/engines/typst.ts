@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { NormalizedTypstRenderRequest } from "../contract.js";
-import { resolveFontDir } from "../fonts.js";
+import { bundledFontFamilies, resolveFontDir } from "../fonts.js";
 import { inspectPdf } from "../inspect.js";
 
 const STDERR_TAIL_MAX_CHARS = 2000;
@@ -137,7 +137,12 @@ export async function renderTypst(request: NormalizedTypstRenderRequest): Promis
     ];
 
     const vendor = vendorDir();
-    const spawnResult = await runTypst(args, tmpRoot, vendor, request.timeoutMs);
+    // The families this render could actually have used: what the image bundles, plus any
+    // font the job uploaded for itself.
+    const availableFamilies = [
+      ...new Set([...bundledFontFamilies(), ...request.fonts.map((font) => font.family)]),
+    ].sort();
+    const spawnResult = await runTypst(args, tmpRoot, vendor, request.timeoutMs, availableFamilies);
 
     if (!spawnResult.ok) return spawnResult;
 
@@ -179,7 +184,15 @@ type SpawnOutcome =
   | { ok: true; warnings: string[] }
   | { ok: false; code: "RENDER_ENGINE_ERROR" | "RENDER_TIMEOUT"; message: string };
 
-function runTypst(args: string[], cwd: string, vendor: string, timeoutMs: number): Promise<SpawnOutcome> {
+function runTypst(
+  args: string[],
+  cwd: string,
+  vendor: string,
+  timeoutMs: number,
+  /** Every family this render could have resolved — bundled plus job-supplied. Used only to
+   * make an `unknown font family` warning actionable. */
+  availableFamilies: readonly string[] = []
+): Promise<SpawnOutcome> {
   return new Promise((resolve) => {
     // Scrubbed environment: PATH (to locate the binary + any libs it dlopen's) and ONLY
     // the two typst package-path vars, redirected at the read-only vendored dir. No proxy
@@ -237,18 +250,36 @@ function runTypst(args: string[], cwd: string, vendor: string, timeoutMs: number
         return;
       }
 
-      resolve({ ok: true, warnings: parseWarnings(stderr) });
+      resolve({ ok: true, warnings: parseWarnings(stderr, availableFamilies) });
     });
   });
 }
 
-/** Extracts typst's `warning:` lines from stderr. Other stderr noise on a successful
- * compile is intentionally dropped — diagnostics carry actionable warnings only. */
-function parseWarnings(stderr: string): string[] {
+/** typst's own phrasing for a family it could not resolve. */
+const UNKNOWN_FONT_WARNING = /unknown font family:\s*(.+?)\s*$/i;
+
+/**
+ * Extracts typst's `warning:` lines from stderr. Other stderr noise on a successful compile is
+ * intentionally dropped — diagnostics carry actionable warnings only.
+ *
+ * `unknown font family` is rewritten rather than passed through: on its own it names what is
+ * missing and never what is available, which reads as a broken renderer instead of a template
+ * asking for a face this sandbox deliberately does not carry. `available` is every family the
+ * render could actually have used — the bundled set plus this job's own uploaded fonts.
+ */
+export function parseWarnings(stderr: string, available: readonly string[] = []): string[] {
   const trimmed = stderr.trim();
   if (!trimmed) return [];
   return trimmed
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => /^warning:/i.test(line));
+    .filter((line) => /^warning:/i.test(line))
+    .map((line) => {
+      const match = UNKNOWN_FONT_WARNING.exec(line);
+      if (!match || available.length === 0) return line;
+      return (
+        `${line} — this render had no such face. Available families: ${available.join(", ")}. ` +
+        "System fonts are deliberately ignored, so a template must name one of these or supply its own font with the job."
+      );
+    });
 }
