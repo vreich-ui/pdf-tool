@@ -21,11 +21,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
+import { projectBlobStore, resetMemoryBlobStores } from "../netlify/lib/blob-store.js";
 import { handler as createHandler } from "../netlify/functions/create-pdf-template.js";
 import { handler as publishHandler } from "../netlify/functions/publish-pdf-template.js";
 import { handler as deleteHandler } from "../netlify/functions/delete-pdf-template.js";
 import { handler as getHandler } from "../netlify/functions/get-pdf-template.js";
+import { handler as listHandler } from "../netlify/functions/list-pdf-templates.js";
 import { handler as mcpServerHandler } from "../netlify/functions/mcp.js";
 
 function env() {
@@ -239,4 +240,65 @@ test("get_pdf_template tool description points callers at list_pdf_templates and
   assert.match(tool!.description, /draft/i);
   assert.match(tool!.description, /list_pdf_templates/);
   assert.match(tool!.description, /disabled|archived/i);
+});
+
+// ---------------------------------------------------------------------------
+// The persisted listing index must not outlive the shape it was written for
+// ---------------------------------------------------------------------------
+
+const TEMPLATES_STORE = "pdf-templates";
+const INDEX_KEY = "pdfme/_index/dr-lurie.json";
+
+test("a listing index written by an older build is rebuilt, not served forever", async () => {
+  const templateId = "stale-index-tpl";
+  const created = await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({
+      storage: STORAGE,
+      projectId: "dr-lurie",
+      templateId,
+      templateJson: validTemplate,
+      label: "Quarterly report",
+      kind: "article",
+    }),
+  });
+  assert.equal(created.statusCode, 201, created.body);
+
+  // Exactly what site_platform actually had: an index persisted by a build whose projection
+  // carried neither thumbnailKey nor kind, and no version stamp to reveal that it was stale.
+  const store = await projectBlobStore(TEMPLATES_STORE);
+  await store.setJSON(INDEX_KEY, {
+    projectId: "dr-lurie",
+    entries: [
+      {
+        templateId,
+        latestVersion: 1,
+        latestActiveVersion: null,
+        status: "draft",
+        renderer: "pdfme",
+        createdAt: "2026-08-01T00:00:00.000Z",
+      },
+    ],
+    updatedAt: "2026-08-01T00:00:00.000Z",
+  });
+
+  const listed = await listHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie" }),
+  });
+  assert.equal(listed.statusCode, 200, listed.body);
+  const entry = (JSON.parse(listed.body).templates as Array<Record<string, unknown>>).find(
+    (t) => t.templateId === templateId
+  );
+  assert.ok(entry, "the template must still be listed");
+  // The fields the tool description promises, restored from the authoritative per-template meta.
+  assert.equal(entry.thumbnailKey, null, "thumbnailKey is always projected, even as null");
+  assert.equal(entry.kind, "article");
+  assert.equal(entry.label, "Quarterly report", "a listing of opaque uuids cannot be chosen from");
+
+  // And the rebuilt index is stamped, so the next call is a single read again.
+  const rebuilt = (await store.get(INDEX_KEY, { type: "json" })) as { indexVersion?: number } | null;
+  assert.ok((rebuilt?.indexVersion ?? 0) >= 2, "the rebuilt index must carry its version");
 });

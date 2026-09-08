@@ -105,6 +105,9 @@ export interface PdfTemplateMeta {
   renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
+  /** Mirrored so templates can be told apart without a read per template: a listing of 25
+   * opaque uuids is not a listing anyone can choose a template from. */
+  label?: string;
   thumbnailKey: string | null;
   /** T1.7: mirrors the active version's PdfTemplateRecord.thumbnailError — see that field. */
   thumbnailError?: string;
@@ -123,6 +126,8 @@ export interface PdfTemplateListEntry {
   renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
+  /** See PdfTemplateMeta.label. */
+  label?: string;
   thumbnailKey: string | null;
   /** T1.7: mirrors the active version's PdfTemplateRecord.thumbnailError — see that field. */
   thumbnailError?: string;
@@ -157,8 +162,25 @@ function metaKey(templateId: string): string {
  * transparently falls back to the old N+1 scan exactly once per project and then persists
  * the index it just built, so the fix applies without a migration step.
  */
+/**
+ * Bump whenever listEntryFromMeta starts projecting a field it did not project before.
+ *
+ * The index is PERSISTED, so without this an entry written by an older build is served
+ * forever: `site_platform` was still returning six-field entries — no `thumbnailKey`, no
+ * `kind` — long after those fields were added, because its index had been built once by an
+ * earlier version and nothing ever rebuilt it. The listing silently disagreed with its own
+ * documented shape, and no template could be chosen from it.
+ *
+ * A stale version re-runs the legacy scan this file already has for projects with no index
+ * at all, then persists the fresh projection — the same self-healing path, extended to "the
+ * index exists but predates the current shape".
+ */
+const PDF_TEMPLATE_INDEX_VERSION = 2;
+
 interface PdfTemplateIndex {
   projectId: string;
+  /** Absent on any index written before versioning shipped — treated as stale. */
+  indexVersion?: number;
   entries: PdfTemplateListEntry[];
   updatedAt: string;
 }
@@ -178,6 +200,7 @@ function listEntryFromMeta(meta: PdfTemplateMeta): PdfTemplateListEntry {
     ...(meta.renderDataSchemaSource !== undefined ? { renderDataSchemaSource: meta.renderDataSchemaSource } : {}),
     ...(meta.sampleData !== undefined ? { sampleData: meta.sampleData } : {}),
     ...(meta.kind !== undefined ? { kind: meta.kind } : {}),
+    ...(meta.label !== undefined ? { label: meta.label } : {}),
     thumbnailKey: meta.thumbnailKey ?? null,
     ...(meta.thumbnailError !== undefined ? { thumbnailError: meta.thumbnailError } : {}),
     createdAt: meta.createdAt
@@ -186,10 +209,15 @@ function listEntryFromMeta(meta: PdfTemplateMeta): PdfTemplateListEntry {
 
 async function upsertTemplateIndexEntry(store: ProjectBlobStoreLike, projectId: string, entry: PdfTemplateListEntry): Promise<void> {
   const existing = await store.get(indexKey(projectId), { type: "json" }).catch(() => null) as PdfTemplateIndex | null;
+  // Upserting onto a STALE index would put one current entry beside older, thinner ones and
+  // stamp the whole file current — freezing the stale entries in place for good. Leave it
+  // untouched instead: the meta write that precedes this call is authoritative, and the next
+  // list sees the stale version and rebuilds every entry from meta.
+  if (existing !== null && (existing.indexVersion ?? 0) < PDF_TEMPLATE_INDEX_VERSION) return;
   const entries = (existing?.entries ?? []).filter((candidate) => candidate.templateId !== entry.templateId);
   entries.push(entry);
   entries.sort((a, b) => a.templateId.localeCompare(b.templateId));
-  const index: PdfTemplateIndex = { projectId, entries, updatedAt: new Date().toISOString() };
+  const index: PdfTemplateIndex = { projectId, indexVersion: PDF_TEMPLATE_INDEX_VERSION, entries, updatedAt: new Date().toISOString() };
   await store.setJSON(indexKey(projectId), index);
 }
 
@@ -231,14 +259,16 @@ function templateSummaryMirror(source: {
   renderDataSchemaSource?: "author" | "derived";
   sampleData?: unknown;
   kind?: string;
+  label?: string;
   thumbnailKey?: string | null;
   thumbnailError?: string;
-}): Pick<PdfTemplateMeta, "renderDataSchema" | "renderDataSchemaSource" | "sampleData" | "kind" | "thumbnailKey" | "thumbnailError"> {
+}): Pick<PdfTemplateMeta, "renderDataSchema" | "renderDataSchemaSource" | "sampleData" | "kind" | "label" | "thumbnailKey" | "thumbnailError"> {
   return {
     ...(source.renderDataSchema !== undefined ? { renderDataSchema: source.renderDataSchema } : {}),
     ...(source.renderDataSchemaSource !== undefined ? { renderDataSchemaSource: source.renderDataSchemaSource } : {}),
     ...(source.sampleData !== undefined ? { sampleData: source.sampleData } : {}),
     ...(source.kind !== undefined ? { kind: source.kind } : {}),
+    ...(source.label !== undefined ? { label: source.label } : {}),
     thumbnailKey: source.thumbnailKey ?? null,
     ...(source.thumbnailError !== undefined ? { thumbnailError: source.thumbnailError } : {})
   };
@@ -403,14 +433,25 @@ export async function listPdfTemplates(projectId: string, options: { limit?: num
   }
 
   const existingIndex = await store.get(indexKey(projectId), { type: "json" }).catch(() => null) as PdfTemplateIndex | null;
+  const usable =
+    existingIndex !== null &&
+    existingIndex.projectId === projectId &&
+    (existingIndex.indexVersion ?? 0) >= PDF_TEMPLATE_INDEX_VERSION;
   let entries: PdfTemplateListEntry[];
-  if (existingIndex && existingIndex.projectId === projectId) {
+  if (usable) {
     entries = existingIndex.entries;
   } else {
+    // No index yet, or one written by a build that projected fewer fields. Either way the
+    // legacy scan rebuilds every entry from the authoritative per-template meta.
     entries = await scanTemplatesLegacy(store, projectId);
-    // Self-healing: persist the index we just built (best-effort) so every subsequent call
-    // for this project is a single read, without requiring a separate migration step.
-    await store.setJSON(indexKey(projectId), { projectId, entries, updatedAt: new Date().toISOString() } satisfies PdfTemplateIndex).catch(() => {});
+    await store
+      .setJSON(indexKey(projectId), {
+        projectId,
+        indexVersion: PDF_TEMPLATE_INDEX_VERSION,
+        entries,
+        updatedAt: new Date().toISOString(),
+      } satisfies PdfTemplateIndex)
+      .catch(() => {});
   }
 
   // Archived (disabled) templates are hidden from the default listing — they stop being
