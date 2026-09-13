@@ -21,6 +21,7 @@ import {
   type ProjectCapturePolicy,
 } from "./policy.js";
 import { AssetFetchError, callCaptureService, fetchAssetBytes, fetchCrawlText, type CaptureServiceScreenshot } from "./service-client.js";
+import { captureScreenshotFilename } from "./screenshot-artifacts.js";
 import {
   DEFAULT_CAPTURE_JOB_VIEWPORTS,
   updateCaptureJob,
@@ -244,9 +245,11 @@ async function initializeFrontier(job: CaptureJobRecord, policy: ProjectCaptureP
 }
 
 /** Screenshot filename under the canonical artifact layout, derived from its snapshot path
- * (`pages/<pageId>/<viewportId>/...`). */
+ * (`pages/<pageId>/<viewportId>/...`). The derivation itself lives in
+ * ./screenshot-artifacts.ts so the export read path (screenshot-export.ts) resolves the exact
+ * name this write path produced — see that module's header. */
 function screenshotFilename(screenshot: CaptureServiceScreenshot): string {
-  return screenshot.path.replace(/^pages\//, "").replaceAll("/", "-");
+  return captureScreenshotFilename(screenshot.path);
 }
 
 async function persistScreenshots(job: CaptureJobRecord, pageUrl: string, screenshots: CaptureServiceScreenshot[]): Promise<number> {
