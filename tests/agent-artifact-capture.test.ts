@@ -10,6 +10,8 @@ import { createCaptureJob, getCaptureJobStatus, getCaptureSnapshot } from "../ne
 import { createCaptureJobRecord, readCaptureJob, updateCaptureJob, validateCaptureJobRequest, type CaptureJobRequest } from "../netlify/lib/capture/jobs.js";
 import { HARD_MAX_CAPTURE_PAGES_PER_JOB, stablePageId, validateCapturePolicy, type ProjectCapturePolicy } from "../netlify/lib/capture/policy.js";
 import { captureStorageGrant } from "../netlify/lib/capture/storage.js";
+import { exportCaptureScreenshots } from "../netlify/lib/capture/screenshot-export.js";
+import { handler as exportCaptureScreenshotsHandler } from "../netlify/functions/export-capture-screenshots.js";
 import { grantBlobCredentials, isPdfToolOwnStorageGrant, parseStorageGrant, PDF_TOOL_OWN_STORAGE_GRANT_TYPE, PDF_TOOL_OWN_STORAGE_SENTINEL } from "../netlify/lib/storage-grant.js";
 import { fetchAssetBytes, type CaptureServicePageResult } from "../netlify/lib/capture/service-client.js";
 
@@ -839,4 +841,135 @@ test("get_capture_snapshot on a FAILED job is terminal and never tells the calle
   assert.equal(result.captureErrorCode, "CAPTURE_ROBOTS_UNAVAILABLE");
   assert.match(String(result.error), /terminal/i);
   assert.doesNotMatch(String(result.error), /until it is terminal/i);
+});
+
+// ── W2.1/G6-T0: the capture screenshot BYTES export ──────────────────────────────────────────
+//
+// The platform CI fidelity job (W2.1/G6-T1) renders the draft preview and scores it against the
+// SOURCE screenshots. Those bytes have always been persisted here and have never had a read path:
+// `get_agent_artifact_by_filename` hands back the ArtifactReference, nothing hands back what it
+// points at, so a scorer had one side of every pair missing and reported `visual 0 scored /
+// N unavailable` on every run. These tests pin the export path and — more importantly — the three
+// bounds that stop it being a general artifact-exfiltration endpoint.
+
+test("W2.1/G6-T0: a completed crawl's block screenshots export by their snapshot path, byte-exact", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED, { discoveredLinks: [ABOUT] }), [ABOUT]: pageFixture(ABOUT) } });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-export-1" }));
+  await invokeWorker(job.projectId, job.jobId);
+
+  const snapshot = await getCaptureSnapshot({ projectId: job.projectId, jobId: job.jobId });
+  assert.equal(snapshot.ok, true);
+  if (!snapshot.ok) return;
+  const paths = (snapshot.snapshot as { pages: Array<{ blocks: Array<{ screenshots: Array<{ path: string; kind: string }> }> }> }).pages
+    .flatMap((page) => page.blocks.flatMap((block) => block.screenshots))
+    .filter((shot) => shot.kind === "block")
+    .map((shot) => shot.path);
+  assert.ok(paths.length >= 2, `expected block screenshot paths in the snapshot, got ${paths.length}`);
+
+  const exported = await exportCaptureScreenshots({ projectId: job.projectId, jobId: job.jobId, paths });
+  assert.equal(exported.ok, true, JSON.stringify(exported));
+  if (!exported.ok) return;
+  assert.equal(exported.missing.length, 0, JSON.stringify(exported.missing));
+  assert.equal(exported.screenshots.length, paths.length);
+  assert.equal(exported.truncated, false);
+  assert.equal(exported.requestId, "req-export-1");
+  for (const shot of exported.screenshots) {
+    // Byte-exact: the fixture's PNG, its digest, and the digest the index recorded all agree.
+    assert.equal(shot.bytesBase64, pngBase64);
+    assert.equal(shot.sha256, pngSha256);
+    assert.equal(createHash("sha256").update(Buffer.from(shot.bytesBase64, "base64")).digest("hex"), pngSha256);
+    assert.equal(shot.contentType, "image/png");
+    // The path round-trips verbatim: the CI job writes each shot back at the path score.mjs's
+    // `evidencePath` resolves against, so a rename here would make every pair read `unavailable`.
+    assert.ok(paths.includes(shot.path));
+  }
+
+  // Addressable by requestId as well as jobId — the conductor holds the request id.
+  const byRequest = await exportCaptureScreenshots({ projectId: job.projectId, requestId: "req-export-1", paths: [paths[0]] });
+  assert.equal(byRequest.ok, true);
+  if (!byRequest.ok) return;
+  assert.equal(byRequest.jobId, job.jobId);
+  assert.equal(byRequest.screenshots[0].path, paths[0]);
+});
+
+test("W2.1/G6-T0: the export is bounded — no path escape, no non-screenshot artifact, no other project's job", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED) } });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-export-2" }));
+  await invokeWorker(job.projectId, job.jobId);
+
+  // 1. Paths may not escape the crawl's own namespace, and are refused before any store read.
+  for (const bad of ["../secrets.png", "/etc/passwd", "pages/../../x.png", "pages\\win.png"]) {
+    const refused = await exportCaptureScreenshots({ projectId: job.projectId, jobId: job.jobId, paths: [bad] });
+    assert.equal(refused.ok, false, `expected refusal for ${bad}`);
+    if (refused.ok) continue;
+    assert.equal(refused.errorCode, "CAPTURE_SCREENSHOT_PATH_INVALID");
+  }
+
+  // 2. A real artifact of this same request that is NOT tagged capture+screenshot is never served.
+  //    snapshot.v1 lives under the same requestId and is exactly the artifact a caller would try.
+  const notAScreenshot = await exportCaptureScreenshots({
+    projectId: job.projectId,
+    jobId: job.jobId,
+    paths: ["pages/snapshot.v1.json"],
+  });
+  assert.equal(notAScreenshot.ok, true);
+  if (!notAScreenshot.ok) return;
+  assert.equal(notAScreenshot.screenshots.length, 0);
+  assert.equal(notAScreenshot.missing.length, 1);
+  assert.ok(
+    ["screenshot_not_indexed_for_this_request", "artifact_is_not_a_capture_screenshot"].includes(notAScreenshot.missing[0].reason),
+    notAScreenshot.missing[0].reason
+  );
+
+  // 3. Another project cannot name this job.
+  const otherProject = await exportCaptureScreenshots({ projectId: "someone-else", jobId: job.jobId, paths: ["pages/x/desktop/blocks/y.png"] });
+  assert.equal(otherProject.ok, false);
+  if (otherProject.ok) return;
+  assert.equal(otherProject.errorCode, "CAPTURE_JOB_NOT_FOUND");
+
+  // Scope and shape refusals are named, never guessed at.
+  const noScope = await exportCaptureScreenshots({ projectId: job.projectId, paths: ["pages/a/desktop/blocks/b.png"] } as never);
+  assert.equal(noScope.ok, false);
+  if (noScope.ok) return;
+  assert.equal(noScope.errorCode, "CAPTURE_SCOPE_REQUIRED");
+
+  const noPaths = await exportCaptureScreenshots({ projectId: job.projectId, jobId: job.jobId, paths: [] });
+  assert.equal(noPaths.ok, false);
+  if (noPaths.ok) return;
+  assert.equal(noPaths.errorCode, "CAPTURE_SCREENSHOT_PATHS_REQUIRED");
+});
+
+test("W2.1/G6-T0: a byte budget pages rather than truncating silently, and the HTTP function refuses an unauthenticated caller", async () => {
+  setFixtures({ pages: { [SEED]: pageFixture(SEED, { discoveredLinks: [ABOUT] }), [ABOUT]: pageFixture(ABOUT) } });
+  const job = await createCaptureJobRecord(jobRequest({ requestId: "req-export-3" }));
+  await invokeWorker(job.projectId, job.jobId);
+  const snapshot = await getCaptureSnapshot({ projectId: job.projectId, jobId: job.jobId });
+  assert.equal(snapshot.ok, true);
+  if (!snapshot.ok) return;
+  const paths = (snapshot.snapshot as { pages: Array<{ blocks: Array<{ screenshots: Array<{ path: string; kind: string }> }> }> }).pages
+    .flatMap((page) => page.blocks.flatMap((block) => block.screenshots))
+    .filter((shot) => shot.kind === "block")
+    .map((shot) => shot.path);
+
+  // A budget of 1 byte still returns the first shot (never an empty page that would stall the
+  // export forever) and names the rest as remaining work.
+  const paged = await exportCaptureScreenshots({ projectId: job.projectId, jobId: job.jobId, paths, maxTotalBytes: 1 });
+  assert.equal(paged.ok, true);
+  if (!paged.ok) return;
+  assert.equal(paged.screenshots.length, 1);
+  assert.equal(paged.truncated, true);
+  assert.deepEqual(paged.remainingPaths, paths.slice(1));
+
+  // The HTTP surface is bearer-gated like every other pdf-tool function.
+  const unauthorized = await exportCaptureScreenshotsHandler({ httpMethod: "POST", headers: {}, body: "{}" });
+  assert.equal(unauthorized.statusCode, 401);
+  const wrongMethod = await exportCaptureScreenshotsHandler({ httpMethod: "DELETE", headers: AUTH, body: "{}" });
+  assert.equal(wrongMethod.statusCode, 405);
+  const viaHttp = await exportCaptureScreenshotsHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ projectId: job.projectId, jobId: job.jobId, paths: [paths[0]] }),
+  });
+  assert.equal(viaHttp.statusCode, 200, viaHttp.body);
+  assert.equal(JSON.parse(viaHttp.body).screenshots[0].sha256, pngSha256);
 });
