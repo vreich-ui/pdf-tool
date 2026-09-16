@@ -18,6 +18,8 @@ import {
   GRID_COLS,
   GRID_ROWS,
   PREVIEW_LONG_EDGE,
+  SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD,
+  SAFE_ZONE_MAX_CELL_BUSY,
   WORKING_SIZE,
   type LayoutHints,
 } from "../netlify/lib/image-annotate/analyze.js";
@@ -81,6 +83,68 @@ function allCellIds(hints: LayoutHints): string[] {
   return hints.grid.cells.map((cell) => cell.id);
 }
 
+/** A smooth left-bright/right-dark gradient (quiet everywhere: no high-frequency detail,
+ * so busy stays near 0 for every cell) with ONE deliberately busy cell — reproduces the
+ * shape of the 2026-09-16 live incident (docs/KNOWN_ISSUES.md KI-42): a mostly-quiet photo
+ * with one genuinely busy patch (a subject, a logo, foliage) somewhere in it. The bug this
+ * guards against was safeZones ranking the WHOLE CANVAS #1 by diluting that one busy patch
+ * into a passing average, and/or including it inside a large-but-"quiet-on-average"
+ * rectangle. `busyCellCol`/`busyCellRow` are 0-based grid coordinates (0..5). */
+async function buildQuietGradientWithBusyPatchPng(busyCellCol: number, busyCellRow: number): Promise<Buffer> {
+  const sharp = await sharpModule();
+  const width = FIXTURE_SIZE;
+  const height = FIXTURE_SIZE;
+  const channels = 3;
+  const data = Buffer.alloc(width * height * channels);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const value = Math.round(255 * (1 - x / (width - 1)));
+      const byteIndex = (y * width + x) * channels;
+      data[byteIndex] = value;
+      data[byteIndex + 1] = value;
+      data[byteIndex + 2] = value;
+    }
+  }
+  const cellSize = width / GRID_COLS; // FIXTURE_SIZE === WORKING_SIZE, evenly divisible by GRID_COLS/GRID_ROWS
+  const x0 = Math.round(busyCellCol * cellSize);
+  const x1 = Math.round((busyCellCol + 1) * cellSize);
+  const y0 = Math.round(busyCellRow * cellSize);
+  const y1 = Math.round((busyCellRow + 1) * cellSize);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const value = hashNoiseByte(x, y);
+      const byteIndex = (y * width + x) * channels;
+      data[byteIndex] = value;
+      data[byteIndex + 1] = value;
+      data[byteIndex + 2] = value;
+    }
+  }
+  return sharp(data, { raw: { width, height, channels } }).png().toBuffer();
+}
+
+/** How much of the SMALLER of the two rects' areas the intersection covers — a local mirror
+ * of analyze.ts's own (unexported) rectContainmentRatio, used here only to ASSERT the
+ * "no two returned zones nest" invariant from the outside, without depending on an internal
+ * export existing merely for tests to reach into. */
+function containmentRatio(a: { x: number; y: number; w: number; h: number }, b: { x: number; y: number; w: number; h: number }): number {
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+  const ix = Math.max(a.x, b.x);
+  const iy = Math.max(a.y, b.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix);
+  const ih = Math.max(0, iy2 - iy);
+  const intersection = iw * ih;
+  if (intersection <= 0) return 0;
+  const smallerArea = Math.min(a.w * a.h, b.w * b.h);
+  return smallerArea <= 0 ? 0 : intersection / smallerArea;
+}
+
+const FULL_CANVAS_RECT = { x: 0, y: 0, w: 1, h: 1 };
+
 test("analyzeLayout: flat side reads low busy, noisy side reads high busy", async () => {
   const png = await buildHalfFlatHalfNoisyPng();
   const hints = await analyzeLayout(png);
@@ -114,6 +178,78 @@ test("analyzeLayout: top safe zone lands on the flat side of a half-flat/half-no
     assert.ok(hints.safeZones[i - 1]!.score >= hints.safeZones[i]!.score, "safeZones must be sorted best-first");
   }
   assert.ok(hints.safeZones.length <= 5, "at most 5 safe zones");
+});
+
+// ---------------------------------------------------------------------------------------
+// KI-42 regression coverage (docs/KNOWN_ISSUES.md): safeZones ranked the WHOLE CANVAS #1
+// in production, with the rest of the ranked list nested supersets/subsets of each other.
+// ---------------------------------------------------------------------------------------
+
+test("analyzeLayout: the whole canvas is never a returned safe zone, on any image", async () => {
+  // A perfectly uniform image is the adversarial case for "never the whole canvas": with no
+  // busyness anywhere at all, the naive score (area * quietness * contrastHeadroom) is
+  // MAXIMIZED by the largest possible rect — the full canvas — so if the explicit exclusion
+  // were ever removed, this is the fixture that would immediately expose it.
+  const png = await buildUniformGreyPng(FIXTURE_SIZE, FIXTURE_SIZE);
+  const hints = await analyzeLayout(png);
+  for (const zone of hints.safeZones) {
+    assert.ok(
+      !(zone.rect.x === 0 && zone.rect.y === 0 && zone.rect.w === 1 && zone.rect.h === 1),
+      "the whole-canvas rect must never be returned as a safe zone"
+    );
+  }
+});
+
+test("analyzeLayout: a mostly-quiet image with one genuinely busy patch never returns a zone covering that patch (busyness ceiling)", async () => {
+  // Reproduces the shape of the live 2026-09-16 incident (KI-42): a mostly-quiet
+  // background (a smooth gradient — no high-frequency detail anywhere) with ONE
+  // deliberately busy cell, "C3" (col 2, row 2, 0-based). Before the fix, this exact shape
+  // let a large "quiet-on-average" rectangle spanning C3 out-score smaller, genuinely quiet
+  // sub-rects, because busyness was only ever diluted by area, never a hard disqualifier.
+  const busyCol = 2;
+  const busyRow = 2;
+  const png = await buildQuietGradientWithBusyPatchPng(busyCol, busyRow);
+  const hints = await analyzeLayout(png);
+
+  const busyCellRect = { x: busyCol / GRID_COLS, y: busyRow / GRID_ROWS, w: 1 / GRID_COLS, h: 1 / GRID_ROWS };
+  assert.ok(hints.safeZones.length > 0, "expected at least one safe zone even with a busy patch present");
+  for (const zone of hints.safeZones) {
+    const overlap = containmentRatio(busyCellRect, zone.rect); // fraction of the busy cell covered by this zone
+    assert.ok(overlap < 1e-9, `no returned safe zone may contain the deliberately busy cell C3, got zone ${JSON.stringify(zone.rect)} covering ${overlap * 100}% of it`);
+  }
+  // The busy cell is busier than the per-cell ceiling — sanity-check the fixture actually
+  // produced a cell over SAFE_ZONE_MAX_CELL_BUSY, so this test is exercising the ceiling
+  // and not passing vacuously because the fixture failed to reproduce a busy cell at all.
+  const busyCell = hints.grid.cells.find((c) => c.id === "C3")!;
+  assert.ok(busyCell.busy > SAFE_ZONE_MAX_CELL_BUSY, `fixture's C3 cell must read busier than SAFE_ZONE_MAX_CELL_BUSY (${SAFE_ZONE_MAX_CELL_BUSY}), got ${busyCell.busy}`);
+  // And rank-1 specifically must be a real, non-degenerate quiet sub-rect — not the whole
+  // canvas (impossible per the structural exclusion, but assert it anyway as documentation)
+  // and not a zero-score placeholder.
+  const top = hints.safeZones[0]!;
+  assert.ok(!(top.rect.x === FULL_CANVAS_RECT.x && top.rect.y === FULL_CANVAS_RECT.y && top.rect.w === FULL_CANVAS_RECT.w && top.rect.h === FULL_CANVAS_RECT.h));
+  assert.ok(top.score > 0, "rank-1 safe zone must have a positive score, not a degenerate placeholder");
+});
+
+test("analyzeLayout: no two returned safe zones nest (containment de-dup), across multiple fixtures", async () => {
+  const fixtures = [
+    { name: "half-flat/half-noisy", png: await buildHalfFlatHalfNoisyPng() },
+    { name: "gradient with busy patch at C3", png: await buildQuietGradientWithBusyPatchPng(2, 2) },
+    { name: "gradient with busy patch at A1", png: await buildQuietGradientWithBusyPatchPng(0, 0) },
+  ];
+
+  for (const { name, png } of fixtures) {
+    const hints = await analyzeLayout(png);
+    for (let i = 0; i < hints.safeZones.length; i++) {
+      for (let j = 0; j < hints.safeZones.length; j++) {
+        if (i === j) continue;
+        const ratio = containmentRatio(hints.safeZones[i]!.rect, hints.safeZones[j]!.rect);
+        assert.ok(
+          ratio < SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD,
+          `[${name}] returned zone ${i} (${JSON.stringify(hints.safeZones[i]!.rect)}) and zone ${j} (${JSON.stringify(hints.safeZones[j]!.rect)}) nest (containment ${ratio} >= ${SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD})`
+        );
+      }
+    }
+  }
 });
 
 test("analyzeLayout: grid names exactly A1..F6, once each", async () => {
