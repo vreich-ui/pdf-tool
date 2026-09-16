@@ -289,4 +289,67 @@ test("the repo's own seeded article_brochure_v1 renders its sampleData bare, and
   assert.deepEqual(result.data, fixture.sampleData);
   assert.deepEqual(result.normalized, []);
   assert.doesNotThrow(() => precheckChromiumTemplateAssets(fixture.templateJson, result.data, fixture.sampleAssets));
+
+  // …and all FIVE of its image references are gated, not just the two written in `html`.
+  // `sections[].figure.assetId` is written inside the `section` PARTIAL, which is not in
+  // `templateJson.html` at all — a source scan of the html left it checked by nothing, so a
+  // full-URL value there doubled exactly as before the ruling, silently, on a "complete" job.
+  const doubledSections = structuredClone(fixture.sampleData) as { sections: Array<{ figure?: { assetId: string } }> };
+  for (const section of doubledSections.sections) {
+    if (section.figure) section.figure.assetId = assetVirtualUrl(section.figure.assetId);
+  }
+  assertRefusal(
+    () => precheckChromiumTemplateAssets(fixture.templateJson, doubledSections, fixture.sampleAssets),
+    "ASSET_REFERENCE_DOUBLED",
+    /sections\[\]\.figure\.assetId/
+  );
+  const undeclaredSections = structuredClone(fixture.sampleData) as { sections: Array<{ figure?: { assetId: string } }> };
+  for (const section of undeclaredSections.sections) {
+    if (section.figure) section.figure.assetId = "no-such-asset";
+  }
+  assertRefusal(
+    () => precheckChromiumTemplateAssets(fixture.templateJson, undeclaredSections, fixture.sampleAssets),
+    "ASSET_MISSING",
+    /sections\[\]\.figure\.assetId/
+  );
+});
+
+test("srcset: EVERY candidate is the start of its own URL, so every one is a `value` slot", () => {
+  // A list-valued attribute holds one URL per comma-separated entry. Classifying the whole
+  // text to the left of a slot made the SECOND candidate `composed` — silently dropped from
+  // normalization, so `{{ large }}` reached chromium as a bare id it cannot fetch while
+  // `{{ small }}` reached it as a virtual URL.
+  const templateJson = { html: '<img src="{{ small }}" srcset="{{ small }} 1x, {{ large }} 2x">' };
+  const assets = {
+    images: [
+      { assetId: "shot-small", dataUri: "data:image/png;base64,iVBORw0KGgo=" },
+      { assetId: "shot-large", dataUri: "data:image/png;base64,iVBORw0KGgo=" },
+    ],
+  };
+  const forms = new Map(
+    deriveRenderDataSchema(templateJson, "chromium").slots.filter((slot) => slot.kind === "imageRef").map((slot) => [slot.path, slot.form])
+  );
+  assert.deepEqual([...forms.entries()].sort(), [["large", "value"], ["small", "value"]]);
+
+  const result = normalizeImageSlotValues(templateJson, "chromium", { small: "shot-small", large: "shot-large" }, assets);
+  assert.deepEqual(result.data, { small: assetVirtualUrl("shot-small"), large: assetVirtualUrl("shot-large") });
+  assert.deepEqual([...result.normalized].sort(), ["large", "small"]);
+
+  // …and the comma rule is `srcset`-ONLY. A comma is an ordinary character inside a single
+  // URL: `src="data:image/png;base64,{{ bytes }}"` is a live fleet idiom (template 54726321)
+  // and must stay `composed`, or the normalizer splices a virtual URL into a data URI.
+  const dataUri = { html: '<img src="data:image/png;base64,{{ bytes }}"><style>.a{background:url(data:image/png;base64,{{ bytes }})}</style>' };
+  assert.equal(deriveRenderDataSchema(dataUri, "chromium").slots.find((slot) => slot.path === "bytes")?.form, "composed");
+  assert.deepEqual(
+    normalizeImageSlotValues(dataUri, "chromium", { bytes: "shot-small" }, assets),
+    { data: { bytes: "shot-small" }, normalized: [] }
+  );
+
+  // The prefixed spelling of the same list is still prefixed, per candidate.
+  const prefixed = { html: '<img srcset="https://render.assets.invalid/{{ small }} 1x, https://render.assets.invalid/{{ large }} 2x">' };
+  const prefixedForms = new Map(
+    deriveRenderDataSchema(prefixed, "chromium").slots.filter((slot) => slot.kind === "imageRef").map((slot) => [slot.path, slot.form])
+  );
+  assert.deepEqual([...prefixedForms.entries()].sort(), [["large", "prefixed"], ["small", "prefixed"]]);
+  assert.deepEqual(normalizeImageSlotValues(prefixed, "chromium", { small: "shot-small", large: "shot-large" }, assets).normalized, []);
 });

@@ -14,33 +14,34 @@
  * `https://render.assets.invalid/https://render.assets.invalid/cover`.
  *
  * So the form is DECLARED BY THE TEMPLATE'S OWN SOURCE, and this module is the only place
- * that reads that declaration. Two callers, one rule:
+ * that reads that declaration. It is read EXACTLY ONCE, by the contract deriver:
+ * derive-render-data-schema.ts walks the Liquid AST and asks `imageSlotFormAt(source, begin)`
+ * for every output tag — `begin` is liquidjs's own token offset, so the answer is read from
+ * the exact characters preceding the `{{`, inside `{% render %}` partials as well as the root
+ * template, and through `{% assign %}` aliases and filter chains. The answer rides on the
+ * derived contract as `x-slotForm` / `DerivedSlot.form`, and BOTH render-time passes read it
+ * from there: image-slots.ts normalizes only `"value"` slots, asset-precheck.ts gates only
+ * `"prefixed"` (and `"mixed"`) ones.
  *
- *   - derive-render-data-schema.ts walks the Liquid AST and asks `imageSlotFormAt(source,
- *     begin)` for every output tag — `begin` is liquidjs's own token offset, so the answer is
- *     read from the exact characters preceding the `{{`, inside partials as well as the root
- *     template. The answer rides on the derived contract (`x-slotForm`), and image-slots.ts
- *     normalizes ONLY `"value"` slots.
- *   - asset-precheck.ts keeps its documented regex approach (no HTML parser, no AST) and uses
- *     `PREFIXED_SLOT_SOURCE_RE` over the template's `html`.
- *
- * EQUIVALENCE (the two tests, and exactly where they differ). Both encode the same rule:
- * the text between the start of the attribute value (or of one comma-separated `srcset`
- * entry, or of the `url()` argument) and the `{{` is EXACTLY `RENDER_ASSET_ORIGIN_PREFIX`.
- * `PREFIXED_VALUE_TAIL` tests it against the captured value prefix; `PREFIXED_SLOT_SOURCE_RE`
- * tests the same literal against raw source with the same value-start boundary class. For a
- * plain `{{ path }}` output (trim markers allowed, no filters) written immediately after the
- * origin in an image-bearing position, the two identify the SAME slot. They differ in two
- * bounded, deliberately safe ways:
- *   - the regex also matches the origin+`{{ }}` OUTSIDE an image-bearing attribute (an
- *     `href=`, a `{% raw %}` block). The deriver types no image slot there, so the normalizer
- *     never touches it; all the precheck can then do is insist on the bare-assetId form the
- *     whole fleet uses anyway. Form 1 (`ASSET_HOST_RE`) has the same plain-text reach.
- *   - the regex does NOT match a filtered output (`{{ cover | default: '' }}`), which the
- *     deriver DOES classify as prefixed. The precheck stays silent there — under-reporting,
- *     exactly as it already does for the same shape in form 2.
- * Neither side can ever CONTRADICT the other: the precheck never demands a URL where the
- * normalizer leaves a bare id, nor the reverse.
+ * ONE DETECTOR, NOT TWO — the 2026-09-16 correction. The first cut of this module also
+ * published `PREFIXED_SLOT_SOURCE_RE`, a raw-source regex the precheck used instead of the
+ * derived form, on the argument that the two spellings were equivalent up to two bounded,
+ * safe differences. They were not:
+ *   - the regex matched the origin+`{{ }}` OUTSIDE any image-bearing attribute — inside an
+ *     `<!-- comment -->`, a `{% raw %}` block, a `<script>` island, an `href=`, or ordinary
+ *     prose — where the deriver rightly types no image slot at all. Every one of those was a
+ *     NEW refusal (`ASSET_MISSING` / `ASSET_REFERENCE_DOUBLED`) of a template that rendered
+ *     fine before, which is a regression for a working tenant, not a bonus check.
+ *   - the regex read the slot's path out of the raw source, so a path that is a LOOP OR HASH
+ *     LOCAL — `{{ section.figure.assetId }}` inside `{% render 'section', section: section %}`,
+ *     which is how the fleet's own `article_brochure_v1` writes three of its five image
+ *     references — was looked up as `data.section.figure.assetId`, found absent, and skipped.
+ *     Combined with the precheck scanning `html` only (partial sources live in
+ *     `templateJson.assets.partials`), a prefixed slot inside a partial was gated by nothing:
+ *     the exact doubling this ruling exists to stop, silently, on a job reporting `complete`.
+ * The deriver already resolves both — position AND scope — so the precheck asks it rather
+ * than re-deriving a weaker answer from the same characters. The two passes cannot disagree
+ * because there is no longer a second opinion to disagree with.
  */
 
 /** The virtual origin the render service serves a job's declared assets from. */
@@ -64,55 +65,72 @@ export type ImageSlotForm = "value" | "prefixed" | "composed" | "mixed";
 export const IMAGE_CONTEXT_LOOKBEHIND = 200;
 
 /**
- * An unclosed image-bearing attribute value. Group 1/2/3 capture the value text ALREADY
- * WRITTEN before the output tag (double-quoted, single-quoted, unquoted).
+ * An unclosed image-bearing attribute value. Group 1 is the attribute NAME (only `srcset` is
+ * list-valued — see `lastSrcsetCandidateOf`); groups 2/3/4 capture the value text ALREADY WRITTEN
+ * before the output tag (double-quoted, single-quoted, unquoted).
  */
-const IMAGE_ATTRIBUTE_TAIL = /(?:\bsrc|\bsrcset|\bposter|\bdata-src|\bxlink:href)\s*=\s*(?:"([^"]*)|'([^']*)|([^\s"'>]*))$/i;
-/** An unclosed CSS `url(` argument, same three capture shapes. */
+const IMAGE_ATTRIBUTE_TAIL = /\b(src|srcset|poster|data-src|xlink:href)\s*=\s*(?:"([^"]*)|'([^']*)|([^\s"'>]*))$/i;
+/** An unclosed CSS `url(` argument, same three value shapes. */
 const CSS_URL_TAIL = /\burl\(\s*(?:"([^"]*)|'([^']*)|([^)"']*))$/i;
 
 /**
- * The value prefix must be the origin and nothing else — either at the start of the value, or
- * at the start of one entry of a list-valued attribute (`srcset="…/{{a}} 1x, …/{{b}} 2x"`).
- * Anchored at BOTH ends on purpose: `https://cdn.example.com/https://render.assets.invalid/`
- * is not a prefixed slot, it is a composed one, and quietly treating it as prefixed would put
- * this module back in the business of guessing.
+ * The ENTRY prefix must be the origin and nothing else. Anchored at BOTH ends on purpose:
+ * `https://cdn.example.com/https://render.assets.invalid/` is not a prefixed slot, it is a
+ * composed one, and quietly treating it as prefixed would put this module back in the
+ * business of guessing.
  */
-const PREFIXED_VALUE_TAIL = /(?:^|[\s,])https:\/\/render\.assets\.invalid\/$/;
-
-/**
- * The PREFIXED form as it appears in raw template source: the origin, written by the template
- * itself at a value-start boundary, immediately followed by a plain `{{ slot }}` output.
- * Group 1 is the slot's dotted path. The boundary class is the raw-source spelling of
- * `PREFIXED_VALUE_TAIL`'s `(?:^|[\s,])` — a quote, an `(`, an `=` or whitespace/comma is
- * where an attribute value (or one `srcset` entry) begins. No `\s*` between the `/` and the
- * `{{`: a space there is a space in a URL, which `PREFIXED_VALUE_TAIL` does not accept either.
- */
-export const PREFIXED_SLOT_SOURCE_RE = /(?:^|[\s,"'(=])https:\/\/render\.assets\.invalid\/\{\{-?\s*([\w.]+)\s*-?\}\}/g;
+const PREFIXED_VALUE_TAIL = /^https:\/\/render\.assets\.invalid\/$/;
 
 /** Author error, in the template source itself: the origin written in front of another one,
  * or in front of a data URI. No data can fix this, so it is caught from the source alone. */
 export const DOUBLED_LITERAL_SOURCE_RE = /render\.assets\.invalid\/(?:https?:\/\/|data:)/i;
 
-/** The value text already written before an output tag at `begin`, or undefined when that
- * position is not an image position at all. */
-function imageValuePrefixAt(source: string, begin: number): string | undefined {
+/** Where an output tag at `begin` sits: the value text already written in front of it, and
+ * whether the attribute holding it is list-valued. `undefined` when that position is not an
+ * image position at all. */
+function imageValuePositionAt(source: string, begin: number): { valuePrefix: string; listValued: boolean } | undefined {
   if (typeof source !== "string" || typeof begin !== "number" || begin <= 0) return undefined;
   const tail = source.slice(Math.max(0, begin - IMAGE_CONTEXT_LOOKBEHIND), begin);
-  const match = IMAGE_ATTRIBUTE_TAIL.exec(tail) ?? CSS_URL_TAIL.exec(tail);
-  if (!match) return undefined;
-  return match[1] ?? match[2] ?? match[3] ?? "";
+  const attribute = IMAGE_ATTRIBUTE_TAIL.exec(tail);
+  if (attribute) {
+    return {
+      valuePrefix: attribute[2] ?? attribute[3] ?? attribute[4] ?? "",
+      listValued: attribute[1]!.toLowerCase() === "srcset",
+    };
+  }
+  const cssUrl = CSS_URL_TAIL.exec(tail);
+  if (cssUrl) return { valuePrefix: cssUrl[1] ?? cssUrl[2] ?? cssUrl[3] ?? "", listValued: false };
+  return undefined;
+}
+
+/**
+ * `srcset` — and ONLY `srcset` — holds one URL per comma-separated candidate
+ * (`srcset="a.png 1x, b.png 2x"`), so there "what did the template write in front of this
+ * slot" is a question about the slot's own candidate, not about everything to its left.
+ * Without this, `srcset="{{ small }} 1x, {{ large }} 2x"` typed `small` as `value` and
+ * `large` as `composed`, and the second candidate silently stopped being normalized.
+ *
+ * Applied to `src=`/`url(...)` it would be actively WRONG: a comma is an ordinary character
+ * inside a single URL, and `src="data:image/png;base64,{{ bytes }}"` — a live fleet idiom —
+ * would flip from `composed` to `value` and have a virtual URL spliced into the middle of a
+ * data URI. (A `data:` URI written inside a `srcset` candidate is the one shape this still
+ * gets wrong; it was never handled and is not a form any template in the fleet uses.)
+ */
+function lastSrcsetCandidateOf(valuePrefix: string): string {
+  const comma = valuePrefix.lastIndexOf(",");
+  return comma < 0 ? valuePrefix : valuePrefix.slice(comma + 1);
 }
 
 /**
  * Classifies the attribute-value text a template wrote before an image slot.
  *
  * Leading whitespace inside the value is not part of the URL (`src=" {{x}}"` binds the whole
- * value), so it is trimmed before the decision — but a space between the origin and the `{{`
- * is NOT, because that would be a space inside the URL the template is assembling.
+ * value, `srcset="a 1x, {{x}} 2x"` the whole second candidate), so it is trimmed before the
+ * decision — but a space between the origin and the `{{` is NOT, because that would be a
+ * space inside the URL the template is assembling.
  */
-export function classifyImageSlotValuePrefix(valuePrefix: string): ImageSlotForm {
-  const trimmed = valuePrefix.trimStart();
+export function classifyImageSlotValuePrefix(valuePrefix: string, listValued = false): ImageSlotForm {
+  const trimmed = (listValued ? lastSrcsetCandidateOf(valuePrefix) : valuePrefix).trimStart();
   if (trimmed.length === 0) return "value";
   if (PREFIXED_VALUE_TAIL.test(trimmed)) return "prefixed";
   return "composed";
@@ -124,9 +142,9 @@ export function classifyImageSlotValuePrefix(valuePrefix: string): ImageSlotForm
  * `undefined` is exactly the old `isImageContext(...) === false`.
  */
 export function imageSlotFormAt(source: string, begin: number): ImageSlotForm | undefined {
-  const prefix = imageValuePrefixAt(source, begin);
-  if (prefix === undefined) return undefined;
-  return classifyImageSlotValuePrefix(prefix);
+  const position = imageValuePositionAt(source, begin);
+  if (position === undefined) return undefined;
+  return classifyImageSlotValuePrefix(position.valuePrefix, position.listValued);
 }
 
 /** One answer for a slot the template uses in several positions. Disagreement is reported as

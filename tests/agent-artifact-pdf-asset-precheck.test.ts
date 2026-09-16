@@ -209,10 +209,75 @@ test("form 3: absent, null and \"\" all mean 'no image' and are not this gate's 
   }
 });
 
-test("form 3: a loop local is absent at the root, so a prefixed slot inside {% for %} is left alone", () => {
+test("form 3: a prefixed slot inside {% for %} is checked PER ROW, under its derived path", () => {
+  // `{{ item.image }}` is a LOOP LOCAL: `data.item.image` does not exist, so a source regex
+  // reading the path out of the template can only ever skip it. The form declaration comes
+  // from the contract deriver instead, which resolves it to `gallery[].image` — so every row
+  // is checked, and the slot is named the way the derived contract names it.
   const templateJson = { html: '{% for item in gallery %}<img src="https://render.assets.invalid/{{ item.image }}"/>{% endfor %}' };
-  const data = { gallery: [{ image: "shot-1" }, { image: "shot-2" }] };
-  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, data, { images: [{ assetId: "shot-1", dataUri: "data:image/png;base64,AA==" }] }));
+  const declared = { images: [{ assetId: "shot-1", dataUri: "data:image/png;base64,AA==" }] };
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "shot-1" }] }, declared));
+  // A SECOND row naming an undeclared asset is caught too — before, neither row was.
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "shot-1" }, { image: "shot-2" }] }, declared),
+    ["gallery[].image"]
+  );
+  // …and a doubled reference in any row names the slot exactly ONCE, not once per row.
+  assertDoubled(
+    () =>
+      precheckChromiumTemplateAssets(
+        templateJson,
+        { gallery: [{ image: "https://render.assets.invalid/shot-1" }, { image: "data:image/png;base64,AA==" }] },
+        declared
+      ),
+    ["gallery[].image"]
+  );
+  // An empty collection, and a row that simply has no image, are still "no image".
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [] }, declared));
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "" }, {}] }, declared));
+});
+
+test("form 3: the origin written OUTSIDE an image position is not a slot, and never a refusal", () => {
+  // A source regex over the raw html matched all four of these and refused the render — a
+  // template that had rendered fine for as long as it existed. The deriver types no image
+  // slot in any of them, so none is gated (image-slot-form.ts, "ONE DETECTOR, NOT TWO").
+  const declared = { images: [{ assetId: "cover-1", dataUri: "data:image/png;base64,AA==" }] };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['<p>Bind images as https://render.assets.invalid/{{ assetId }}</p>', { assetId: "/img/req_1/abc.webp" }],
+    ['{% raw %}<img src="https://render.assets.invalid/{{ cover }}">{% endraw %}<p>{{ body }}</p>', { cover: "no-such-asset", body: "x" }],
+    ['<a href="https://render.assets.invalid/{{ doc }}">download</a>', { doc: "https://cdn.example.com/x.pdf" }],
+    ['<script>var u = "https://render.assets.invalid/{{ cover }}";</script><p>{{ body }}</p>', { cover: "no-such-asset", body: "x" }],
+  ];
+  for (const [html, data] of cases) {
+    assert.doesNotThrow(() => precheckChromiumTemplateAssets({ html }, data, declared), html);
+  }
+});
+
+test("form 3: a prefixed slot written in a {% render %} PARTIAL is gated like any other", () => {
+  // Three of the fleet seed `article_brochure_v1`'s five image references live in a partial,
+  // and partial sources are not in `templateJson.html` at all — so a scan of the html gated
+  // none of them, and a full-URL value there doubled silently on a job reporting `complete`.
+  const templateJson = {
+    html: "{% for section in sections %}{% render 'figure', section: section %}{% endfor %}",
+    assets: { partials: { figure: '<img src="https://render.assets.invalid/{{ section.figure.assetId }}">' } },
+  };
+  const declared = { images: [{ assetId: "figure-1", dataUri: "data:image/png;base64,AA==" }] };
+  assert.doesNotThrow(() =>
+    precheckChromiumTemplateAssets(templateJson, { sections: [{ figure: { assetId: "figure-1" } }] }, declared)
+  );
+  assertDoubled(
+    () =>
+      precheckChromiumTemplateAssets(
+        templateJson,
+        { sections: [{ figure: { assetId: "https://render.assets.invalid/figure-1" } }] },
+        declared
+      ),
+    ["sections[].figure.assetId"]
+  );
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(templateJson, { sections: [{ figure: { assetId: "no-such-asset" } }] }, declared),
+    ["sections[].figure.assetId"]
+  );
 });
 
 test("form 3: the doubled literal in the template SOURCE is refused whatever the data says", () => {

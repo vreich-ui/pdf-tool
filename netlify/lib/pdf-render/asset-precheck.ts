@@ -32,31 +32,28 @@
  *      9c7ca40e, 2026-09-15). Both are checked here now: a reference-shaped value is a typed
  *      `ASSET_REFERENCE_DOUBLED`, an undeclared bare id joins form 1's `ASSET_MISSING`.
  *
- * WHICH SLOTS ARE PREFIXED is decided in exactly one place, image-slot-form.ts, so that this
- * gate and the render-time normalizer (image-slots.ts, which must NOT expand a prefixed slot)
- * can never disagree. That module's header proves the equivalence of its two spellings — the
- * AST-position classifier the deriver uses and `PREFIXED_SLOT_SOURCE_RE` used here — and
- * names the two bounded, one-directional ways they differ.
+ * WHICH SLOTS ARE PREFIXED is decided in exactly one place — the contract deriver, through
+ * image-slot-form.ts — so that this gate and the render-time normalizer (image-slots.ts,
+ * which must NOT expand a prefixed slot) can never disagree. Form 3 below reads that derived
+ * `form` rather than re-deriving one; see `prefixedImageSlotPaths` and image-slot-form.ts's
+ * header for the two things a second, source-regex opinion got wrong (it refused templates
+ * over a `{{ }}` in a comment or a `{% raw %}` block, and it could not resolve a slot written
+ * inside a `{% render %}` partial, which is where three of `article_brochure_v1`'s five image
+ * references live).
  *
- * PARSING APPROACH: a narrow regex, not the liquidjs parse tree. liquidjs's parser produces
- * an AST for the Liquid *language* but carries no notion of HTML/CSS structure — whether a
- * `{{coverImage}}` output sits inside an `src="..."` attribute vs. inside ordinary prose is
- * exactly the position context the parse tree doesn't expose, and that distinction is the
- * whole reason form 2 is "this must resolve to a fetchable URL" rather than an ordinary text
- * binding. Recovering it would mean layering a real HTML parser on top (a new dependency,
- * ruled out) or hand-rolling one over liquidjs's tokens — more machinery than two bounded
- * regexes over `src="..."`/`url(...)` for a well-understood defect shape. Form 1 (the literal
- * `render.assets.invalid` host) is likewise a plain string search, not a Liquid construct, so
- * it gets the same treatment.
+ * PARSING APPROACH, forms 1 and 2: a narrow regex, not the liquidjs parse tree. Form 1 (the
+ * literal `render.assets.invalid` host) is a plain string, not a Liquid construct at all.
+ * Form 2 needs to know that a `{{coverImage}}` output is the WHOLE value of an `src="..."`
+ * rather than ordinary prose, and a bounded regex over `src="..."`/`url(...)` answers that
+ * for a well-understood defect shape without layering an HTML parser on top (a new
+ * dependency, ruled out). Form 3 no longer has to: the deriver already joined Liquid AST
+ * position to HTML position when it classified the slot, and that answer is on the contract.
  */
+import { deriveRenderDataSchema } from "./derive-render-data-schema.js";
 import { RenderError } from "./errors.js";
-import {
-  DOUBLED_LITERAL_SOURCE_RE,
-  PREFIXED_SLOT_SOURCE_RE,
-  RENDER_ASSET_ORIGIN_PREFIX,
-  referenceShapeOf,
-} from "./image-slot-form.js";
+import { DOUBLED_LITERAL_SOURCE_RE, RENDER_ASSET_ORIGIN_PREFIX, referenceShapeOf } from "./image-slot-form.js";
 import { collectDeclaredAssetIds } from "./job-assets.js";
+import { atEachLeaf, parseSlotPath } from "./slot-paths.js";
 
 const ASSET_HOST_RE = /https:\/\/render\.assets\.invalid\/([A-Za-z0-9._~%-]+)/g;
 /** `src="{{slot}}"` / `src='{{ slot }}'` — the ENTIRE attribute value, nothing else. */
@@ -124,6 +121,38 @@ function isAbsent(value: unknown): boolean {
  */
 function isAbsentForPrefixedSlot(value: unknown): boolean {
   return isAbsent(value) || value === "";
+}
+
+/**
+ * The slots this template writes `https://render.assets.invalid/` in front of ITSELF, as
+ * derived slot paths — the same per-slot `form` declaration image-slots.ts normalizes by, read
+ * from the same place (image-slot-form.ts, via the contract deriver) so the two can never
+ * drift apart.
+ *
+ * `mixed` is included: a slot written prefixed in one position and bare in another still has a
+ * prefixed position, so a reference-shaped value there IS doubled at that position. (Its other
+ * position fails form 2 in the same call, which is the honest answer — see the `mixed` note
+ * the deriver emits.)
+ *
+ * A template the deriver cannot read yields nothing and is gated by forms 1 and 2 alone:
+ * refusing to classify is a legitimate answer (deriveRenderDataSchema never throws for
+ * template content), and inventing a weaker classification here is exactly what this change
+ * removes. The deriver is already run twice on this same templateJson immediately before this
+ * precheck (fillOptionalSlots, normalizeImageSlotValues — see render.ts); a third parse of an
+ * already-parsed Liquid string is not worth threading the derived result through three
+ * signatures to avoid.
+ */
+function prefixedImageSlotPaths(templateJson: unknown): string[] {
+  let derived: ReturnType<typeof deriveRenderDataSchema>;
+  try {
+    derived = deriveRenderDataSchema(templateJson, "chromium");
+  } catch {
+    return [];
+  }
+  if (!derived.supported) return [];
+  return derived.slots
+    .filter((slot) => slot.kind === "imageRef" && (slot.form === "prefixed" || slot.form === "mixed"))
+    .map((slot) => slot.path);
 }
 
 /** One doubled reference, named by SLOT and by the SHAPE of the value — never by the value
@@ -204,24 +233,38 @@ export function precheckChromiumTemplateAssets(
   // Form 3: `https://render.assets.invalid/{{ slot }}` — the template supplies the origin, so
   // the slot supplies the BARE assetId and nothing else.
   //
-  // `html` only, deliberately: `templateJson.css` is injected VERBATIM by the render service
-  // (assembleDocument), never Liquid-rendered, so a `{{ }}` written there is not a slot at
-  // all — the same rule derive-render-data-schema.ts applies, which is what keeps this gate
-  // and the normalizer looking at the same set. Forms 1 and 2 above scan html+css for
-  // historical reasons; that over-reach is not extended here.
-  const prefixedSlots = new Set<string>();
-  for (const match of html.matchAll(PREFIXED_SLOT_SOURCE_RE)) prefixedSlots.add(match[1]!);
-  for (const slot of prefixedSlots) {
-    const value = resolveDotPath(data, slot);
-    // Absent, or "" ⇒ no image (see isAbsentForPrefixedSlot); a loop local is absent too, the
-    // same W3 scope rule form 2 follows.
-    if (isAbsentForPrefixedSlot(value)) continue;
-    if (typeof value !== "string") { issues.add(slot); continue; }
-    const shape = referenceShapeOf(value);
-    if (shape) { doubled.push({ slot, valueShape: shape }); continue; }
-    // A bare value in a prefixed slot is an assetId, and is held to the same rule form 1's
-    // literal ids are: it must be one the job declared. Until now it was checked by nothing.
-    if (!declaredIds.has(value)) issues.add(slot);
+  // WHICH slots those are is NOT re-read from the source here: it is taken from the contract
+  // deriver's own per-slot `form`, the same declaration image-slots.ts normalizes by (see
+  // prefixedImageSlotPaths). That is what makes "the gate and the normalizer can never
+  // disagree" true rather than argued, and it is the only spelling that gets BOTH halves of
+  // the question right — the slot's HTML position (a `{% raw %}` block, a `{% comment %}`, a
+  // `<script>` island, an `href=` and ordinary prose are not image positions and are not
+  // gated; an HTML `<!-- -->` comment still is, because Liquid renders straight through one,
+  // exactly as for form 2) and its SCOPE (`sections[].figure.assetId`, not the loop-local
+  // `section.figure.assetId` a source regex reads and can never resolve).
+  const doubledSlots = new Set<string>();
+  for (const slotPath of prefixedImageSlotPaths(templateJson)) {
+    const steps = parseSlotPath(slotPath);
+    if (steps.length === 0) continue;
+    atEachLeaf(data, steps, (parent, key) => {
+      const value = parent[key];
+      // Absent, or "" ⇒ no image (see isAbsentForPrefixedSlot); an `{% if %}`-guarded
+      // optional is absent too, the same W3 scope rule form 2 follows.
+      if (isAbsentForPrefixedSlot(value)) return;
+      if (typeof value !== "string") { issues.add(slotPath); return; }
+      const shape = referenceShapeOf(value);
+      if (shape) {
+        // One row of a loop is enough to name the slot; a second must not name it twice.
+        if (!doubledSlots.has(slotPath)) {
+          doubledSlots.add(slotPath);
+          doubled.push({ slot: slotPath, valueShape: shape });
+        }
+        return;
+      }
+      // A bare value in a prefixed slot is an assetId, and is held to the same rule form 1's
+      // literal ids are: it must be one the job declared. Until now it was checked by nothing.
+      if (!declaredIds.has(value)) issues.add(slotPath);
+    });
   }
 
   // Doubling first: it names a mechanism error with a specific remedy, and telling a caller
