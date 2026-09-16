@@ -44,8 +44,48 @@ export const SAFE_ZONE_MAX_ZONES = 5;
 /** Greedy de-duplication threshold: a candidate safe zone whose IoU (intersection over
  * union, on the normalized 0-1 rects) with an already-accepted zone meets or exceeds this
  * is treated as a near-duplicate of it and dropped, so the top 5 aren't just nested/near-
- * identical crops of the same quiet corner. */
+ * identical crops of the same quiet corner. Kept alongside
+ * SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD (see below) because IoU alone under-catches: a small
+ * rect nested inside a much larger one has LOW IoU (the union is dominated by the larger
+ * rect) even though it is a pure geometric subset of it. */
 export const SAFE_ZONE_IOU_DEDUP_THRESHOLD = 0.45;
+
+/** A candidate safe zone whose intersection with an already-accepted zone covers at least
+ * this fraction of the SMALLER of the two rects' areas is treated as nested inside (or
+ * nesting) that zone and dropped. This is what actually guarantees "no two returned zones
+ * nest": IoU alone missed exactly this case in production — a `{0.333,0.333,0.667,0.667}`
+ * candidate sits entirely inside `{0,0,1,1}` (containment 1.0) but its IoU with it is only
+ * ~0.44, just under SAFE_ZONE_IOU_DEDUP_THRESHOLD, so the old dedup let both through as
+ * "distinct" safe zones — a caller reading the ranked list saw five nested crops of the same
+ * region, not five different places to put things. */
+export const SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD = 0.6;
+
+/** A candidate safe zone whose MEAN busyness (the average Sobel edge density across every
+ * cell it spans) exceeds this is disqualified outright, regardless of area or contrast.
+ * Without this ceiling, `score = area * (1 - meanBusy) * contrastHeadroom` lets a large
+ * enough rectangle dilute a busy patch below the eye: the full 6x6 canvas averages EVERY
+ * cell together, including genuinely busy ones, and area=1 alone can out-score a smaller,
+ * actually-quiet sub-rect. This is the root cause of the live regression this constant
+ * fixes (2026-09-16): a real safeZones response ranked the WHOLE CANVAS `{0,0,1,1}` #1 —
+ * "the safe place to put text" resolved to "anywhere", which is not a placement hint. */
+export const SAFE_ZONE_MAX_MEAN_BUSY = 0.02;
+
+/** Independent of the mean-busy ceiling above: a candidate containing any SINGLE cell
+ * busier than this is disqualified even if enough quiet cells around it would otherwise
+ * dilute the mean under SAFE_ZONE_MAX_MEAN_BUSY. This is what keeps one genuinely busy
+ * region (a face, a logo, dense foliage) from hiding inside an otherwise-quiet rectangle
+ * just because the rectangle is large. Set higher than SAFE_ZONE_MAX_MEAN_BUSY on purpose —
+ * it is a backstop against dilution, not the primary quality gate. */
+export const SAFE_ZONE_MAX_CELL_BUSY = 0.035;
+
+/** A candidate safe zone whose per-cell luminance standard deviation exceeds this is
+ * disqualified: "quiet" (low busyness) is necessary but not sufficient for "a genuine place
+ * to put text" — a rectangle that averages a bright region against a dark one can have low
+ * edge density (no fine detail) and still offer no single consistent background color to
+ * pick a readable overlay color against. This is the "minimum contrast-consistency" half of
+ * the fix, distinct from contrastHeadroom (which only checks how far the MEAN sits from
+ * middle grey, and says nothing about how much the individual cells vary around that mean). */
+export const SAFE_ZONE_MAX_LUM_STDDEV = 0.16;
 
 /** Per-channel quantization levels for the dominant-color palette (levels^3 buckets total).
  * Fixed-bucket quantization is used instead of k-means/sampling specifically because it is
@@ -80,7 +120,17 @@ export interface NormalizedRect {
 
 export interface SafeZone {
   rect: NormalizedRect;
-  /** area * (1 - busy) * contrastHeadroom — see scoreSafeZoneCandidate. Higher is better. */
+  /** area * (1 - busy) * contrastHeadroom — see scoreSafeZoneCandidate. Always in [0, 1]:
+   * `area` is a fraction of the full canvas (0-1), `(1 - meanBusy)` is 0 (maximally busy) ..
+   * 1 (perfectly flat), and `contrastHeadroom` is 0 (mean luminance at middle grey, 0.5) ..
+   * 1 (mean luminance at a pure black/white extreme). Higher is better. A returned zone is
+   * ALWAYS a genuine quiet region, never the full canvas: candidates are screened before
+   * scoring against SAFE_ZONE_MAX_MEAN_BUSY (mean busyness ceiling), SAFE_ZONE_MAX_CELL_BUSY
+   * (no single busy cell hiding inside a diluted average) and SAFE_ZONE_MAX_LUM_STDDEV
+   * (the zone must be one consistent background, not an average of a bright and a dark
+   * region), and the whole-canvas rect is never even considered a candidate. The returned
+   * list is also nesting-free: no returned zone's rect is (near-)fully contained in
+   * another's — see SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD. */
   score: number;
 }
 
@@ -251,12 +301,37 @@ function rectIntersectionOverUnion(a: NormalizedRect, b: NormalizedRect): number
   return union <= 0 ? 0 : intersection / union;
 }
 
-/** Every axis-aligned rectangle expressible as a contiguous span of grid cells, scored by
- * area * (1 - busy) * contrastHeadroom, then greedily de-duplicated by IoU so the returned
- * top-5 aren't just nested crops of the same quiet corner. There are
+/** How much of the SMALLER of the two rects' areas the intersection covers, in [0, 1]. A
+ * value at or near 1 means the smaller rect is (near-)fully nested inside the larger one —
+ * the case plain IoU under-catches when the two rects' areas are very different (see
+ * SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD's doc comment for the exact production example). */
+function rectContainmentRatio(a: NormalizedRect, b: NormalizedRect): number {
+  const ax2 = a.x + a.w;
+  const ay2 = a.y + a.h;
+  const bx2 = b.x + b.w;
+  const by2 = b.y + b.h;
+  const ix = Math.max(a.x, b.x);
+  const iy = Math.max(a.y, b.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix);
+  const ih = Math.max(0, iy2 - iy);
+  const intersection = iw * ih;
+  if (intersection <= 0) return 0;
+  const smallerArea = Math.min(a.w * a.h, b.w * b.h);
+  return smallerArea <= 0 ? 0 : intersection / smallerArea;
+}
+
+/** Every axis-aligned rectangle expressible as a contiguous span of grid cells (EXCLUDING
+ * the full canvas itself — see SAFE_ZONE_MAX_MEAN_BUSY's doc comment for why that rect is
+ * never even a candidate), scored by area * (1 - busy) * contrastHeadroom after being
+ * screened against SAFE_ZONE_MAX_MEAN_BUSY / SAFE_ZONE_MAX_CELL_BUSY / SAFE_ZONE_MAX_LUM_STDDEV,
+ * then greedily de-duplicated by IoU AND containment (SAFE_ZONE_IOU_DEDUP_THRESHOLD,
+ * SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD) so the returned top-5 are neither near-identical
+ * crops of the same quiet corner nor nested supersets/subsets of one another. There are
  * (GRID_COLS choose 2 + GRID_COLS) * (GRID_ROWS choose 2 + GRID_ROWS) = 21 * 21 = 441
- * candidates at the default 6x6 grid — cheap to enumerate exhaustively rather than
- * heuristically search. */
+ * candidates at the default 6x6 grid (441 including the excluded full-canvas rect) — cheap
+ * to enumerate exhaustively rather than heuristically search. */
 function findSafeZones(cells: GridCell[]): SafeZone[] {
   const byId = new Map<string, GridCell>();
   for (const cell of cells) byId.set(cell.id, cell);
@@ -266,21 +341,43 @@ function findSafeZones(cells: GridCell[]): SafeZone[] {
     for (let colEnd = colStart; colEnd < GRID_COLS; colEnd++) {
       for (let rowStart = 0; rowStart < GRID_ROWS; rowStart++) {
         for (let rowEnd = rowStart; rowEnd < GRID_ROWS; rowEnd++) {
+          // The whole canvas is never a "safe zone": it is the absence of a placement hint,
+          // not a placement hint, and it necessarily averages in whatever busy cells the
+          // image has — see SAFE_ZONE_MAX_MEAN_BUSY's doc comment for the live incident this
+          // guards against.
+          if (colStart === 0 && rowStart === 0 && colEnd === GRID_COLS - 1 && rowEnd === GRID_ROWS - 1) continue;
+
           let sumBusy = 0;
           let sumLum = 0;
+          let maxBusy = 0;
           let count = 0;
+          const lums: number[] = [];
           for (let col = colStart; col <= colEnd; col++) {
             for (let row = rowStart; row <= rowEnd; row++) {
               const cell = byId.get(cellId(col, row));
               if (!cell) continue;
               sumBusy += cell.busy;
               sumLum += cell.lum;
+              maxBusy = Math.max(maxBusy, cell.busy);
+              lums.push(cell.lum);
               count++;
             }
           }
           if (count === 0) continue;
           const meanBusy = sumBusy / count;
           const meanLum = sumLum / count;
+
+          // Screen: a "safe zone" must be a genuinely quiet, consistent region, not merely
+          // one that scores well once busyness is diluted across a large enough area.
+          if (meanBusy > SAFE_ZONE_MAX_MEAN_BUSY) continue;
+          if (maxBusy > SAFE_ZONE_MAX_CELL_BUSY) continue;
+          if (count > 1) {
+            let sumSquaredDeviation = 0;
+            for (const lum of lums) sumSquaredDeviation += (lum - meanLum) * (lum - meanLum);
+            const lumStdDev = Math.sqrt(sumSquaredDeviation / count);
+            if (lumStdDev > SAFE_ZONE_MAX_LUM_STDDEV) continue;
+          }
+
           const rect: NormalizedRect = {
             x: colStart / GRID_COLS,
             y: rowStart / GRID_ROWS,
@@ -303,7 +400,11 @@ function findSafeZones(cells: GridCell[]): SafeZone[] {
   const accepted: SafeZoneCandidate[] = [];
   for (const candidate of candidates) {
     if (accepted.length >= SAFE_ZONE_MAX_ZONES) break;
-    const overlapsExisting = accepted.some((zone) => rectIntersectionOverUnion(zone.rect, candidate.rect) >= SAFE_ZONE_IOU_DEDUP_THRESHOLD);
+    const overlapsExisting = accepted.some(
+      (zone) =>
+        rectIntersectionOverUnion(zone.rect, candidate.rect) >= SAFE_ZONE_IOU_DEDUP_THRESHOLD ||
+        rectContainmentRatio(zone.rect, candidate.rect) >= SAFE_ZONE_CONTAINMENT_DEDUP_THRESHOLD
+    );
     if (overlapsExisting) continue;
     accepted.push(candidate);
   }
