@@ -566,3 +566,65 @@ test("create_agent_artifact_job: failOnQualityGate is accepted on the request an
     globalThis.fetch = realFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// One unresolved reference is ONE finding, and a finding never quotes a non-id
+// ---------------------------------------------------------------------------
+//
+// Live on dr-lurie, job 9c7ca40e (2026-09-15): one unresolved hero produced TWO
+// UNRESOLVED_IMAGE findings — `Image asset "https://render.assets.invalid/cover"` and
+// `Image asset "https"` — because the engine's two warnings about the same reference
+// identified differently and neither candidate was checked against the assetId grammar.
+// An editor reading that goes looking for an asset called "https".
+
+test("a doubled virtual reference identifies by its asset id, so two warnings are one finding", () => {
+  const report = evaluateQualityGate({
+    pages: [{ index: 0, text: "cover page text that is long enough to not trip the blank check" }],
+    engineWarnings: [
+      'unresolved job asset: no asset named "https://render.assets.invalid/cover" was supplied for https://render.assets.invalid/https://render.assets.invalid/cover',
+      "image did not finish decoding before capture and may be incomplete in the output: https://render.assets.invalid/https://render.assets.invalid/cover",
+    ],
+  });
+
+  const unresolved = report.findings.filter((finding) => finding.code === "UNRESOLVED_IMAGE");
+  assert.equal(unresolved.length, 1, JSON.stringify(unresolved));
+  assert.match(unresolved[0]!.detail, /Image asset "cover"/);
+});
+
+test("a finding never quotes a URL fragment as an asset id", () => {
+  const report = evaluateQualityGate({
+    pages: [{ index: 0, text: "cover page text that is long enough to not trip the blank check" }],
+    engineWarnings: [
+      "image did not finish decoding before capture and may be incomplete in the output: https://render.assets.invalid/https://render.assets.invalid/cover",
+    ],
+  });
+
+  const unresolved = report.findings.filter((finding) => finding.code === "UNRESOLVED_IMAGE");
+  assert.equal(unresolved.length, 1);
+  assert.doesNotMatch(unresolved[0]!.detail, /"https"/);
+  assert.doesNotMatch(unresolved[0]!.detail, /render\.assets\.invalid/);
+});
+
+test("an ordinary single-segment reference is unchanged", () => {
+  const report = evaluateQualityGate({
+    pages: [{ index: 0, text: "cover page text that is long enough to not trip the blank check" }],
+    engineWarnings: [
+      'unresolved job asset: no asset named "cover" was supplied for https://render.assets.invalid/cover',
+    ],
+  });
+
+  const unresolved = report.findings.filter((finding) => finding.code === "UNRESOLVED_IMAGE");
+  assert.equal(unresolved.length, 1);
+  assert.match(unresolved[0]!.detail, /Image asset "cover"/);
+});
+
+test("a blocked third-party host is still reported by host, not swallowed by the id grammar", () => {
+  const report = evaluateQualityGate({
+    pages: [{ index: 0, text: "cover page text that is long enough to not trip the blank check" }],
+    engineWarnings: ["blocked network request: https://images.example.com/hero.jpg"],
+  });
+
+  const unresolved = report.findings.filter((finding) => finding.code === "UNRESOLVED_IMAGE");
+  assert.equal(unresolved.length, 1);
+  assert.match(unresolved[0]!.detail, /host "images\.example\.com"/);
+});

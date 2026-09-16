@@ -128,18 +128,60 @@ const UNRESOLVED_IMAGE_WARNINGS: RegExp[] = [
 /** `https://render.assets.invalid/<assetId>` — the engine's virtual asset origin. */
 const VIRTUAL_ASSET_URL = /https?:\/\/render\.assets\.invalid\/(?!__fonts\/)([A-Za-z0-9._~%+-]+)/i;
 const NAMED_ASSET = /no asset named "([^"]{1,120})"/i;
+/**
+ * pdf-tool's own assetId grammar (`^[a-zA-Z0-9._-]{1,128}$`, the shape every template's
+ * `$defs/assetId` declares). A candidate that does not satisfy it is NOT an asset id, whatever
+ * position it was found in.
+ *
+ * This guard exists because a finding is READ BY AN EDITOR. Quoting a fragment of a URL back at
+ * someone as "Image asset "https"" tells them nothing and sends them looking for an asset by that
+ * name. Observed on dr-lurie (job 9c7ca40e): one unresolved hero produced two findings, one
+ * quoting a whole URL and one quoting the scheme.
+ */
+const ASSET_ID_GRAMMAR = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * The LAST path segment of a virtual-asset URL, which is the id the engine was actually asked for.
+ *
+ * `lastPathSegment` rather than the first, because a doubled reference —
+ * `https://render.assets.invalid/https://render.assets.invalid/cover`, produced when a slot value
+ * already carries the virtual prefix that the template also writes — must identify as `cover` and
+ * not as `https`. Two warnings about one doubled reference then agree on one key and produce one
+ * finding instead of two.
+ */
+function assetIdFromReference(candidate: string): string | undefined {
+  if (ASSET_ID_GRAMMAR.test(candidate)) return candidate;
+  const segments = candidate.split(/[/?#]/).filter((segment) => segment.length > 0);
+  const last = segments[segments.length - 1];
+  return last && ASSET_ID_GRAMMAR.test(last) ? last : undefined;
+}
 /** A trailing "(slotName)" attribution, e.g. `blocked request: <url> (coverImage)`. */
 const TRAILING_SLOT = /\(([A-Za-z_][A-Za-z0-9._-]{0,63})\)\s*$/;
 const ABSOLUTE_URL = /\b[a-z][a-z0-9+.-]*:\/\/([^/\s"'<>)\]]+)/i;
 
 /** The only things a finding may quote out of an engine warning: an asset id, or a bare host. */
 function identifyUnresolvedReference(warning: string): { assetId?: string; host?: string } {
+  // Each candidate is run through the id grammar rather than trusted for having matched a
+  // pattern. A warning whose quoted name is itself a URL (the engine prints the path it was
+  // asked for, which is not always a bare id) resolves to the id inside it, and a candidate
+  // that is no id at all falls through to the next form instead of being quoted as one.
   const named = NAMED_ASSET.exec(warning)?.[1];
-  if (named) return { assetId: named };
+  const namedId = named ? assetIdFromReference(named) : undefined;
+  if (namedId) return { assetId: namedId };
+  // The WHOLE virtual reference first, then its first segment. Order matters: on a doubled
+  // reference (`.../https://render.assets.invalid/cover`) the first segment is the scheme
+  // `https`, which satisfies the id grammar and would be quoted as an asset name. Taking the
+  // whole remainder and reducing it to its last segment yields `cover` from both spellings, so
+  // the engine's two warnings about one reference agree on one key.
+  const wholeVirtual = /https?:\/\/render\.assets\.invalid\/(?!__fonts\/)(\S+)/i.exec(warning)?.[1];
+  const wholeVirtualId = wholeVirtual ? assetIdFromReference(wholeVirtual.replace(/["'<>)\]]+$/, "")) : undefined;
+  if (wholeVirtualId) return { assetId: wholeVirtualId };
   const virtual = VIRTUAL_ASSET_URL.exec(warning)?.[1];
-  if (virtual) return { assetId: virtual };
+  const virtualId = virtual ? assetIdFromReference(virtual) : undefined;
+  if (virtualId) return { assetId: virtualId };
   const slot = TRAILING_SLOT.exec(warning)?.[1];
-  if (slot) return { assetId: slot };
+  const slotId = slot ? assetIdFromReference(slot) : undefined;
+  if (slotId) return { assetId: slotId };
   const host = ABSOLUTE_URL.exec(warning)?.[1];
   if (host && host !== "render.assets.invalid") return { host };
   return {};
