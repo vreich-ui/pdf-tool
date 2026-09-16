@@ -12,7 +12,11 @@
  * HONESTY RULE (BRIEF: "a schema that lies is worse than a schema that shrugs"). Every
  * inference here is either structurally certain or deliberately loose:
  *   - a slot that is only ever OUTPUT (`{{ x }}`)                  -> required string
- *   - a slot interpolated inside `src=`/`srcset=`/CSS `url(`       -> string, image reference
+ *   - a slot interpolated inside `src=`/`srcset=`/CSS `url(`       -> string, image reference,
+ *     carrying the FORM the template wrote it in (`x-slotForm`: does the template already
+ *     write `https://render.assets.invalid/` in front of it?) — see image-slot-form.ts. The
+ *     data contract is the same either way, "send the bare assetId"; the form is what tells
+ *     the render-time normalizer whether that id still needs the prefix.
  *   - a slot only ever seen under `{% if %}`/`{% unless %}`/`{% case %}` (including in the
  *     condition itself, which is a presence test)                  -> the same type, OPTIONAL
  *   - `{% for x in items %}`                                       -> `items` is an array,
@@ -41,6 +45,7 @@
 import { Liquid } from "liquidjs";
 import { resolvePdfRenderer } from "./default-renderer.js";
 import { validateDocTree } from "./doc-tree/validate.js";
+import { imageSlotFormAt, mergeImageSlotForms, RENDER_ASSET_ORIGIN_PREFIX, type ImageSlotForm } from "./image-slot-form.js";
 import type { JSONSchema } from "./render-data-schema.js";
 import type { PdfRendererId } from "./types.js";
 
@@ -57,6 +62,14 @@ export interface DerivedSlot {
   required: boolean;
   /** Set when the slot was emitted loose (no `type`) — says what could not be inferred. */
   note?: string;
+  /**
+   * `kind: "imageRef"` on a source-position renderer (chromium) only: how the TEMPLATE writes
+   * the URL around this slot — see image-slot-form.ts. This is the per-slot declaration the
+   * render-time normalizer reads, so that a slot the template already prefixed with
+   * `https://render.assets.invalid/` is left bare instead of being prefixed twice. Absent for
+   * pdfme (its image fields have no surrounding source at all).
+   */
+  form?: ImageSlotForm;
 }
 
 export interface DeriveRenderDataSchemaResult {
@@ -94,6 +107,9 @@ interface SlotNode {
   item?: SlotNode;
   usedAsScalar: boolean;
   usedAsImage: boolean;
+  /** Every image POSITION this slot was seen in, as image-slot-form.ts classifies them. More
+   * than one distinct entry means the template contradicts itself — see `mergeImageSlotForms`. */
+  imageForms?: Set<ImageSlotForm>;
   usedAsArray: boolean;
   /** The slot was read in a truthiness test (`{% if %}` / `{% unless %}`) rather than printed. */
   usedAsCondition: boolean;
@@ -150,16 +166,9 @@ const LEADING_IDENT = /^[A-Za-z_$][\w$-]*/;
 const PATH_SEGMENT = /\.([A-Za-z_$][\w$-]*)|\[\s*(\d+)\s*\]|\[\s*'([^']*)'\s*\]|\[\s*"([^"]*)"\s*\]/g;
 
 /** A slot lands in an image position when the source immediately before it is an unclosed
- * image-bearing attribute value or an unclosed CSS `url(`. */
-const IMAGE_ATTRIBUTE_TAIL = /(?:\bsrc|\bsrcset|\bposter|\bdata-src|\bxlink:href)\s*=\s*(?:"[^"]*|'[^']*|[^\s"'>]*)$/i;
-const CSS_URL_TAIL = /\burl\(\s*(?:"[^"]*|'[^']*|[^)"']*)$/i;
-const IMAGE_CONTEXT_LOOKBEHIND = 200;
-
-function isImageContext(source: string, begin: number): boolean {
-  if (typeof source !== "string" || typeof begin !== "number" || begin <= 0) return false;
-  const tail = source.slice(Math.max(0, begin - IMAGE_CONTEXT_LOOKBEHIND), begin);
-  return IMAGE_ATTRIBUTE_TAIL.test(tail) || CSS_URL_TAIL.test(tail);
-}
+ * image-bearing attribute value or an unclosed CSS `url(` — and WHICH image position it lands
+ * in (does the template already write the render-asset origin in front of it?) is the same
+ * question, answered once, in image-slot-form.ts. */
 
 /** Every property-access token reachable from a liquidjs Value/Expression/token, flattened.
  * Covers `{{ a.b | filter: c }}` (initial + filter args) and bare tokens (`{% for x in y %}`
@@ -269,9 +278,12 @@ function markUse(node: SlotNode, scope: WalkScope): void {
   if (!scope.conditional) node.requiredHere = true;
 }
 
-function recordScalarUse(node: SlotNode, scope: WalkScope, image: boolean): void {
+function recordScalarUse(node: SlotNode, scope: WalkScope, imageForm: ImageSlotForm | undefined): void {
   node.usedAsScalar = true;
-  if (image) node.usedAsImage = true;
+  if (imageForm) {
+    node.usedAsImage = true;
+    (node.imageForms ??= new Set()).add(imageForm);
+  }
   markUse(node, scope);
 }
 
@@ -323,7 +335,11 @@ function walkNode(node: LiquidNode, scope: WalkScope, state: DeriveState): void 
     const tokens: LiquidNode[] = [];
     collectPathTokens(node.value, tokens);
     const token = node.token as LiquidNode | undefined;
-    const image = isImageContext(String(token?.input ?? ""), Number(token?.begin ?? -1));
+    // `token.input` is the source this output was PARSED from — the root html, or the
+    // partial's own source when the walk is inside `{% render %}`/`{% include %}` — and
+    // `token.begin` points at the `{{` even when it is written `{{-`. So the position read
+    // here is always the characters the template actually wrote in front of this slot.
+    const image = imageSlotFormAt(String(token?.input ?? ""), Number(token?.begin ?? -1));
     // `{{ x | default: 'y' }}` is the author saying, in the template itself, that x may be
     // absent — so the slot is typed but NOT required.
     const scope2 = hasDefaultFilter(node.value) ? childScope(scope, { conditional: true }) : scope;
@@ -350,7 +366,7 @@ function walkNode(node: LiquidNode, scope: WalkScope, state: DeriveState): void 
       let first = true;
       for (const pathToken of tokens) {
         const slot = resolveToken(pathToken, scope, state);
-        if (slot) { if (first) recordScalarUse(slot, scope, false); else markUse(slot, scope); }
+        if (slot) { if (first) recordScalarUse(slot, scope, undefined); else markUse(slot, scope); }
         first = false;
       }
       return;
@@ -496,19 +512,46 @@ function walkPartial(node: LiquidNode, scope: WalkScope, state: DeriveState): vo
 // Emission: slot tree -> JSON Schema + sampleData
 // ---------------------------------------------------------------------------
 
-const IMAGE_DESCRIPTIONS: Record<string, string> = {
-  chromium:
-    "Image reference (not prose): the template interpolates this slot inside an `src=` attribute or a CSS `url()`. " +
-    "Supply the BARE assetId of an entry declared in the render job's `assets.images` — pdf-tool normalizes it to the " +
-    "virtual URL \"https://render.assets.invalid/<assetId>\" that the renderer serves and the referenced-asset precheck " +
-    "matches. That full URL is also accepted verbatim, and a `data:` URI is inlined as-is. A site-relative path or an " +
-    "http(s) URL cannot be fetched by the renderer and renders as a broken image.",
-  pdfme:
-    "Image reference (not prose): this is a pdfme `image` field. Supply a `data:<mime>;base64,...` data URI — pdfme templates do not support the job's assets.images.",
+/**
+ * ONE data contract, whichever idiom the template is written in: send the BARE assetId of an
+ * entry declared in the render job's `assets.images`. What differs per form is only what
+ * pdf-tool does with it on the way to the renderer, and what else it will accept — so each
+ * form says that in its own words rather than describing an average of the two.
+ */
+const CHROMIUM_IMAGE_DESCRIPTIONS: Record<ImageSlotForm, string> = {
+  value:
+    "Image reference (not prose): the template interpolates this slot as the ENTIRE value of an `src=` attribute or a " +
+    "CSS `url()`. Supply the BARE assetId of an entry declared in the render job's `assets.images` — pdf-tool " +
+    `normalizes it to the virtual URL "${RENDER_ASSET_ORIGIN_PREFIX}<assetId>" that the renderer serves and the ` +
+    "referenced-asset precheck matches. That full URL is also accepted verbatim, and a `data:` URI is inlined as-is. " +
+    "A site-relative path or an http(s) URL cannot be fetched by the renderer and renders as a broken image.",
+  prefixed:
+    `Image reference (not prose): the template already writes "${RENDER_ASSET_ORIGIN_PREFIX}" in front of this slot, so ` +
+    "the slot carries ONLY the BARE assetId of an entry declared in the render job's `assets.images` — pdf-tool does " +
+    "NOT normalize it, because the prefix is already there. A full URL or a `data:` URI here is REFUSED before the " +
+    `render (ASSET_REFERENCE_DOUBLED): it would be concatenated onto the template's own prefix, producing ` +
+    `"${RENDER_ASSET_ORIGIN_PREFIX}https://…". An assetId the job does not declare fails with ASSET_MISSING; an empty ` +
+    "string means \"no image\" and is left to the template's own `{% if %}` guard.",
+  composed:
+    "Image reference (not prose): the template builds the image URL AROUND this slot — it writes text before the " +
+    `\`{{ }}\` that is not "${RENDER_ASSET_ORIGIN_PREFIX}" — so this slot is a FRAGMENT of that URL, not a whole ` +
+    "reference. pdf-tool neither normalizes nor prechecks it: supply exactly the fragment the template's own URL " +
+    `expects, remembering that only "${RENDER_ASSET_ORIGIN_PREFIX}<assetId>" (an entry in the render job's ` +
+    "`assets.images`) and `data:` URIs are fetchable by the renderer at all.",
+  mixed:
+    "Image reference (not prose): this template uses the slot in TWO different image positions — once as the whole " +
+    `\`src=\`/\`url()\` value and once after a literal "${RENDER_ASSET_ORIGIN_PREFIX}" the template writes itself. No ` +
+    "single value can satisfy both, so pdf-tool leaves the slot alone and every render fails one position or the " +
+    "other (ASSET_REFERENCE_DOUBLED or ASSET_MISSING). Fix the TEMPLATE — write the slot the same way everywhere — " +
+    "then supply the BARE assetId of an entry in the render job's `assets.images`.",
 };
 
-function imageDescriptionFor(renderer: PdfRendererId): string {
-  return IMAGE_DESCRIPTIONS[renderer] ?? IMAGE_DESCRIPTIONS.chromium!;
+const PDFME_IMAGE_DESCRIPTION =
+  "Image reference (not prose): this is a pdfme `image` field. Supply a `data:<mime>;base64,...` data URI — pdfme templates do not support the job's assets.images.";
+
+function imageDescriptionFor(renderer: PdfRendererId, form: ImageSlotForm | undefined): string {
+  if (renderer === "pdfme") return PDFME_IMAGE_DESCRIPTION;
+  return CHROMIUM_IMAGE_DESCRIPTIONS[form ?? "value"];
 }
 
 /** 1x1 transparent PNG — a real, decodable image so a derived sample renders. */
@@ -612,8 +655,21 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
   }
 
   if (node.usedAsImage) {
-    ctx.slots.push({ path, kind: "imageRef", required: isRequired(node) });
+    const form = mergeImageSlotForms(node.imageForms ?? []);
+    ctx.slots.push({ path, kind: "imageRef", required: isRequired(node), ...(form ? { form } : {}) });
     ctx.imageSlots.push(path);
+    if (form === "mixed") {
+      ctx.notes.push(
+        `\`${path}\` is written in two different image positions — once as a whole \`src=\`/\`url()\` value and once ` +
+          `after a literal "${RENDER_ASSET_ORIGIN_PREFIX}" — so no single value can satisfy both. Write the slot the ` +
+          "same way everywhere.",
+      );
+    } else if (form === "composed") {
+      ctx.notes.push(
+        `\`${path}\` is interpolated INSIDE a URL the template assembles itself, so it is a fragment rather than a ` +
+          "whole image reference: pdf-tool neither rewrites nor prechecks it.",
+      );
+    }
     let sample: string;
     if (ctx.renderer === "pdfme") {
       // pdfme has no job-asset channel: the data URI goes straight into the slot.
@@ -632,8 +688,13 @@ function emit(node: SlotNode, name: string, path: string, ctx: EmitContext): { s
       schema: {
         type: "string",
         minLength: 1,
-        description: imageDescriptionFor(ctx.renderer),
+        description: imageDescriptionFor(ctx.renderer, form),
         "x-slotKind": "imageRef",
+        // The per-slot DECLARATION of which idiom the template writes (image-slot-form.ts).
+        // image-slots.ts normalizes a bare assetId only for "value"; asset-precheck.ts refuses
+        // a doubled reference for "prefixed". Absent for pdfme, whose image fields have no
+        // surrounding template source to read a form from.
+        ...(form ? { "x-slotForm": form } : {}),
       },
       sample,
     };

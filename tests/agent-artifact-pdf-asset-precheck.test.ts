@@ -150,6 +150,150 @@ test("T1.3: a resolved {{slot}} src pointing at render.assets.invalid/ or a data
   );
 });
 
+// --- Form 3: the template writes the origin itself (2026-09-15 ruling) ------------------
+//
+// `<img src="https://render.assets.invalid/{{ coverImage }}">` is the shape BOTH regexes
+// above miss — form 1 needs an id character after the slash, form 2 needs the Liquid output
+// to be the whole attribute value. So a prefixed slot was checked for nothing at all: not for
+// a missing id, and not for the value that is itself a full reference and therefore gets the
+// origin prefixed onto it twice (dr-lurie job 9c7ca40e).
+
+const PREFIXED = { html: '{% if coverImage %}<img src="https://render.assets.invalid/{{ coverImage }}"/>{% endif %}<p>{{ body }}</p>' };
+const PREFIXED_ASSETS = { images: [{ assetId: "cover-1", dataUri: "data:image/png;base64,AA==" }] };
+
+function assertDoubled(fn: () => void, expectedSlots: string[]) {
+  assert.throws(fn, (err: Error & { code?: string; detail?: { issues?: string[]; doubled?: Array<{ slot: string; valueShape: string }> } }) => {
+    assert.equal(err.name, "RenderError");
+    assert.equal(err.code, "ASSET_REFERENCE_DOUBLED");
+    assert.deepEqual([...(err.detail?.issues ?? [])].sort(), [...expectedSlots].sort());
+    assert.ok((err.detail?.doubled ?? []).every((entry) => typeof entry.valueShape === "string" && entry.valueShape.length > 0));
+    // Same discipline as ASSET_MISSING: the message names the slot and the value's SHAPE,
+    // never the value (PR #91).
+    assert.ok(!/\/img\//.test(err.message), "message must not leak a site-relative asset path");
+    return true;
+  });
+}
+
+test("form 3: a bare DECLARED assetId in a prefixed slot passes — that IS the contract", () => {
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(PREFIXED, { body: "t", coverImage: "cover-1" }, PREFIXED_ASSETS));
+});
+
+test("form 3: a value that is already a reference is ASSET_REFERENCE_DOUBLED, not ASSET_MISSING", () => {
+  // The exact 2026-09-15 shape: the caller (or a normalizer blind to the prefix) wrote the
+  // virtual URL into a slot the template already prefixes.
+  assertDoubled(
+    () => precheckChromiumTemplateAssets(PREFIXED, { body: "t", coverImage: "https://render.assets.invalid/cover-1" }, PREFIXED_ASSETS),
+    ["coverImage"]
+  );
+  assertDoubled(
+    () => precheckChromiumTemplateAssets(PREFIXED, { body: "t", coverImage: "data:image/png;base64,AA==" }, PREFIXED_ASSETS),
+    ["coverImage"]
+  );
+});
+
+test("form 3: a bare id the job never declared is ASSET_MISSING, like any other reference", () => {
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(PREFIXED, { body: "t", coverImage: "no-such-asset" }, PREFIXED_ASSETS),
+    ["coverImage"]
+  );
+  // An object cannot be an assetId either.
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(PREFIXED, { body: "t", coverImage: { id: "cover-1" } }, PREFIXED_ASSETS),
+    ["coverImage"]
+  );
+});
+
+test("form 3: absent, null and \"\" all mean 'no image' and are not this gate's business", () => {
+  for (const data of [{ body: "t" }, { body: "t", coverImage: null }, { body: "t", coverImage: "" }]) {
+    assert.doesNotThrow(() => precheckChromiumTemplateAssets(PREFIXED, data, PREFIXED_ASSETS), JSON.stringify(data));
+  }
+});
+
+test("form 3: a prefixed slot inside {% for %} is checked PER ROW, under its derived path", () => {
+  // `{{ item.image }}` is a LOOP LOCAL: `data.item.image` does not exist, so a source regex
+  // reading the path out of the template can only ever skip it. The form declaration comes
+  // from the contract deriver instead, which resolves it to `gallery[].image` — so every row
+  // is checked, and the slot is named the way the derived contract names it.
+  const templateJson = { html: '{% for item in gallery %}<img src="https://render.assets.invalid/{{ item.image }}"/>{% endfor %}' };
+  const declared = { images: [{ assetId: "shot-1", dataUri: "data:image/png;base64,AA==" }] };
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "shot-1" }] }, declared));
+  // A SECOND row naming an undeclared asset is caught too — before, neither row was.
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "shot-1" }, { image: "shot-2" }] }, declared),
+    ["gallery[].image"]
+  );
+  // …and a doubled reference in any row names the slot exactly ONCE, not once per row.
+  assertDoubled(
+    () =>
+      precheckChromiumTemplateAssets(
+        templateJson,
+        { gallery: [{ image: "https://render.assets.invalid/shot-1" }, { image: "data:image/png;base64,AA==" }] },
+        declared
+      ),
+    ["gallery[].image"]
+  );
+  // An empty collection, and a row that simply has no image, are still "no image".
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [] }, declared));
+  assert.doesNotThrow(() => precheckChromiumTemplateAssets(templateJson, { gallery: [{ image: "" }, {}] }, declared));
+});
+
+test("form 3: the origin written OUTSIDE an image position is not a slot, and never a refusal", () => {
+  // A source regex over the raw html matched all four of these and refused the render — a
+  // template that had rendered fine for as long as it existed. The deriver types no image
+  // slot in any of them, so none is gated (image-slot-form.ts, "ONE DETECTOR, NOT TWO").
+  const declared = { images: [{ assetId: "cover-1", dataUri: "data:image/png;base64,AA==" }] };
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ['<p>Bind images as https://render.assets.invalid/{{ assetId }}</p>', { assetId: "/img/req_1/abc.webp" }],
+    ['{% raw %}<img src="https://render.assets.invalid/{{ cover }}">{% endraw %}<p>{{ body }}</p>', { cover: "no-such-asset", body: "x" }],
+    ['<a href="https://render.assets.invalid/{{ doc }}">download</a>', { doc: "https://cdn.example.com/x.pdf" }],
+    ['<script>var u = "https://render.assets.invalid/{{ cover }}";</script><p>{{ body }}</p>', { cover: "no-such-asset", body: "x" }],
+  ];
+  for (const [html, data] of cases) {
+    assert.doesNotThrow(() => precheckChromiumTemplateAssets({ html }, data, declared), html);
+  }
+});
+
+test("form 3: a prefixed slot written in a {% render %} PARTIAL is gated like any other", () => {
+  // Three of the fleet seed `article_brochure_v1`'s five image references live in a partial,
+  // and partial sources are not in `templateJson.html` at all — so a scan of the html gated
+  // none of them, and a full-URL value there doubled silently on a job reporting `complete`.
+  const templateJson = {
+    html: "{% for section in sections %}{% render 'figure', section: section %}{% endfor %}",
+    assets: { partials: { figure: '<img src="https://render.assets.invalid/{{ section.figure.assetId }}">' } },
+  };
+  const declared = { images: [{ assetId: "figure-1", dataUri: "data:image/png;base64,AA==" }] };
+  assert.doesNotThrow(() =>
+    precheckChromiumTemplateAssets(templateJson, { sections: [{ figure: { assetId: "figure-1" } }] }, declared)
+  );
+  assertDoubled(
+    () =>
+      precheckChromiumTemplateAssets(
+        templateJson,
+        { sections: [{ figure: { assetId: "https://render.assets.invalid/figure-1" } }] },
+        declared
+      ),
+    ["sections[].figure.assetId"]
+  );
+  assertAssetMissing(
+    () => precheckChromiumTemplateAssets(templateJson, { sections: [{ figure: { assetId: "no-such-asset" } }] }, declared),
+    ["sections[].figure.assetId"]
+  );
+});
+
+test("form 3: the doubled literal in the template SOURCE is refused whatever the data says", () => {
+  assertDoubled(() => precheckChromiumTemplateAssets({ html: '<img src="https://render.assets.invalid/https://render.assets.invalid/cover-1"/>' }, {}, PREFIXED_ASSETS), ["(template source)"]);
+});
+
+test("form 3: doubling is reported BEFORE a missing asset — the remedy for the two is different", () => {
+  const templateJson = {
+    html: '<img src="https://render.assets.invalid/{{ coverImage }}"/><img src="https://render.assets.invalid/{{ heroImage }}"/>',
+  };
+  assertDoubled(
+    () => precheckChromiumTemplateAssets(templateJson, { coverImage: "https://render.assets.invalid/cover-1", heroImage: "nope" }, PREFIXED_ASSETS),
+    ["coverImage"]
+  );
+});
+
 test("T1.3: a malformed (non-chromium-shaped) templateJson is left to the engine's own validation", () => {
   assert.doesNotThrow(() => precheckChromiumTemplateAssets({ notHtml: true }, {}, undefined));
   assert.doesNotThrow(() => precheckChromiumTemplateAssets(null, {}, undefined));
@@ -259,6 +403,57 @@ test("T1.3: renderPdfArtifact passes precheck and reaches actual dispatch when d
         templateId,
         data: { coverImage: "https://render.assets.invalid/cover-1" },
       }),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "RENDER_SERVICE_UNCONFIGURED");
+      return true;
+    }
+  );
+});
+
+test("2026-09-15: renderPdfArtifact refuses a doubled reference before ever reaching the render service", async () => {
+  const templateId = "asset-precheck-doubled";
+  // The live shape: the template writes the origin, the job declares the asset, and the
+  // caller (or a prefix-blind normalizer) put the full URL in the slot anyway.
+  const templateJson = { html: '<div class="page"><img src="https://render.assets.invalid/{{ coverImage }}"/></div>' };
+  await createHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId, templateJson, renderer: "chromium" }),
+  });
+  await seedPassedValidation(templateId);
+  await publishHandler({
+    httpMethod: "POST",
+    headers: AUTH,
+    body: JSON.stringify({ storage: STORAGE, projectId: "dr-lurie", templateId }),
+  });
+
+  // A real, decodable 1x1 PNG: the engine validates asset bytes before it dispatches, so a
+  // stub would fail with IMAGE_DECODE_ERROR and hide which gate actually refused the render.
+  const assets = {
+    images: [{
+      assetId: "cover",
+      dataUri: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    }],
+  };
+  await assert.rejects(
+    () =>
+      renderPdfArtifact({
+        projectId: "dr-lurie",
+        templateId,
+        data: { coverImage: "https://render.assets.invalid/cover" },
+        assets,
+      }),
+    (err: Error & { code?: string }) => {
+      assert.equal(err.code, "ASSET_REFERENCE_DOUBLED");
+      return true;
+    }
+  );
+
+  // The BARE id — the fleet's one data contract — gets past the precheck and on to dispatch
+  // (which fails with RENDER_SERVICE_UNCONFIGURED here, the suite's tripwire). Before this
+  // change the normalizer rewrote it to the virtual URL and the engine drew a broken image.
+  await assert.rejects(
+    () => renderPdfArtifact({ projectId: "dr-lurie", templateId, data: { coverImage: "cover" }, assets }),
     (err: Error & { code?: string }) => {
       assert.equal(err.code, "RENDER_SERVICE_UNCONFIGURED");
       return true;

@@ -77,6 +77,19 @@ export type RenderErrorCode =
    * the render is dispatched, so a broken-image render never gets to `status: "complete"` —
    * see asset-precheck.ts. */
   | "ASSET_MISSING"
+  /** 2026-09-15 image-slot-prefix ruling: a chromium template that writes
+   * `https://render.assets.invalid/` in front of a slot itself (form F3 — see
+   * image-slot-form.ts) was handed a value that is ALREADY a reference (that same virtual
+   * URL, a `data:` URI, or any absolute URL), so the render service would be asked for
+   * `https://render.assets.invalid/https://render.assets.invalid/<id>` and draw a
+   * broken-image box on a job that still reported `complete` (dr-lurie job 9c7ca40e). Also
+   * raised when the TEMPLATE SOURCE itself contains `render.assets.invalid/https://` — an
+   * authoring error no data can fix. The remedy is always the same: a prefixed slot carries
+   * the BARE assetId of an `assets.images[]` entry, nothing more. Raised by the
+   * referenced-asset precheck BEFORE dispatch (asset-precheck.ts), like ASSET_MISSING, and
+   * kept a SEPARATE code because "your asset is missing" is the wrong thing to tell a caller
+   * whose asset is present and whose value is merely one prefix too long. */
+  | "ASSET_REFERENCE_DOUBLED"
   /** T1.4/BRIEF ruling D-A: the rendered PDF's CONTENT failed the quality gate (blank pages,
    * unresolved images, unrendered tokens — see pdf-render/quality-gate.ts). This code is
    * raised ONLY for a job created with `failOnQualityGate: true`. The gate is warn-only by

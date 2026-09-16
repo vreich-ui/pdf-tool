@@ -334,16 +334,14 @@ test("publish => worker => thumbnailKey set, and the stored object is a readable
     const rendered = service.requests[0];
     assert.equal(rendered.path, "/render/chromium");
     assert.deepEqual((rendered.body.options as Record<string, unknown>).wantThumbnail, true);
-    // The engine receives the sampleData with its image slots NORMALIZED: bare assetId is the
-    // canonical authoring form, and pdf-tool rewrites it to the virtual URL the render service
-    // serves. Everything else must arrive untouched, and the stored fixture must not be mutated.
-    const expectedData = structuredClone(fixture.sampleData) as Record<string, any>;
-    expectedData.coverImage = "https://render.assets.invalid/cover-photo";
-    expectedData.brand.logo = "https://render.assets.invalid/brand-logo";
-    expectedData.sections.forEach((section: Record<string, any>, index: number) => {
-      if (section.figure) section.figure.assetId = `https://render.assets.invalid/section-photo-${index + 1}`;
-    });
-    assert.deepEqual(rendered.body.data, expectedData);
+    // The engine receives the sampleData EXACTLY as stored. Bare assetId is the canonical
+    // authoring form, and article_brochure_v1 writes `https://render.assets.invalid/` in front
+    // of every image slot ITSELF (`<img src="https://render.assets.invalid/{{ coverImage }}">`),
+    // so pdf-tool must NOT normalize those slots: rewriting them to the virtual URL here made
+    // the engine ask for `https://render.assets.invalid/https://render.assets.invalid/…` and
+    // draw a broken image on a thumbnail that still reported "generated" (the 2026-09-15
+    // doubling defect — this repo's own seed template hit it, not just dr-lurie's).
+    assert.deepEqual(rendered.body.data, fixture.sampleData);
     assert.equal((fixture.sampleData as Record<string, any>).coverImage, "cover-photo", "the fixture itself must not have been mutated");
     // REVIEW: "validation" is how the worker targets an exact VERSION; it must not reach the
     // ENGINE, where the same word means Liquid strictVariables (see
@@ -436,6 +434,12 @@ test("thumbnail render failure: worker reports failed, thumbnailKey stays null, 
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
+      // article_brochure_v1 writes `https://render.assets.invalid/` in front of every image
+      // slot itself, so its sampleData's bare assetIds are now prechecked against
+      // assets.images[] like any other reference (2026-09-15 ruling). Without them this
+      // render never reaches the service at all, and the failure under test is masked by an
+      // ASSET_MISSING that has nothing to do with it.
+      sampleAssets: fixture.sampleAssets,
     });
     await seedPassedValidation("thumb-renderfail");
 
@@ -466,6 +470,12 @@ test("render service returns a PDF but no thumbnail: worker reports failed, publ
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
+      // article_brochure_v1 writes `https://render.assets.invalid/` in front of every image
+      // slot itself, so its sampleData's bare assetIds are now prechecked against
+      // assets.images[] like any other reference (2026-09-15 ruling). Without them this
+      // render never reaches the service at all, and the failure under test is masked by an
+      // ASSET_MISSING that has nothing to do with it.
+      sampleAssets: fixture.sampleAssets,
     });
     await seedPassedValidation("thumb-nopng");
 
@@ -544,8 +554,11 @@ test("a sampleAssets entry that resolves to nothing fails the thumbnail loudly, 
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
-      // Names the asset the cover binds, but gives nothing to resolve it from.
-      sampleAssets: { images: [{ assetId: "cover-photo" }] },
+      // Names the asset the cover binds, but gives nothing to resolve it from. Every OTHER
+      // image the sample references is supplied properly, so the referenced-asset precheck
+      // passes (the id IS declared) and the failure under test is the one this asserts:
+      // a declared entry with no bytes behind it.
+      sampleAssets: { images: [{ assetId: "cover-photo" }, ...fixture.sampleAssets.images.filter((image) => image.assetId !== "cover-photo")] },
     });
     await seedPassedValidation("thumb-badasset");
 
@@ -867,6 +880,12 @@ test("thumbnail render failure: thumbnailError is recorded on the record and lis
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
+      // article_brochure_v1 writes `https://render.assets.invalid/` in front of every image
+      // slot itself, so its sampleData's bare assetIds are now prechecked against
+      // assets.images[] like any other reference (2026-09-15 ruling). Without them this
+      // render never reaches the service at all, and the failure under test is masked by an
+      // ASSET_MISSING that has nothing to do with it.
+      sampleAssets: fixture.sampleAssets,
     });
     await seedPassedValidation("thumb-renderfail-err");
 
@@ -905,6 +924,12 @@ test("render service returns a PDF but no thumbnail: thumbnailError explains the
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
+      // article_brochure_v1 writes `https://render.assets.invalid/` in front of every image
+      // slot itself, so its sampleData's bare assetIds are now prechecked against
+      // assets.images[] like any other reference (2026-09-15 ruling). Without them this
+      // render never reaches the service at all, and the failure under test is masked by an
+      // ASSET_MISSING that has nothing to do with it.
+      sampleAssets: fixture.sampleAssets,
     });
     await seedPassedValidation("thumb-nopng-err");
 
@@ -947,6 +972,12 @@ test("a thumbnail that later succeeds clears any previously recorded thumbnailEr
       templateJson: fixture.templateJson,
       renderer: "chromium",
       sampleData: fixture.sampleData,
+      // article_brochure_v1 writes `https://render.assets.invalid/` in front of every image
+      // slot itself, so its sampleData's bare assetIds are now prechecked against
+      // assets.images[] like any other reference (2026-09-15 ruling). Without them this
+      // render never reaches the service at all, and the failure under test is masked by an
+      // ASSET_MISSING that has nothing to do with it.
+      sampleAssets: fixture.sampleAssets,
     });
     await seedPassedValidation("thumb-recover");
     const { trigger } = await withStubbedTrigger(() => publish("thumb-recover"));
