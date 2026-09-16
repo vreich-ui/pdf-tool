@@ -80,6 +80,28 @@ Invariants supported by code:
 
 `assets.images[]` entries are `{assetId, dataUri}` or `{assetId, blobKey, storeName?}` / `{assetId, artifactReference: {blobKey, storeName?}}` (`job-assets.ts:1-30`). Blob-backed entries are read from a store that must be one of the grant-named stores (`projectStoreNames()` membership) — a `storeName` outside that set is refused. Every image, whether asset or `data` field, must decode as a real PNG/JPEG/WebP (`image-decode.ts`); `http(s)://` values are rejected with `IMAGE_DECODE_ERROR` (import first with `import_image_from_url`). For chromium/typst the bytes are inlined into the render-service request (the storage grant never leaves Netlify).
 
+### 5.1 The chromium image-slot contract — one data shape, two template idioms
+
+**A chromium image slot's value is the BARE `assetId` of an `assets.images[]` entry.** That is the whole caller-facing contract, for every template in the fleet, whichever idiom the template is written in (ruling 2026-09-07, corrected 2026-09-15). A caller — the platform's article → render-data mapper above all — never writes `https://render.assets.invalid/` itself and never needs to know which idiom a template uses.
+
+Templates do differ, and the difference is settled inside pdf-tool:
+
+| Form | Template source | What pdf-tool does with the slot value | Also accepted |
+|---|---|---|---|
+| literal | `src="https://render.assets.invalid/hero.png"` | nothing — no slot; the id must exist in `assets.images[]` or `ASSET_MISSING` | — |
+| value | `src="{{ coverImage }}"` | a bare id naming a **declared** asset is rewritten to `https://render.assets.invalid/<id>` (`image-slots.ts`) | the full virtual URL verbatim, a `data:` URI |
+| prefixed | `src="https://render.assets.invalid/{{ coverImage }}"` | **nothing** — the template already wrote the origin, so the bare id is passed through | `""` (= no image, left to the template's own `{% if %}`); nothing else |
+| composed | `src="https://cdn.example.com/{{ coverImage }}.png"` | nothing, and no precheck — the slot is a URL fragment pdf-tool cannot reason about | — |
+
+The form is **declared by the template's own source**, not by an author annotation: `derive-render-data-schema.ts` reads the characters immediately before each `{{` (liquidjs's own token offset, so it works inside `{% render %}` partials too), classifies them through the single detector in `image-slot-form.ts`, and publishes the answer per slot as `x-slotForm` next to `x-slotKind: imageRef` — visible in `derive_render_data_schema`, in a derived `renderDataSchema`, and in each slot's own `description`. Published template versions are immutable and no template anywhere had to change.
+
+`asset-precheck.ts` enforces it before dispatch (`render.ts:198`), with two codes:
+
+- **`ASSET_REFERENCE_DOUBLED`** — a prefixed slot whose value is already a reference (the virtual URL, a `data:` URI, any absolute URL), or template source literally containing `render.assets.invalid/https://`. Either way the origin would be written twice and chromium asked for `https://render.assets.invalid/https://render.assets.invalid/<id>`, which the route handler aborts — a broken-image box inside a job that still reports `complete`. Reported before `ASSET_MISSING`, naming the slot and the value's *shape*, never the value.
+- **`ASSET_MISSING`** — a prefixed slot whose bare value names no declared asset now fails like any other reference. Until 2026-09-15 a prefixed slot was checked by nothing at all: form 1's regex needs an id character after the slash (`{` is not one) and form 2's needs the Liquid output to be the whole attribute value.
+
+Absent, `null` and (for a prefixed slot) `""` are not this gate's business — a loop local and an `{% if %}`-guarded optional are correct inputs (see §W3 in `asset-precheck.ts`). A slot a template writes in **both** a value and a prefixed position is reported `mixed`, rewritten by nothing, and fails one gate or the other whatever value it is sent: that template contradicts itself and no value can satisfy it.
+
 ## 6. Security boundary per engine
 
 | Engine | Untrusted input | Containment |
