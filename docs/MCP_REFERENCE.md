@@ -856,3 +856,4 @@ Attach a storage grant (+ optional descriptor) to THIS session so later calls on
 Liveness + capability check: performs a write/read/delete round-trip on one diagnostic key (`health/probe.json`) in the `agent-artifact-jobs` store and returns the machine-readable capability manifest (every tool, and which are required vs optional per flow). Call this first, WITHOUT `storage` — with no grant the probe hits pdf-tool's own storage; with a grant attached (per call or via set_storage_grant) the probe currently runs against the caller's `agent-artifact-jobs` store instead. Works with a degraded/stateless session. Not strictly read-only (a probe key is written and deleted); it never touches artifacts, templates or policies.
 
 </details>
+
